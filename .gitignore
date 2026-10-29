@@ -1,5 +1,4 @@
 .env
-.env.local
 .env.*
 !.env.example
 *.pem
@@ -10,3 +9,4 @@ data/*
 *.sqlite*
 .DS_Store
 .vercel/
+*.zip

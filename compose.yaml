@@ -1,0 +1,11 @@
+# Optional self-hosting, requires DATABASE_URL/APP_URL/SESSION_SECRET in .env
+services:
+  reviewforge:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+    ports:
+      - '127.0.0.1:3000:3000'
