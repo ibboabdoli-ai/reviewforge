@@ -1,0 +1,12 @@
+.env
+.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+node_modules/
+data/*
+!data/.gitkeep
+*.sqlite*
+.DS_Store
+.vercel/
