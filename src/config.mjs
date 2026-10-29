@@ -8,6 +8,7 @@ export const config = {
   sessionSecret: process.env.SESSION_SECRET || (process.env.NODE_ENV==='production'?'':randomBytes(32).toString('hex')),
   demoMode: process.env.NODE_ENV !== 'production' && process.env.DEMO_MODE !== 'false',
   reviewPostMode: process.env.REVIEW_POST_MODE || 'dry-run',
+  aiReviewEnabled: process.env.AI_REVIEW_ENABLED === 'true',
   nodeEnv: process.env.NODE_ENV || 'development',
   github: {
     clientId: process.env.GITHUB_CLIENT_ID || '',
@@ -39,7 +40,7 @@ export function assertConfig() {
 export function integrations() {
   return {
     github: !!(config.github.clientId && config.github.clientSecret && config.github.appId && config.github.privateKey && config.github.webhookSecret && config.sessionSecret.length >= 32),
-    ai: !!config.openai.apiKey,
+    ai: config.aiReviewEnabled && !!config.openai.apiKey,
     billing: !!(config.stripe.secret && config.stripe.webhookSecret && config.stripe.pricePro)
   };
 }

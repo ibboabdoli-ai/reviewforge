@@ -71,6 +71,7 @@ async function webhookGithub(req,res){
   const exists=await db.prepare('SELECT id FROM deliveries WHERE id=?').get(delivery);
   if(exists){send(res,200,'Duplicate delivery','text/plain');return;}
   const payload=JSON.parse(raw),event=req.headers['x-github-event'];
+  let queued=false;
   if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)){
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
@@ -85,6 +86,7 @@ async function webhookGithub(req,res){
         const row=await db.prepare(`INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status)
           VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING`).run(inst.id,repo.id,pr.number,pr.title?.slice(0,250)||'',pr.user?.login||'',pr.head?.sha||'');
         if(row.changes){
+          queued=true;
           const r=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,pr.number,pr.head.sha);
           await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(r.id);
         }
@@ -104,6 +106,19 @@ async function webhookGithub(req,res){
     }
   }
   await db.prepare('INSERT INTO deliveries(id) VALUES(?)').run(delivery);
+  // Run a newly queued review after acknowledging GitHub. Vercel waitUntil retains
+  // the function lifetime; PostgreSQL claimJob ensures at-most-one active worker.
+  // No model call is scheduled until AI_REVIEW_ENABLED=true AND a key exists.
+  if (queued && process.env.VERCEL && integrations().github && integrations().ai) {
+    try {
+      const { waitUntil } = await import('@vercel/functions');
+      waitUntil(processQueue().catch(error =>
+        console.error('[worker] background review failed:', String(error.message).slice(0,180))));
+    } catch(error) {
+      // The job remains queued in Neon for recovery; do not falsely report delivery failure.
+      console.error('[worker] schedule unavailable:', String(error.message).slice(0,180));
+    }
+  }
   send(res,202,'Accepted','text/plain');
 }
 let busy=false;
