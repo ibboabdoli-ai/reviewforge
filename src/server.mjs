@@ -250,3 +250,6 @@ const cleanup=setInterval(async()=>{await db.prepare('DELETE FROM sessions WHERE
 process.on('SIGINT',()=>{server.close();db.close();process.exit(0);});
 process.on('SIGTERM',()=>{server.close();db.close();process.exit(0);});
 }
+
+// Vercel Node.js builder may choose this module as its detected entrypoint.
+export default handler;
