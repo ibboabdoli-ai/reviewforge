@@ -1,6 +1,9 @@
 {
   "version": 2,
   "framework": null,
+  "regions": [
+    "fra1"
+  ],
   "functions": {
     "api/index.mjs": {
       "maxDuration": 60
