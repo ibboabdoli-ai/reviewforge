@@ -10,6 +10,7 @@ import { localDemoReview } from './reviewer.mjs';
 import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
+import { createLimiter } from './rate-limit.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
@@ -20,11 +21,7 @@ const staticFiles = {
   '/app.js':['text/javascript; charset=utf-8', readFileSync(new URL('../public/app.js', import.meta.url))],
   '/favicon.svg':['image/svg+xml', readFileSync(new URL('../public/favicon.svg', import.meta.url))],
 };
-const reqCounts=new Map();
-function limited(req,key,max=20){
-  const id=(req.socket.remoteAddress||'local')+key,now=Date.now();let item=reqCounts.get(id);
-  if(!item||now-item.start>600000)item={start:now,count:0};item.count++;reqCounts.set(id,item);return item.count>max;
-}
+const limited=createLimiter();
 const headers={
  'X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin',
  'X-Frame-Options':'DENY','Permissions-Policy':'camera=(), microphone=(), geolocation=()',
