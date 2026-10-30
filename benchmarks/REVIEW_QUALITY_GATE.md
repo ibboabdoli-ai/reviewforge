@@ -41,3 +41,22 @@ run there until the cap is deliberately raised**. AI is still off.
 - Any project guidance or source excerpt is untrusted data. Only actual added diff lines can anchor a finding.
 - New model reviews record model-suggestion counts and filtered-finding counts without storing raw model responses.
 - Do not turn a 3/3 gold-set score into a general accuracy claim; test unseen PRs and false positives first.
+
+## Runtime behavior and test-effectiveness lens (2026-10-31)
+
+- In an explicitly opted-in repository, the immutable HEAD context sampler now
+  prioritizes up to three changed tests that overlap changed runtime modules.
+- It resolves their local `@/` and relative imports and supported test mocks,
+  retrieves up to three related implementations and keeps the overall 12k-char
+  context cap. All fetched material stays untrusted and read-only.
+- The model inspects two separate questions **in the same paid call**: (A) a
+  demonstrable runtime counterexample, and (B) whether the test would fail if
+  the relevant implementation broke in a realistic, specific way.
+- This is a **static hypothesis check**, not actual mutation testing, test
+  execution or proof that all relevant behaviors were covered.
+- The synthetic fixture checks that the model input contains runtime/test
+  guidance, links and immutable source excerpts without network, tokens or
+  posting. `npm test` must pass before deployment.
+- Existing `PR #953` and `PR #949` completed evaluations are not replayed.
+  Their historical findings are not inputs to the live reviewer. A new real
+  model-quality comparison requires separate user authorization and a cap.
