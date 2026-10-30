@@ -137,7 +137,7 @@ test('opted-in incremental flow passes context to model without GitHub posting',
   assert.equal(result.posted,0);
   assert.equal(posts,0);
   assert.ok(calls>0&&calls<=4);
-  assert.ok(modelInputs.every(o=>o.model==='DEEP'));
+  assert.ok(modelInputs.every(o=>o.model===config.openai.modelDeep));
   assert.ok(modelInputs.every(o=>o.reviewContext.sourceFiles.includes('src/lib/company-directory-official-facts-errors.ts')));
  }finally{config.aiAutoModelRepositories=previousModels;config.aiContextRepositories=previousContext;}
 });
