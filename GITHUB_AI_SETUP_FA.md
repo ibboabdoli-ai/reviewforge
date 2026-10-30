@@ -8,13 +8,15 @@
 
 - مخزن: https://github.com/ibboabdoli-ai/reviewforge
 - سرویس: https://reviewforge-wzardmn.vercel.app
-- انتشار آخر در Vercel: READY؛ پاسخ HTTP زنده باید جداگانه بررسی شود.
+- انتشار محافظ‌های صف و هزینه در Vercel: READY؛ `/healthz` پاسخ ۲۰۰ و دیتابیس ready برگردانده است.
 - `APP_URL` در Vercel روی همین آدرس تنظیم شده است.
 - `GITHUB_APP_ID`، `GITHUB_APP_SLUG` و `GITHUB_CLIENT_ID` موجودند. نام App: `reviewforge-ibbo-dev`.
-- نام متغیرهای رمزدار `GITHUB_CLIENT_SECRET`، `GITHUB_PRIVATE_KEY` و `GITHUB_WEBHOOK_SECRET` در تنظیمات Production ثبت شده‌اند، **اما درست‌بودن مقدارشان تأیید نشده است**.
+- `GITHUB_CLIENT_SECRET`، `GITHUB_PRIVATE_KEY` و `GITHUB_WEBHOOK_SECRET` در Production تنظیم شده‌اند و اتصال OAuth و بررسی PR آزمایشی با همین GitHub App موفق بوده است.
 - `DATABASE_URL` و `SESSION_SECRET` و `WORKER_SECRET` در پروژه ثبت شده‌اند؛ مقادیر مخفی را آشکار نکنید.
 - `REVIEW_POST_MODE=dry-run` و `AI_REVIEW_ENABLED=false`. بنابراین **هیچ بررسی پولی و هیچ کامنت خودکاری نباید فعال باشد**.
-- `OPENAI_API_KEY` در فهرست تنظیمات فعلی وجود ندارد.
+- `OPENAI_API_KEY` به‌صورت محرمانه ثبت شده و در آزمایش PR آزمایشی کار کرده است. دو تست dry-run و live هر کدام ۳ ایراد عمدی را پیدا کردند؛ در تست live یک Review و ۳ کامنت خطی در GitHub ثبت شد.
+- برای جلوگیری از مصرف ناخواسته، هوش مصنوعی دوباره غیرفعال شد؛ `AI_ALLOWED_REPOSITORIES=ibboabdoli-ai/reviewforge-sandbox` و `AI_DAILY_REQUEST_LIMIT=2` فقط اجازه ۲ تلاش مدل در روز UTC می‌دهند.
+- مسیر بازیابی `GET /internal/process-queue` فقط با `CRON_SECRET` معتبر باز است؛ Vercel Cron روزانه ساعت ۰۴:۰۰ UTC تعریف شده، اما وقوع اولین اجرای زمان‌بندی‌شده هنوز تأیید نشده است.
 - پرداخت Stripe هنوز فعال نشده است. این نسخه هنوز آماده فروش عمومی نیست.
 
 ## ۱. نشانی‌های GitHub App را بدون ساخت App جدید تطبیق بدهید
@@ -87,7 +89,7 @@ AI_REVIEW_ENABLED=false
 
 تنها پس از موفقیت آزمایش dry-run، بررسی زمان‌بندی و بازیابی Jobها، محدودکردن هزینه، و تأیید مالک می‌توان `REVIEW_POST_MODE=live` را در محیط آزمایش فعال کرد. یک Commit جدید روی PR آزمایشی ایجاد کنید و بررسی کنید که نتیجه مرتبط با همان HEAD منتشر شود.
 
-برای سرورلس، پردازش اولیه با `waitUntil` شروع می‌شود؛ بازیابی کارهای معوق به Scheduler و مسیر محافظت‌شده `POST /internal/process-queue` با `WORKER_SECRET` نیاز دارد. این بخش را قبل از اتکای عملیاتی آزمایش کنید.
+برای سرورلس، پردازش فوری با `waitUntil` انجام می‌شود. بازیابی روزانه با Vercel Cron و `CRON_SECRET` تعریف شده، و فراخوانی دستی محافظت‌شده با `POST /internal/process-queue` و `WORKER_SECRET` ممکن است. تا زمان تأیید اجرای واقعی Cron و تست بازیابی Job معوق، قابلیت بازیابی را کامل تلقی نکنید. در پلن Hobby زمان‌بندی بیشتر از یک بار در روز پذیرفته نمی‌شود؛ محدودیت روزانه تعداد درخواست‌ها به‌معنای سقف قطعی مبلغ دلار نیست.
 
 ## ۷. پرداخت و عرضه عمومی
 
@@ -95,13 +97,16 @@ AI_REVIEW_ENABLED=false
 
 ## چک‌لیست اعتبارسنجی
 
-- [ ] ورود GitHub موفق
-- [ ] نصب App فقط روی مخزن تست
-- [ ] Sync installations موفق
-- [ ] دریافت Webhook امضاشده HTTP 202
-- [ ] مشاهده Review در داشبورد در حالت dry-run
-- [ ] عدم ارسال کامنت در dry-run
-- [ ] بازیابی Jobهای معوق تست‌شده
-- [ ] بررسی امنیت و هزینه قبل از live
+- [x] ورود GitHub موفق
+- [x] نصب App فقط روی مخزن تست
+- [x] Sync installations موفق
+- [x] دریافت Webhook امضاشده
+- [x] بررسی واقعی در حالت dry-run و بدون کامنت
+- [x] تست موقت live روی مخزن آزمایشی و ثبت ۳ کامنت خطی
+- [x] بازگشت به `AI_REVIEW_ENABLED=false` و `REVIEW_POST_MODE=dry-run`
+- [x] سقف روزانه اتمیک و محدودیت مخزن آزمایشی
+- [x] مسیر بازیابی بدون رمز به HTTP 403 پاسخ می‌دهد
+- [ ] مشاهده اجرای واقعی Cron و تست بازیابی پس از شکست
+- [ ] رصد هزینه، امنیت چندمستاجری و فعال‌سازی Stripe Test Mode
 
 **هیچ کلید خصوصی را از طریق چت ارسال نکنید.**
