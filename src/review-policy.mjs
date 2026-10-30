@@ -16,12 +16,15 @@ export function dailyRequestLimit(raw='1') {
   // Reject malformed, negative or excessive limits instead of falling back.
   return Number.isSafeInteger(limit) && limit>=0 && limit<=10 ? limit : 0;
 }
-export async function reserveDailyReview(db,limit,at=Date.now()){
-  if(!Number.isSafeInteger(limit)||limit<=0)return false;
+export async function reserveDailyReview(db,limit,at=Date.now(),count=1){
+  if(!Number.isSafeInteger(limit)||limit<=0||
+    !Number.isSafeInteger(count)||count<1||count>limit)return false;
   const day=new Date(at).toISOString().slice(0,10);
-  const row=await db.prepare(`INSERT INTO ai_daily_limits(day,used) VALUES(?,1)
-    ON CONFLICT(day) DO UPDATE SET used=ai_daily_limits.used+1
-    WHERE ai_daily_limits.used < ? RETURNING used`).get(day,limit);
+  // One atomic operation reserves the entire multi-batch review (no partial
+  // spending if the remaining daily allowance is insufficient).
+  const row=await db.prepare(`INSERT INTO ai_daily_limits(day,used) VALUES(?,?)
+    ON CONFLICT(day) DO UPDATE SET used=ai_daily_limits.used+?
+    WHERE ai_daily_limits.used+? <= ? RETURNING used`).get(day,count,count,count,limit);
   return !!row;
 }
 export function nextUtcDay(at=Date.now()){

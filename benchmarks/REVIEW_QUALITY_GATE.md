@@ -20,3 +20,13 @@ Raw comment counts are not accuracy metrics.
 
 Large reviews exceeding 35 files, 65,000 patch characters or 6,500 characters per file are flagged `partial`; ReviewForge does not post that incomplete result as a complete review.
 Follow-up work: secure bounded multi-batch review and cross-file context with per-model-call budget accounting, scoring harness and evidence-grounded differential comparison.
+
+## Multi-batch reviewer
+
+ReviewForge now partitions diffs into <=6,500-character valid hunks and
+groups them in <=65,000-character / 35-entry batches. Up to four model
+batches are supported by default, with verified new-line anchors. Entire
+batch count is reserved atomically against the daily model-attempt budget
+before contacting the model. A 79-file PR typically needs at least three
+model attempts: **the existing production daily cap of two means it cannot
+run there until the cap is deliberately raised**. AI is still off.

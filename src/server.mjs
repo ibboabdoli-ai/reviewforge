@@ -142,19 +142,25 @@ export async function processQueue(){
       await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
       return 'skipped';
     }
-    if(!await reserveDailyReview(db,config.aiDailyRequestLimit)){
-      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=?,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE id=?")
-        .run(nextUtcDay(),job.job_id);
-      await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
-        .run('queued','Daily AI request limit reached; deferred until tomorrow (UTC).',job.id);
-      return 'deferred';
-    }
     const result=await analyzePullRequest({
       repository:job.full_name,
       number:job.pr_number,
       headSha:job.head_sha,
       installationId:job.installation_id
+    },{
+      reserveModelCalls:async count=>{
+        if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
+        const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
+        return allowed?{allowed:true}:{allowed:false,reason:'daily-used'};
+      }
     });
+    if(result.status==='deferred'){
+      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=?,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE id=?")
+        .run(nextUtcDay(),job.job_id);
+      await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
+        .run('queued',result.summary,job.id);
+      return 'deferred';
+    }
     await db.prepare("UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?")
       .run(result.status,result.summary,JSON.stringify(result.findings),result.posted,job.id);
     await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);

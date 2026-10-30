@@ -57,6 +57,91 @@ export function coverageSummary(c){
   if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed or sensitive path(s) ignored.`;
   return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity omissions. Unchecked changes may contain bugs.`;
 }
+/**
+ * Plan a PR review as bounded, deterministic batches. This is separate from
+ * safeFiles(), which is kept for compatibility with legacy integrations.
+ *
+ * Critical invariant: never discard or truncate a changed hunk and label it
+ * fully reviewed. Giant hunks are split at line boundaries, with accurate
+ * new-file starting line numbers for inline GitHub review anchors.
+ */
+export const MAX_MODEL_BATCHES = 4;
+function splitUnifiedPatch(patch){
+  if(!/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(patch))return null;
+  if(patch.length<=MAX_FILE_PATCH)return [patch];
+  const lines=patch.split('\n');
+  if(lines.at(-1)==='')lines.pop();
+  let oldLine=0,newLine=0,seenHeader=false,startOld=0,startNew=0;
+  let segment=[],length=0,oldCount=0,newCount=0;
+  const result=[];
+  const flush=()=>{
+    if(!segment.length)return true;
+    const header='@@ -'+startOld+','+oldCount+' +'+startNew+','+newCount+' @@\n';
+    const part=header+segment.join('\n');
+    if(part.length>MAX_FILE_PATCH)return false;
+    result.push(part);segment=[];length=0;oldCount=0;newCount=0;
+    return result.length<=20;
+  };
+  for(const line of lines){
+    const match=line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if(match){
+      if(!flush())return null;
+      oldLine=Number(match[1]);newLine=Number(match[2]);seenHeader=true;
+      startOld=oldLine;startNew=newLine;continue;
+    }
+    if(!seenHeader || !/^[ +\\-]/.test(line))return null;
+    if(line.length>MAX_FILE_PATCH-80)return null;
+    const increment=line.length+1;
+    if(segment.length && length+increment>MAX_FILE_PATCH-80){
+      if(!flush())return null;
+      startOld=oldLine;startNew=newLine;
+    }
+    segment.push(line);length+=increment;
+    if(line[0]===' '||line[0]==='-'){oldLine++;oldCount++;}
+    if(line[0]===' '||line[0]==='+'){newLine++;newCount++;}
+  }
+  if(!flush())return null;
+  return result.length?result:null;
+}
+export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES}={}){
+  if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
+  if(!Number.isSafeInteger(maxBatches)||maxBatches<1||maxBatches>10)throw new RangeError('Invalid maxBatches');
+  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
+    missingPatch:0,oversized:0,limited:0,complete:true,batches:0,segments:0,reviewedSegments:0};
+  const candidates=[];
+  for(const [index,file] of changedFiles.entries()){
+    if(!file||file.status==='removed'||typeof file.filename!=='string'
+       ||SKIPPED_PATH.test(file.filename)||GENERATED_PATH.test(file.filename)){
+      coverage.excluded++;continue;
+    }
+    coverage.reviewable++;
+    if(typeof file.patch!=='string'||!file.patch.trim()){coverage.missingPatch++;continue;}
+    const chunks=splitUnifiedPatch(redactKnownTokens(file.patch));
+    if(!chunks){coverage.oversized++;continue;}
+    coverage.segments+=chunks.length;
+    candidates.push({index,filename:file.filename,chunks});
+  }
+  candidates.sort((a,b)=>priority(a.filename)-priority(b.filename)||a.index-b.index);
+  const batches=[],seen=new Set();
+  let batch=[],size=0;
+  const flush=()=>{if(batch.length){batches.push(batch);batch=[];size=0;}};
+  for(const file of candidates){
+    let allIncluded=true;
+    for(const patch of file.chunks){
+      if(batch.length&&(batch.length>=MAX_FILES||size+patch.length>MAX_TOTAL_PATCH))flush();
+      if(batches.length>=maxBatches){coverage.limited++;allIncluded=false;continue;}
+      batch.push({filename:file.filename,patch});size+=patch.length;
+      coverage.reviewedSegments++;
+    }
+    if(allIncluded)seen.add(file.filename);
+  }
+  flush();
+  coverage.reviewed=seen.size;
+  coverage.batches=batches.length;
+  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited;
+  return {batches,coverage};
+}
+
 const severity=['critical','high','medium','low'];
 export function validateFindings(raw,files) {
   const byPath=new Map(files.map(f=>[f.filename,addedLines(f.patch)]));

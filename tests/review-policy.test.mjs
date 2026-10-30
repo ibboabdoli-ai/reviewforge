@@ -45,3 +45,21 @@ test('worker gate and cron auth are explicitly implemented',async()=>{
   assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit\)/);
   assert.match(server,/req\.method==='GET'\?process\.env\.CRON_SECRET:process\.env\.WORKER_SECRET/);
 });
+
+test('atomically reserve exactly N model calls in the daily budget', async()=>{
+ const {openDatabase}=await import('../src/db.mjs');
+ const {reserveDailyReview}=await import('../src/review-policy.mjs');
+ const {mkdtempSync,rmSync}=await import('node:fs');
+ const {tmpdir}=await import('node:os');
+ const {join}=await import('node:path');
+ const root=mkdtempSync(join(tmpdir(),'rf-budget-'));
+ const db=openDatabase(join(root,'test.sqlite'));
+ try {
+   const at=Date.UTC(2026,9,30,4);
+   assert.equal(await reserveDailyReview(db,3,at,2),true);
+   assert.equal(await reserveDailyReview(db,3,at,2),false);
+   assert.equal(await reserveDailyReview(db,3,at,1),true);
+   assert.equal(await reserveDailyReview(db,3,at,1),false);
+   assert.equal(db.prepare('SELECT used FROM ai_daily_limits WHERE day=?').get('2026-10-30').used,3);
+ } finally {db.close();rmSync(root,{recursive:true,force:true});}
+});
