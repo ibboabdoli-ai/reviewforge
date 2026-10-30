@@ -141,3 +141,26 @@ test('checkpoint corruption fails closed before any more model calls',async()=>{
     assert.equal(f.postCount(),0);
   }finally{f.dispose();}
 });
+
+test('large diffs are split into small model payloads and resumable checkpoints',async()=>{
+ const f=fixture(8);
+ try{
+  f.setFiles(Array.from({length:8},(_,i)=>({
+   filename:'src/heavy'+i+'.ts',status:'added',
+   patch:'@@ -0,0 +1,1 @@\n+'+'x'.repeat(5050)
+  })));
+  const sizes=[];
+  f.deps.reviewWithAI=async batch=>{
+   sizes.push(batch.reduce((sum,file)=>sum+file.patch.length,0));
+   return {summary:'Checked bounded payload',findings:[]};
+  };
+  const first=await analyzePullRequestStep(target,f.deps);
+  assert.equal(first.status,'progress');
+  const second=await analyzePullRequestStep(target,f.deps);
+  assert.equal(second.status,'completed');
+  assert.deepEqual(first.progress,{completed_batches:1,total_batches:2});
+  assert.equal(sizes.length,2);
+  assert.ok(sizes.every(n=>n<=24000));
+  assert.deepEqual(f.quotas,[2]);
+ }finally{f.dispose();}
+});
