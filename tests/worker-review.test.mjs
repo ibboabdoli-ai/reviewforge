@@ -124,3 +124,27 @@ test('possible AI spending makes the first failed attempt terminal, without an a
  assert.match(server,/finished_at=CURRENT_TIMESTAMP WHERE id=\?/);
  assert.match(server,/priorJob\?\.status==='queued'/);
 });
+
+test('worker status exposes batch progress without premature findings or approval',async()=>{
+ const f=fixture();
+ try{
+  const created=await requestWorkerReview(f.db,f.body,f.deps);
+  f.db.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches,results_json) VALUES(?,?,?,?,?)")
+    .run(created.id,'f'.repeat(64),2,1,JSON.stringify([{summary:'first batch',findings:[]}]));
+  const result=await getWorkerReviewStatus(f.db,f.body,policy);
+  assert.equal(result.status,'queued');
+  assert.equal(result.posted,0);
+  assert.equal(result.findings.length,0);
+  assert.deepEqual(result.progress,{completed_batches:1,total_batches:2});
+ }finally{f.dispose();}
+});
+test('worker only kicks its exact queued review and dashboard reconciles expired leases',()=>{
+ const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ const postgres=readFileSync(new URL('../src/db-postgres.mjs',import.meta.url),'utf8');
+ assert.match(server,/processQueue\(Number\(result\.id\)\)/);
+ assert.match(server,/db\.claimJob\(reviewId\)/);
+ assert.match(server,/await db\.reconcileExpiredJobs\?\.\(\)/);
+ assert.match(postgres,/async reconcileExpiredJobs\(\)/);
+ assert.match(postgres,/AND \(\$3::bigint IS NULL OR j\.review_id=\$3\)/);
+ assert.doesNotMatch(postgres,/UPDATE jobs SET status='queued' WHERE status='running'/);
+});
