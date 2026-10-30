@@ -91,10 +91,11 @@ test('source excerpts include changed hunks with source line labels',()=>{
  assert.ok(excerpt.length<=2700);
 });
 test('PR953-style queue change selects deep model and specialist review skill',()=>{
- const choice=selectReviewModel(files,{fastModel:'FAST',deepModel:'DEEP'});
+ const choice=selectReviewModel(files,{fastModel:'FAST',deepModel:'DEEP',enhancedRisk:true});
  assert.equal(choice.model,'DEEP');
  assert.equal(choice.tier,'deep');
  assert.match(choice.reason,/high-risk/);
+ assert.equal(selectReviewModel(files,{fastModel:'FAST',deepModel:'DEEP'}).model,'FAST');
  const skills=selectedReviewSkills(files).map(s=>s.id);
  assert.ok(skills.includes('domain-integrity'));
  assert.ok(skills.includes('tests'));

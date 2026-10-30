@@ -55,7 +55,8 @@ export async function analyzePullRequestStep({
     : null;
   // Model selection must consider the entire PR, not only the current batch.
   const modelChoice=repositoryAllowed(repository,config.aiAutoModelRepositories)
-    ?selectReviewModel(batches.flat(),{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep})
+    ?selectReviewModel(batches.flat(),{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep,
+      enhancedRisk:useContext})
     :null;
   // Never pay for a scan that is known to omit required diff hunks.
   if(!coverage.complete || !batches.length) return {
