@@ -11,6 +11,7 @@ import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
+import { repositoryAllowed, reserveDailyReview, nextUtcDay } from './review-policy.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
@@ -76,7 +77,7 @@ async function webhookGithub(req,res){
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
-    if(installed && !pr.draft && integrations().ai){
+    if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
       await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private) VALUES(?,?,?,?,?,?)
         ON CONFLICT(id) DO NOTHING`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
@@ -133,6 +134,19 @@ export async function processQueue(){
   if(!db.claimJob) await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
   await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
   try {
+    if(!repositoryAllowed(job.full_name,config.aiAllowedRepositories)){
+      await db.prepare('UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?')
+        .run('skipped','Repository not approved for AI review.',job.id);
+      await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
+      return;
+    }
+    if(!await reserveDailyReview(db,config.aiDailyRequestLimit)){
+      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=?,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE id=?")
+        .run(nextUtcDay(),job.job_id);
+      await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
+        .run('queued','Daily AI request limit reached; deferred until tomorrow (UTC).',job.id);
+      return;
+    }
     const result=await analyzePullRequest({
       repository:job.full_name,
       number:job.pr_number,
@@ -161,8 +175,9 @@ export async function handler(req,res){
       res.writeHead(200,{...headers,'Content-Type':staticFiles[path][0],'Cache-Control':'public,max-age=3600'});res.end(staticFiles[path][1]);return;
     }
     const c=await ctx(req);
-    if(path==='/internal/process-queue'&&req.method==='POST'){
-      const expected=process.env.WORKER_SECRET;
+    if(path==='/internal/process-queue' && (req.method==='POST'||req.method==='GET')){
+      // Vercel Cron uses GET with CRON_SECRET; external workers use POST with WORKER_SECRET.
+      const expected=req.method==='GET'?process.env.CRON_SECRET:process.env.WORKER_SECRET;
       if (!expected || expected.length<32 || !safeCompare(req.headers.authorization,`Bearer ${expected}`)) {send(res,403,'Forbidden','text/plain');return;}
       await processQueue();send(res,200,'processed','text/plain');return;
     }

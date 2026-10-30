@@ -61,6 +61,10 @@ export function openDatabase(file) {
       id TEXT PRIMARY KEY,
       received_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS ai_daily_limits (
+      day TEXT PRIMARY KEY,
+      used INTEGER NOT NULL DEFAULT 0 CHECK(used >= 0)
+    );
     CREATE TABLE IF NOT EXISTS jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       review_id INTEGER NOT NULL UNIQUE REFERENCES reviews(id),

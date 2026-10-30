@@ -14,5 +14,11 @@
       "source": "/(.*)",
       "destination": "/api/index"
     }
+  ],
+  "crons": [
+    {
+      "path": "/internal/process-queue",
+      "schedule": "0 4 * * *"
+    }
   ]
 }

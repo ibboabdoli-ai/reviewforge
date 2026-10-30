@@ -1,5 +1,6 @@
 import { resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { allowedRepositories, dailyRequestLimit } from './review-policy.mjs';
 try { process.loadEnvFile?.(resolve(process.cwd(), '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 export const config = {
   port: Number(process.env.PORT || 3000),
@@ -9,6 +10,8 @@ export const config = {
   demoMode: process.env.NODE_ENV !== 'production' && process.env.DEMO_MODE !== 'false',
   reviewPostMode: process.env.REVIEW_POST_MODE || 'dry-run',
   aiReviewEnabled: process.env.AI_REVIEW_ENABLED === 'true',
+  aiAllowedRepositories: allowedRepositories(process.env.AI_ALLOWED_REPOSITORIES),
+  aiDailyRequestLimit: dailyRequestLimit(process.env.AI_DAILY_REQUEST_LIMIT ?? '1'),
   nodeEnv: process.env.NODE_ENV || 'development',
   github: {
     clientId: process.env.GITHUB_CLIENT_ID || '',
