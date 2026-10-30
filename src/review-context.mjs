@@ -90,50 +90,134 @@ async function fetchFile({repository,sha,path,api,token}){
  * Full changed hunks still come from GitHub's PR diff, never from this helper.
  * The model must treat excerpts and project guidance as untrusted data.
  */
+
+export function isTestPath(path){
+  return typeof path==='string' &&
+    (/^(?:tests|e2e|__tests__)\//.test(path) ||
+     /(?:^|\/)[^/]+\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path));
+}
+export function testImplementationPaths(testPath,testText){
+  // Resolve static test imports and mocks. Never evaluate imported source.
+  const found=[],seen=new Set();
+  const pattern=/(?:\bfrom\s*|\bimport\s*\(\s*|\b(?:vi|jest)\.(?:mock|doMock)\(\s*|\brequire\(\s*)['"]([^'"]{1,160})['"]/g;
+  for(const match of String(testText).slice(0,45000).matchAll(pattern)){
+    const spec=match[1];
+    if(!spec.startsWith('./')&&!spec.startsWith('../')&&!spec.startsWith('@/'))continue;
+    const root=spec.startsWith('@/')?posix.normalize('src/'+spec.slice(2)):
+      posix.normalize(posix.join(posix.dirname(testPath),spec));
+    const paths=/\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(root)?[root]:
+      ['.ts','.tsx','.js','.jsx','.mjs'].map(ext=>root+ext);
+    const safe=paths.filter(p=>safeContextPath(p)&&!isTestPath(p));
+    if(!safe.length||seen.has(root))continue;
+    seen.add(root);found.push(safe);
+    if(found.length>=15)break;
+  }
+  return found;
+}
+export function prioritizeBehaviorTests(testFiles,sourceFiles){
+  const names=sourceFiles.map(f=>new Set(f.filename.toLowerCase().split(/[^a-z0-9]+/)
+    .filter(x=>x.length>3&&!['public','components','tests','source'].includes(x))));
+  const score=f=>{
+    const tokens=f.filename.toLowerCase().split(/[^a-z0-9]+/);
+    return Math.max(0,...names.map(words=>tokens.filter(t=>words.has(t)).length));
+  };
+  return testFiles.map((f,i)=>({f,i,rank:score(f)}))
+    .sort((a,b)=>b.rank-a.rank||a.i-b.i).map(x=>x.f);
+}
+export function relatedSourceExcerpt(source,maxChars=1800){
+  // Bounded representation of a related implementation module; not a diff.
+  const lines=String(source||'').split('\n');
+  const indices=new Set();
+  for(let i=0;i<Math.min(lines.length,16);i++)indices.add(i);
+  // Include exported functions even if they occur below a long import block.
+  for(let i=0;i<lines.length&&indices.size<100;i++){
+    if(/^\s*(?:export\s+)?(?:async\s+)?(?:function|class|const)\s+[A-Za-z_$]/.test(lines[i])){
+      for(let k=Math.max(0,i-2);k<Math.min(i+12,lines.length);k++)indices.add(k);
+    }
+  }
+  let text='',last=-2;
+  for(const i of [...indices].sort((a,b)=>a-b)){
+    const part=(i===last+1?'':'\n...\n')+'L'+(i+1)+': '+lines[i]+'\n';
+    if(text.length+part.length>maxChars)break;
+    text+=part;last=i;
+  }
+  return redactKnownTokens(text);
+}
+/**
+ * Bounded, source-only, SHA-pinned context. Test imports are ranked ahead of
+ * unrelated direct imports; exactly the same diff drives actual findings.
+ * No GitHub writes, checkouts, test execution or model calls occur here.
+ */
 export async function collectReviewContext({repository,sha,files,token,api}){
   if(!/^[\w.-]+\/[\w.-]+$/.test(repository) ||
      repository.split('/').some(segment=>segment==='.'||segment==='..'))
     throw new Error('Invalid repository');
   if(!Array.isArray(files))throw new TypeError('Review changed-files list required');
-  const changed=files.filter(f=>safeContextPath(f.filename) && typeof f.patch==='string');
-  const sourceFiles=changed.filter(f=>!/\.test\.[jt]sx?$|^tests\//.test(f.filename))
-    .slice(0,SOURCE_LIMIT);
+  const changed=files.filter(f=>safeContextPath(f.filename)&&typeof f.patch==='string');
+  const runtimeFiles=changed.filter(f=>!isTestPath(f.filename));
+  const tests=prioritizeBehaviorTests(changed.filter(f=>isTestPath(f.filename)),runtimeFiles).slice(0,3);
+  const sources=runtimeFiles.slice(0,2);
   const fetcher=path=>fetchFile({repository,sha,path,api,token});
-  const [ruleFile,...sourceBodies]=await Promise.all([
-    fetcher('.coderabbit.yaml'), ...sourceFiles.map(f=>fetcher(f.filename))
+  const [rule,...bodies]=await Promise.all([
+    fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
+    ...tests.map(f=>fetcher(f.filename))
   ]);
-  const candidates=[];
-  for(let i=0;i<sourceFiles.length;i++){
-    const file=sourceFiles[i],body=sourceBodies[i];
-    if(!body)continue;
-    const extra=sourceExcerpt(body,file.patch);
-    if(extra)candidates.push({path:file.filename,kind:'changed-file-excerpt',text:extra});
+  const sourceBodies=bodies.slice(0,sources.length),testBodies=bodies.slice(sources.length);
+  const candidates=[],included=new Set(),links=[],desired=[];
+  for(let i=0;i<sources.length;i++){
+    if(!sourceBodies[i])continue;
+    included.add(sources[i].filename);
+    candidates.push({path:sources[i].filename,kind:'changed-file-excerpt',
+      text:sourceExcerpt(sourceBodies[i],sources[i].patch,1800)});
   }
-  const imports=[];
-  for(let i=0;i<sourceFiles.length;i++){
-    const body=sourceBodies[i];
-    if(!body)continue;
-    for(const path of importedPaths(sourceFiles[i].filename,body)){
-      if(changed.some(c=>c.filename===path)||imports.includes(path))continue;
-      imports.push(path);
+  for(let i=0;i<tests.length;i++){
+    if(!testBodies[i])continue;
+    included.add(tests[i].filename);
+    candidates.push({path:tests[i].filename,kind:'changed-test-behavior',
+      text:sourceExcerpt(testBodies[i],tests[i].patch,1750)});
+    for(const options of testImplementationPaths(tests[i].filename,testBodies[i])){
+      const already=options.find(path=>included.has(path));
+      if(already)links.push({test:tests[i].filename,implementation:already});
+      else if(!desired.some(d=>d.options[0]===options[0]))
+        desired.push({test:tests[i].filename,options});
     }
   }
-  const other=imports.slice(0,IMPORT_LIMIT);
-  const bodies=await Promise.all(other.map(fetcher));
-  for(let i=0;i<other.length;i++){
-    if(!bodies[i])continue;
-    candidates.push({path:other[i],kind:'related-import',text:redactKnownTokens(bodies[i].slice(0,3100))});
+  if(!tests.length){
+    for(let i=0;i<sources.length;i++){
+      if(!sourceBodies[i])continue;
+      for(const path of importedPaths(sources[i].filename,sourceBodies[i])){
+        if(!included.has(path)&&!desired.some(d=>d.options.includes(path)))
+          desired.push({test:null,options:[path]});
+      }
+    }
   }
-  const projectRules=projectRuleExcerpts(ruleFile,changed.map(f=>f.filename));
+  let linked=0;
+  for(const entry of desired.slice(0,9)){
+    if(linked>=3)break;
+    for(const path of entry.options.slice(0,4)){
+      if(included.has(path))continue;
+      const body=await fetcher(path);
+      if(!body)continue;
+      candidates.push({path,kind:entry.test?'test-linked-implementation':'related-import',
+        text:relatedSourceExcerpt(body,1600)});
+      included.add(path);linked++;
+      if(entry.test)links.push({test:entry.test,implementation:path});
+      break;
+    }
+  }
+  const projectRules=projectRuleExcerpts(rule,changed.map(f=>f.filename));
   let used=projectRules.length;
   const snippets=[];
-  for(const c of candidates){
+  for(const candidate of candidates){
     const room=MAX_CONTEXT_CHARS-used-120;
     if(room<300)break;
-    const text=c.text.slice(0,Math.min(3200,room));
-    snippets.push({...c,text});
+    const text=candidate.text.slice(0,Math.min(room,1800));
+    if(!text)continue;
+    snippets.push({...candidate,text});
     used+=text.length+120;
   }
+  const snipped=new Set(snippets.map(s=>s.path));
   return {snippets,projectRules,sourceFiles:snippets.map(s=>s.path),
+    testLinks:links.filter(l=>snipped.has(l.test)&&snipped.has(l.implementation)).slice(0,8),
     totalChars:used,headSha:sha};
 }
