@@ -5,7 +5,8 @@ import { resolve } from 'node:path';
 import { config,assertConfig,integrations,production } from './config.mjs';
 import { openConfiguredDatabase, seedDemo,createSession,getUserBySession, allowedReviews } from './db.mjs';
 import { randomToken, cookies,cookie, csrfFor, safeCompare, validOrigin, verifyGithub, sha256 } from './security.mjs';
-import { githubOAuthCode, persistUserToken, githubApi, syncInstallations } from './github.mjs';
+import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken } from './github.mjs';
+import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
 import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
@@ -74,7 +75,8 @@ async function webhookGithub(req,res){
   if(exists){send(res,200,'Duplicate delivery','text/plain');return;}
   const payload=JSON.parse(raw),event=req.headers['x-github-event'];
   let queued=false;
-  if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)){
+  if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)
+     && !repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories)) {
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
@@ -95,6 +97,61 @@ async function webhookGithub(req,res){
           queued=true;
           const r=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,pr.number,pr.head.sha);
           await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(r.id);
+        }
+      }
+    }
+  }
+  if(event==='issue_comment' && isCodeRabbitQuotaEvent(payload)
+     && repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories)
+     && repositoryAllowed(payload.repository?.full_name,config.aiAllowedRepositories)
+     && repositoryAllowed(payload.repository?.full_name,config.aiShadowRepositories)
+     && integrations().ai) {
+    // GitHub signed webhook identifies the bot. Independently verify a trusted
+    // exact-current-head CodeRabbit request and absence of completed reviews.
+    const repo=payload.repository,inst=payload.installation;
+    const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
+    const rr=await db.prepare("SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1").get(repo.id,inst.id);
+    if(installed && rr){
+      const token=await installationToken(inst.id);
+      const fullName=repo.full_name,prNo=payload.issue.number;
+      const pull=await githubApi('/repos/'+fullName+'/pulls/'+prNo,token);
+      const head=pull.head?.sha;
+      if(pull.state==='open' && !pull.draft && pull.base?.ref==='main'
+        && /^[0-9a-f]{40}$/.test(head||'')
+        && pull.head?.repo?.full_name===fullName) {
+        async function allPages(path){
+          const values=[];
+          for(let page=1;page<=5;page++){
+            const part=await githubApi('/repos/'+fullName+'/'+path+'?per_page=100&page='+page,token);
+            if(!Array.isArray(part))throw new Error('Invalid GitHub review evidence');
+            values.push(...part);
+            if(part.length<100)return values;
+          }
+          throw new Error('CodeRabbit evidence exceeded pagination bound; fallback refused');
+        }
+        const comments=await allPages('issues/'+prNo+'/comments');
+        const request=currentHeadReviewRequest(comments,head,payload.comment);
+        if(request){
+          const [reviews,inline]=await Promise.all([
+            allPages('pulls/'+prNo+'/reviews'),allPages('pulls/'+prNo+'/comments')
+          ]);
+          if(!alreadyReviewedExactHead(reviews,inline,head,request.created_at)){
+            const allowance=await allowedReviews(db,installed.owner_user_id);
+            const unlimited=isUnlimitedShadowRepository(fullName,{
+              allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
+              unlimited:config.aiUnlimitedRepositories
+            });
+            if(allowance.used<allowance.limit||unlimited){
+              const row=await db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status) VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING")
+                .run(inst.id,repo.id,prNo,String(pull.title||'').slice(0,250),pull.user?.login||'',head);
+              if(row.changes){
+                const inserted=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?')
+                  .get(repo.id,prNo,head);
+                await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(inserted.id);
+                queued=true;
+              }
+            }
+          }
         }
       }
     }
