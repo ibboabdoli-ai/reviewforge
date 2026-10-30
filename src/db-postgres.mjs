@@ -30,8 +30,17 @@ export async function openPostgres(url){
   const query=async (sql,params)=>sharedPool.query(sqlForPostgres(sql),params);
   return {
     async claimJob(){
-      // Requeue stale work only after the previous function has had time to expire.
-      await query("UPDATE jobs SET status='queued' WHERE status='running' AND next_attempt_at<?",[Date.now()]);
+      // Serverless may terminate between model batches. NEVER replay stale
+      // running jobs automatically: repeated model calls would incur unknown
+      // costs and could present a partial review as a fresh clean result.
+      // One atomic statement fails the job and its review after lease expiry.
+      await query(`WITH expired AS (
+        UPDATE jobs SET status='failed' WHERE status='running'
+          AND next_attempt_at<$1 RETURNING review_id
+      ) UPDATE reviews SET status='failed', finished_at=CURRENT_TIMESTAMP,
+          summary='Review worker exceeded its execution lease. No clean review verdict was produced.',
+          error='Worker terminated or timed out; re-review requires an explicit new request.'
+        WHERE id IN (SELECT review_id FROM expired) AND status='running'`,[Date.now()]);
       // PostgreSQL row locking prevents concurrent invocations from claiming the same PR.
       const sql=`WITH candidate AS (
         SELECT j.id FROM jobs j
