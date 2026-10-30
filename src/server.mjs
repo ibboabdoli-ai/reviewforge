@@ -8,6 +8,7 @@ import { randomToken, cookies,cookie, csrfFor, safeCompare, validOrigin, verifyG
 import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken } from './github.mjs';
 import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
+import { enqueueManualReview } from './manual-review.mjs';
 import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
@@ -58,6 +59,7 @@ async function userPage(req,res,c,path,query){
   const props={demo:c.demo,notice:query.get('notice')||'',csrfToken:c.token};
   if(path==='/dashboard'){send(res,200,await ui.dashboard(db,c.user,c.token,{demo:c.demo,notice:query.get('notice')||''}));return true;}
   if(path==='/reviews'){send(res,200,await ui.reviewsPage(db,c.user,c.token,props));return true;}
+  if(path==='/reviews/manual'){if(c.demo){fail(res,403,'Real GitHub login required.');return true;}send(res,200,await ui.manualReviewPage(db,c.user,c.token,query));return true;}
   if(path==='/repositories'){send(res,200,await ui.reposPage(db,c.user,c.token,props));return true;}
   if(path==='/billing'){send(res,200,await ui.billingPage(db,c.user,c.token,{...props,notice:query.get('checkout')==='complete'?'Checkout returned. Subscription becomes active after Stripe webhook confirmation.':query.get('checkout')==='canceled'?'Checkout canceled.':''}));return true;}
   if(path==='/settings'){send(res,200,ui.settingsPage(c.user,c.token,props));return true;}
@@ -207,16 +209,19 @@ export async function processQueue(){
       allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
       unlimited:config.aiUnlimitedRepositories
     });
+    const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
+    // Durable no-post marker wins over any future global or fallback approval setting.
     const result=await analyzePullRequest({
       repository:job.full_name,
       number:job.pr_number,
       headSha:job.head_sha,
       installationId:job.installation_id,
-      postMode:effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
+      postMode:manual?'dry-run':effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
         fallbackOnly:config.aiFallbackOnlyRepositories,
         approval:config.aiFallbackApprovalRepositories,
         allowed:config.aiAllowedRepositories
-      })
+      }),
+      allowDraft:!!manual
     },{
       reserveModelCalls:async count=>{
         // Explicitly approved shadow repositories bypass only daily attempts.
@@ -327,6 +332,27 @@ export async function handler(req,res){
       if(limited(req,'sync',12)){fail(res,429,'Sync rate limit reached');return;}
       const info=await syncInstallations(db,c.user);
       redirect(res,`/dashboard?notice=${encodeURIComponent(`Synced ${info.linked} installation(s) and ${info.repoCount} repository(s).`)}`);return;
+    }
+    if(req.method==='POST'&&path==='/reviews/manual'){
+      if(!guard(req,res,c,{real:true}))return;
+      const form=await formPost(req,c);
+      if(!integrations().ai){fail(res,503,'AI review is not enabled.');return;}
+      if(limited(req,'manual-review',10)){fail(res,429,'Too many manual review requests.');return;}
+      const created=await enqueueManualReview(db,{
+        userId:c.user.id,
+        repoFullName:String(form.get('repository')||''),
+        prNumber:String(form.get('pr_number')||''),
+        policy:config,
+        fetchPull:githubApi,
+        installationToken
+      });
+      if(created.created && process.env.VERCEL){
+        try{
+          const {waitUntil}=await import('@vercel/functions');
+          waitUntil(processQueue().catch(error=>console.error('[manual-review]',String(error.message).slice(0,180))));
+        }catch(error){console.error('[manual-review schedule]',String(error.message).slice(0,180));}
+      }
+      redirect(res,'/reviews/'+created.id);return;
     }
     if(req.method==='POST'&&path==='/demo/analyze'){
       if(!guard(req,res,c))return;if(!c.demo){fail(res,403,'Demo only');return;}
