@@ -176,13 +176,14 @@ const schema={type:'object',additionalProperties:false,required:['summary','find
     category:{type:'string'},title:{type:'string'},body:{type:'string'},confidence:{type:'number'}
   }}}
 }};
-export async function reviewWithAI(files) {
+export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null}={}) {
   if(!config.openai.apiKey)throw new Error('OPENAI_API_KEY is not configured; AI review was not run.');
   if(!files.length)return {summary:'No reviewable text changes found.',findings:[]};
   const input=files.map(f=>`FILE: ${f.filename}\nDIFF:\n${f.patch}`).join('\n\n');
   const res=await fetch('https://api.openai.com/v1/responses',{
     method:'POST',headers:{Authorization:`Bearer ${config.openai.apiKey}`,'Content-Type':'application/json'},
-    body:JSON.stringify({model:config.openai.model,store:false,max_output_tokens:2000,
+    body:JSON.stringify({model,store:false,max_output_tokens:reasoningEffort?6000:2000,
+      ...(reasoningEffort?{reasoning:{effort:reasoningEffort}}:{}),
       instructions:reviewSkillInstructions(files),
       input, text:{format:{type:'json_schema',name:'review_result',strict:true,schema}}}),
     signal:AbortSignal.timeout(85000)
