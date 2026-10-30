@@ -9,6 +9,7 @@ import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, instal
 import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
 import { enqueueManualReview } from './manual-review.mjs';
+import { requestWorkerReview, getWorkerReviewStatus } from './worker-review.mjs';
 import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
@@ -261,6 +262,54 @@ export async function handler(req,res){
     }
     if(staticFiles[path] && req.method==='GET'){
       res.writeHead(200,{...headers,'Content-Type':staticFiles[path][0],'Cache-Control':'public,max-age=3600'});res.end(staticFiles[path][1]);return;
+    }
+    // Service-to-service worker API: never shares a browser session, no GitHub
+    // writes, never permits partial SHA approval, and requires existing bearer secret.
+    if ((path==='/internal/reviews/request' && req.method==='POST') ||
+        (path==='/internal/reviews/status' && req.method==='GET')) {
+      const token=process.env.WORKER_SECRET;
+      if(!token||token.length<32||!safeCompare(req.headers.authorization,'Bearer '+token)){
+        send(res,403,JSON.stringify({error:'Forbidden'}),'application/json');return;
+      }
+      try {
+        if(!integrations().github||!integrations().ai){
+          send(res,503,JSON.stringify({error:'GitHub or AI review is unavailable'}),'application/json');return;
+        }
+        let input;
+        if(req.method==='POST'){
+          if(!/^application\/json(?:\s*;|$)/i.test(req.headers['content-type']||'')){
+            send(res,415,JSON.stringify({error:'Content-Type must be application/json'}),'application/json');return;
+          }
+          try {input=JSON.parse(await readBody(req,2048));}
+          catch(error){send(res,error.status===413?413:400,JSON.stringify({error:'Invalid JSON body'}),'application/json');return;}
+          const result=await requestWorkerReview(db,input,{
+            policy:config,fetchPull:githubApi,installationToken
+          });
+          if(result.created && process.env.VERCEL){
+            try{
+              const {waitUntil}=await import('@vercel/functions');
+              waitUntil(processQueue().catch(error=>
+                console.error('[worker request]',String(error.message).slice(0,160))));
+            }catch(error){console.error('[worker request schedule]',String(error.message).slice(0,160));}
+          }
+          send(res,result.created?202:200,JSON.stringify({
+            id:result.id,status:result.created?'queued':'already_requested',
+            created:result.created,head_sha:result.headSha,posting:'disabled',
+            review_path:'/reviews/'+result.id
+          }),'application/json');return;
+        }
+        input={repository:url.searchParams.get('repository'),
+          pr_number:url.searchParams.get('pr_number'),
+          head_sha:url.searchParams.get('head_sha')};
+        const result=await getWorkerReviewStatus(db,input,config);
+        if(!result){send(res,404,JSON.stringify({error:'Manual review not found for exact PR SHA'}),'application/json');return;}
+        send(res,200,JSON.stringify(result),'application/json');return;
+      }catch(error){
+        const code=[400,403,409,413].includes(error.status)?error.status:500;
+        if(code===500)console.error('[worker api]',String(error.message).slice(0,180));
+        send(res,code,JSON.stringify({error:code===500?'Worker review request failed':String(error.message).slice(0,180)}),'application/json');
+        return;
+      }
     }
     const c=await ctx(req);
     if(path==='/internal/process-queue' && (req.method==='POST'||req.method==='GET')){
