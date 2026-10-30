@@ -10,7 +10,7 @@ import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactH
 import { localDemoReview } from './reviewer.mjs';
 import { enqueueManualReview } from './manual-review.mjs';
 import { requestWorkerReview, getWorkerReviewStatus } from './worker-review.mjs';
-import { analyzePullRequest } from './pipeline.mjs';
+import { analyzePullRequestStep } from './incremental-review.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
@@ -57,6 +57,9 @@ async function formPost(req,c){
 }
 async function userPage(req,res,c,path,query){
   if(!guard(req,res,c))return true;
+  // Owner-visible pages must not continue to display expired workers as Running.
+  if(path==='/dashboard'||path==='/reviews'||/^\/reviews\/\d+$/.test(path))
+    await db.reconcileExpiredJobs?.();
   const props={demo:c.demo,notice:query.get('notice')||'',csrfToken:c.token};
   if(path==='/dashboard'){send(res,200,await ui.dashboard(db,c.user,c.token,{demo:c.demo,notice:query.get('notice')||''}));return true;}
   if(path==='/reviews'){send(res,200,await ui.reviewsPage(db,c.user,c.token,props));return true;}
@@ -188,14 +191,17 @@ async function webhookGithub(req,res){
   send(res,202,'Accepted','text/plain');
 }
 let busy=false;
-export async function processQueue(){
+export async function processQueue(reviewId=null){
   if(busy)return 'busy';
   if(!integrations().github||!integrations().ai)return 'disabled';
+  if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
+    throw new Error('Invalid review ID');
   const job=db.claimJob
-    ? await db.claimJob()
+    ? await db.claimJob(reviewId)
     : await db.prepare(`SELECT j.id job_id,j.attempts,r.*,p.full_name FROM jobs j JOIN reviews r ON r.id=j.review_id
       JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id
-      WHERE j.status='queued' AND j.next_attempt_at<=? AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now());
+      WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
+        AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now(),reviewId,reviewId);
   if(!job)return 'idle';busy=true;
   if(!db.claimJob) await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
   await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
@@ -213,8 +219,8 @@ export async function processQueue(){
     });
     const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
     // Durable no-post marker wins over any future global or fallback approval setting.
-    const result=await analyzePullRequest({
-      repository:job.full_name,
+    const result=await analyzePullRequestStep({
+      reviewId:Number(job.id),repository:job.full_name,
       number:job.pr_number,
       headSha:job.head_sha,
       installationId:job.installation_id,
@@ -225,6 +231,18 @@ export async function processQueue(){
       }),
       allowDraft:!!manual
     },{
+      loadProgress:async id=>db.prepare('SELECT * FROM review_progress WHERE review_id=?').get(id),
+      initProgress:async({reviewId,planHash,totalBatches})=>{
+        const saved=await db.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches,results_json) VALUES(?,?,?,0,'[]') ON CONFLICT(review_id) DO NOTHING")
+          .run(reviewId,planHash,totalBatches);
+        return saved.changes===1;
+      },
+      saveProgress:async({reviewId,planHash,previousBatches,completedBatches,results})=>{
+        const saved=await db.prepare('UPDATE review_progress SET completed_batches=?,results_json=?,updated_at=CURRENT_TIMESTAMP WHERE review_id=? AND plan_hash=? AND completed_batches=?')
+          .run(completedBatches,JSON.stringify(results),reviewId,planHash,previousBatches);
+        return saved.changes===1;
+      },
+      onModelStart:()=>{modelCallsMayHaveStarted=true;},
       reserveModelCalls:async count=>{
         // Explicitly approved shadow repositories bypass only daily attempts.
         // Each PR remains deduplicated by SHA and limited to four batches.
@@ -241,6 +259,13 @@ export async function processQueue(){
       await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
         .run('queued',result.summary,job.id);
       return 'deferred';
+    }
+    if(result.status==='progress'){
+      // Exactly one saved model batch is resumable on the next worker invocation.
+      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=0 WHERE id=? AND status='running'").run(job.job_id);
+      await db.prepare("UPDATE reviews SET status='queued',summary=?,error=NULL WHERE id=?")
+        .run(result.summary,job.id);
+      return 'progress';
     }
     await db.prepare("UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?")
       .run(result.status,result.summary,JSON.stringify(result.findings),result.posted,job.id);
@@ -304,7 +329,7 @@ export async function handler(req,res){
           if(runnable && process.env.VERCEL){
             try{
               const {waitUntil}=await import('@vercel/functions');
-              waitUntil(processQueue().catch(error=>
+              waitUntil(processQueue(Number(result.id)).catch(error=>
                 console.error('[worker request]',String(error.message).slice(0,160))));
             }catch(error){console.error('[worker request schedule]',String(error.message).slice(0,160));}
           }
@@ -414,7 +439,7 @@ export async function handler(req,res){
       if(created.created && process.env.VERCEL){
         try{
           const {waitUntil}=await import('@vercel/functions');
-          waitUntil(processQueue().catch(error=>console.error('[manual-review]',String(error.message).slice(0,180))));
+          waitUntil(processQueue(Number(created.id)).catch(error=>console.error('[manual-review]',String(error.message).slice(0,180))));
         }catch(error){console.error('[manual-review schedule]',String(error.message).slice(0,180));}
       }
       redirect(res,'/reviews/'+created.id);return;
