@@ -53,3 +53,11 @@ Proffera's optional shadow pilot (read-only analysis) can bypass daily AI-attemp
 Automatic model routing is a separate explicit opt-in: `AI_AUTO_MODEL_REPOSITORIES=ibboabdoli-ai/proffera`. The code selects `gpt-6-luna` (medium reasoning) for routine changes and `gpt-6.1-sol` (high reasoning) for security, billing, data integrity, infrastructure or complex changes. The selected model appears in the review summary.
 
 **Removing daily attempt limits does not remove API costs or provider rate limits.** At most four model batches are processed per PR, and SHA deduplication is retained. Set OpenAI project usage alerts and spending limits separately. No code in Proffera is changed; CodeRabbit continues independently.
+
+## Verified CodeRabbit quota fallback (Proffera)
+
+`AI_FALLBACK_ONLY_REPOSITORIES=ibboabdoli-ai/proffera` means that ordinary PR open/update events DO NOT queue ReviewForge. On a GitHub-signed `issue_comment` event from the verified `coderabbitai[bot]` actor explicitly reporting a quota limit, ReviewForge checks for a current-HEAD CodeRabbit review request from `github-actions[bot]`, confirms the PR is open, non-draft, same repository and targets main, and refuses to review if CodeRabbit already completed the exact-head review. The job is unique per repository/PR/SHA. Results remain in the dashboard while shadow-mode posting remains disabled.
+
+**Required GitHub App setting:** Add **Issue comment** under Subscribe to events for `ReviewForge-Ibbo-Dev` (without changing existing PR/Installation events). Otherwise ReviewForge will never receive CodeRabbit quota comments. This event is not installed automatically by a code deployment.
+
+**Important:** This is a validated *review trigger*, not an autonomous merge gate. Proffera's existing gated automerge still requires an owner-signed exact-head authorization, the required Validate/E2E checks and its separate current review policy. ReviewForge results must not silently replace the Codex gate or auto-approve merges. The current ReviewForge bot remains in no-comment shadow mode.
