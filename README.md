@@ -61,3 +61,9 @@ Automatic model routing is a separate explicit opt-in: `AI_AUTO_MODEL_REPOSITORI
 **Required GitHub App setting:** Add **Issue comment** under Subscribe to events for `ReviewForge-Ibbo-Dev` (without changing existing PR/Installation events). Otherwise ReviewForge will never receive CodeRabbit quota comments. This event is not installed automatically by a code deployment.
 
 **Important:** This is a validated *review trigger*, not an autonomous merge gate. Proffera's existing gated automerge still requires an owner-signed exact-head authorization, the required Validate/E2E checks and its separate current review policy. ReviewForge results must not silently replace the Codex gate or auto-approve merges. The current ReviewForge bot remains in no-comment shadow mode.
+
+## Authenticated manual shadow reviews
+
+Users signed in via GitHub may navigate to **Code reviews → Manual shadow review** and request analysis of a PR number in an explicitly allowed and owner-linked repository. Enable only with `AI_MANUAL_REVIEW_REPOSITORIES=ibboabdoli-ai/proffera` in addition to existing AI and shadow repository allowlists. The server checks the logged-in installation owner, live exact PR head, main base, same-repository head, open PR, and an atomic per-repository/PR/SHA deduplication key. It accepts Draft PRs only for this non-posting route.
+
+Manual requests have a dedicated durable `manual_review_requests` database marker; the worker **always forces dry-run**, independent of any future global or CodeRabbit-fallback posting policy. No manual analysis can approve, comment, change code or merge. Results appear on `/reviews`. API usage costs still apply. Apply additive `migrations/004_manual_review_requests.sql` on the dedicated ReviewForge Neon project before deployment. Manual reviews never relax the CodeRabbit-only fallback trigger for other PR events.
