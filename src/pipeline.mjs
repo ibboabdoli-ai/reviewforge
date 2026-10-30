@@ -9,7 +9,8 @@ import { selectReviewModel } from './model-router.mjs';
  * Pure dependency injection lets integration tests exercise the complete pipeline
  * without sending source code to a model or posting to a real repository.
  */
-export async function analyzePullRequest({ repository, number, headSha, installationId, postMode=config.reviewPostMode }, deps={}) {
+export async function analyzePullRequest({ repository, number, headSha, installationId, postMode=config.reviewPostMode, allowDraft=false }, deps={}) {
+  if(allowDraft && postMode!=='dry-run')throw new Error('Draft PR analysis must never publish to GitHub');
   if (!['dry-run', 'live', 'fallback'].includes(postMode)) throw new Error('Invalid review post mode');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository) || !Number.isSafeInteger(number) || number<=0 ||
       !/^[0-9a-f]{40}$/i.test(headSha) || !Number.isSafeInteger(Number(installationId))) {
@@ -26,7 +27,7 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   if (initial.head?.sha!==headSha) {
     return {status:'superseded',summary:'The pull request head changed before review.',findings:[],posted:0};
   }
-  if (initial.draft || initial.state!=='open') {
+  if ((initial.draft && !allowDraft) || initial.state!=='open') {
     return {status:'skipped',summary:'Pull request is draft or no longer open.',findings:[],posted:0};
   }
   const {batches,coverage}=planReviewBatches(await filesFor({repoFullName:repository,prNumber:number,token}));
@@ -58,7 +59,7 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   const review={summary:summaries.join(' ').slice(0,1200)||'No reviewable text patches were available.',findings};
   const summary=coverageSummary(coverage)+' '+review.summary;
   const latest=await api(pullPath,token);
-  if (latest.head?.sha!==headSha || latest.draft || latest.state!=='open') {
+  if (latest.head?.sha!==headSha || (latest.draft && !allowDraft) || latest.state!=='open') {
     return {status:'superseded',summary:'PR changed during analysis; no comments posted.',findings:[],posted:0};
   }
   if (!coverage.complete || !batches.length) {
