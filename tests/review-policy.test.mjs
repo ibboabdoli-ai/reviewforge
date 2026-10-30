@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
-import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
+import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
 import { sqlForPostgres } from '../src/db-postgres.mjs';
 
 test('repository allowlist defaults to deny all, matches only exact repos',()=>{
@@ -74,5 +74,22 @@ test('shadow repositories cannot post reviews even when global mode is live',()=
 test('shadow mode is explicitly passed into review pipeline',async()=>{
  const {readFileSync}=await import('node:fs');
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ assert.match(source,/postMode:effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories\)/);
+});
+
+test('unlimited review count applies only to a permitted, exact shadow repository',()=>{
+ const args={allowed:allowedRepositories('ibboabdoli-ai/proffera'),shadow:allowedRepositories('ibboabdoli-ai/proffera'),
+  unlimited:allowedRepositories('ibboabdoli-ai/proffera')};
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/Proffera',args),true);
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/other',args),false);
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/proffera',{...args,allowed:[]}),false);
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/proffera',{...args,shadow:[]}),false);
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/proffera',{...args,unlimited:[]}),false);
+});
+test('server enforces per-repo monthly and daily limits',async()=>{
+ const {readFileSync}=await import('node:fs');
+ const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ assert.match(source,/allowance\.used<allowance\.limit\|\|shadowUnlimited/);
+ assert.match(source,/if\(shadowUnlimited\)return \{allowed:true\};/);
  assert.match(source,/postMode:effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories\)/);
 });
