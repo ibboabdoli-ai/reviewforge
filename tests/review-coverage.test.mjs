@@ -101,3 +101,35 @@ test('reviews across batches deduplicate findings and cap published comments',as
  });
  assert.equal(r.status,'completed');assert.equal(r.findings.length,8);assert.equal(r.posted,0);
 });
+
+test('approved repository selects Sol for sensitive code in every applicable batch',async()=>{
+ const {config}=await import('../src/config.mjs');
+ const previous=config.aiAutoModelRepositories;
+ config.aiAutoModelRepositories=['example/sandbox'];
+ try{
+  const calls=[];
+  const m=mock([{filename:'src/api/payment.ts',status:'modified',patch:'@@ -0,0 +1,1 @@\n+const payment = 1;'}]);
+  const result=await analyzePullRequest({...target,postMode:'dry-run'},{
+   ...m.dependencies,
+   reviewWithAI:async (part,options)=>{calls.push(options);return {summary:'Done',findings:[]};}
+  });
+  assert.equal(result.status,'completed');assert.equal(calls.length,1);
+  assert.equal(calls[0].model,config.openai.modelDeep);
+  assert.equal(calls[0].reasoningEffort,'high');
+ }finally{config.aiAutoModelRepositories=previous;}
+});
+test('unapproved repository keeps legacy model without forcing routing',async()=>{
+ const {config}=await import('../src/config.mjs');
+ const previous=config.aiAutoModelRepositories;
+ config.aiAutoModelRepositories=[];
+ try{
+  const calls=[];
+  const m=mock([{filename:'src/api/payment.ts',status:'modified',patch:'@@ -0,0 +1,1 @@\n+const payment = 1;'}]);
+  const result=await analyzePullRequest({...target,postMode:'dry-run'},{
+   ...m.dependencies,
+   reviewWithAI:async (part,options)=>{calls.push(options);return {summary:'Done',findings:[]};}
+  });
+  assert.equal(result.status,'completed');
+  assert.equal(calls[0].model,undefined);
+ }finally{config.aiAutoModelRepositories=previous;}
+});
