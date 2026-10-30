@@ -103,9 +103,11 @@ function splitUnifiedPatch(patch){
   if(!flush())return null;
   return result.length?result:null;
 }
-export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES}={}){
+export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,maxBatchCharacters=MAX_TOTAL_PATCH}={}){
   if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
   if(!Number.isSafeInteger(maxBatches)||maxBatches<1||maxBatches>10)throw new RangeError('Invalid maxBatches');
+  if(!Number.isSafeInteger(maxBatchCharacters)||maxBatchCharacters<MAX_FILE_PATCH||maxBatchCharacters>MAX_TOTAL_PATCH)
+    throw new RangeError('Invalid model batch character budget');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
     missingPatch:0,oversized:0,limited:0,complete:true,batches:0,segments:0,reviewedSegments:0};
   const candidates=[];
@@ -128,7 +130,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES}={}
   for(const file of candidates){
     let allIncluded=true;
     for(const patch of file.chunks){
-      if(batch.length&&(batch.length>=MAX_FILES||size+patch.length>MAX_TOTAL_PATCH))flush();
+      if(batch.length&&(batch.length>=MAX_FILES||size+patch.length>maxBatchCharacters))flush();
       if(batches.length>=maxBatches){coverage.limited++;allIncluded=false;continue;}
       batch.push({filename:file.filename,patch});size+=patch.length;
       coverage.reviewedSegments++;
