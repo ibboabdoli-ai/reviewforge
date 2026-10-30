@@ -36,10 +36,10 @@ function header(title,desc,aside=''){return `<div class="page-header"><div><div 
 function statusItems(demo){ const ints=integrations();return [{name:'GitHub App',ready:ints.github},{name:'AI analysis',ready:ints.ai},{name:'Stripe billing',ready:ints.billing}].map(c=>`<div class="config-row"><span><i class="status-dot ${c.ready?'ok':'off'}"></i>${c.name}</span><strong>${c.ready?'Configured':'Needs setup'}</strong></div>`).join('');}
 export async function dashboard(db,user,token,{demo=false,notice=''}={}){
   const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 6`).all(user.id);
-  const repoCount=demo?3:await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND p.enabled=1 AND i.status='active'`).get(user.id).n;
-  const total=demo?reviews.length:await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=?`).get(user.id).n;
+  const repoCount=demo?3:Number((await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND p.enabled=1 AND i.status='active'`).get(user.id))?.n ?? 0);
+  const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=?`).get(user.id))?.n ?? 0);
   const issues=reviews.reduce((sum,r)=>sum+JSON.parse(r.findings_json||'[]').length,0);
-  const clean=reviews.filter(r=>r.status==='completed'&&JSON.parse(r.findings_json).length===0).length;
+  const clean=reviews.filter(r=>r.status==='completed'&&JSON.parse(r.findings_json||'[]').length===0).length;
   const plan=demo?{plan:'demo',limit:10,used:0}:await allowedReviews(db,user.id);
   let body=header('Dashboard','Monitor your pull requests and catch issues before they ship.',demo?'<a class="btn btn-primary" href="/demo/analyze">✦ Try a demo review</a>':action('/settings/sync','↻ Sync GitHub',token,'primary'));
   body+=`<div class="welcome"><div><div class="tagline">✦ SMARTER CODE REVIEWS</div><h2>Good ${new Date().getHours()<12?'morning':new Date().getHours()<18?'afternoon':'evening'}, ${s(user.login)} <span class="waving">✳</span></h2><p>Your code deserves a second set of eyes. See what ReviewForge has found.</p></div><div class="welcome-orb">✧</div></div>`;
