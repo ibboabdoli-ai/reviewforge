@@ -10,7 +10,7 @@ import { selectReviewModel } from './model-router.mjs';
  * without sending source code to a model or posting to a real repository.
  */
 export async function analyzePullRequest({ repository, number, headSha, installationId, postMode=config.reviewPostMode }, deps={}) {
-  if (!['dry-run', 'live'].includes(postMode)) throw new Error('Invalid review post mode');
+  if (!['dry-run', 'live', 'fallback'].includes(postMode)) throw new Error('Invalid review post mode');
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository) || !Number.isSafeInteger(number) || number<=0 ||
       !/^[0-9a-f]{40}$/i.test(headSha) || !Number.isSafeInteger(Number(installationId))) {
     throw new Error('Invalid review target');
@@ -68,6 +68,7 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   if (postMode==='dry-run') {
     return {status:'completed',summary:`[Preview only — not posted to GitHub] ${summary}`,findings:review.findings,posted:0,coverage};
   }
-  const postResult=await post({repoFullName:repository,prNumber:number,headSha,token,...review,summary});
+  const approval=postMode==='fallback' && review.findings.length===0;
+  const postResult=await post({repoFullName:repository,prNumber:number,headSha,token,...review,summary,approval});
   return {status:'completed',summary,findings:review.findings,posted:postResult==='none'?0:1,coverage};
 }
