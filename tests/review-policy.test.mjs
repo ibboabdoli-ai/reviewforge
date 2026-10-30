@@ -74,7 +74,7 @@ test('shadow repositories cannot post reviews even when global mode is live',()=
 test('shadow mode is explicitly passed into review pipeline',async()=>{
  const {readFileSync}=await import('node:fs');
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
- assert.match(source,/postMode:effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
+ assert.match(source,/postMode:manual\?'dry-run':effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
 });
 
 test('unlimited review count applies only to a permitted, exact shadow repository',()=>{
@@ -91,7 +91,7 @@ test('server enforces per-repo monthly and daily limits',async()=>{
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
  assert.match(source,/allowance\.used<allowance\.limit\|\|shadowUnlimited/);
  assert.match(source,/if\(shadowUnlimited\)return \{allowed:true\};/);
- assert.match(source,/postMode:effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
+ assert.match(source,/postMode:manual\?'dry-run':effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
 });
 
 test('fallback publishing is disabled by default even for allowed shadow repositories',()=>{
