@@ -15,6 +15,7 @@ export const config = {
   aiUnlimitedRepositories: allowedRepositories(process.env.AI_UNLIMITED_REPOSITORIES),
   aiAutoModelRepositories: allowedRepositories(process.env.AI_AUTO_MODEL_REPOSITORIES),
   aiFallbackOnlyRepositories: allowedRepositories(process.env.AI_FALLBACK_ONLY_REPOSITORIES),
+  aiFallbackApprovalRepositories: allowedRepositories(process.env.AI_FALLBACK_APPROVAL_REPOSITORIES),
   aiDailyRequestLimit: dailyRequestLimit(process.env.AI_DAILY_REQUEST_LIMIT ?? '1'),
   nodeEnv: process.env.NODE_ENV || 'development',
   github: {
