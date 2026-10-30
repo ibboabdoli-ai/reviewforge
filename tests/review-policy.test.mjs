@@ -34,15 +34,15 @@ test('daily review reservations are bounded and atomically persisted',async()=>{
   }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });
 test('PostgreSQL receives a compatible parameterized atomic reservation',()=>{
-  const sql=`INSERT INTO ai_daily_limits(day,used) VALUES(?,1) ON CONFLICT(day) DO UPDATE SET used=ai_daily_limits.used+1 WHERE ai_daily_limits.used < ? RETURNING used`;
-  assert.match(sqlForPostgres(sql),/VALUES\(\$1,1\)/);
-  assert.match(sqlForPostgres(sql),/used < \$2/);
+  const sql=`INSERT INTO ai_daily_limits(day,used) VALUES(?,?) ON CONFLICT(day) DO UPDATE SET used=ai_daily_limits.used+? WHERE ai_daily_limits.used+? <= ? RETURNING used`;
+  assert.match(sqlForPostgres(sql),/VALUES\(\$1,\$2\)/);
+  assert.match(sqlForPostgres(sql),/used\+\$4 <= \$5/);
 });
 test('worker gate and cron auth are explicitly implemented',async()=>{
   const { readFileSync }=await import('node:fs');
   const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
   assert.match(server,/repositoryAllowed\(repo\.full_name,config\.aiAllowedRepositories\)/);
-  assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit\)/);
+  assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit,Date\.now\(\),count\)/);
   assert.match(server,/req\.method==='GET'\?process\.env\.CRON_SECRET:process\.env\.WORKER_SECRET/);
 });
 
