@@ -11,7 +11,7 @@ import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, nextUtcDay } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 
 assertConfig();
@@ -146,7 +146,8 @@ export async function processQueue(){
       repository:job.full_name,
       number:job.pr_number,
       headSha:job.head_sha,
-      installationId:job.installation_id
+      installationId:job.installation_id,
+      postMode:effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories)
     },{
       reserveModelCalls:async count=>{
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};

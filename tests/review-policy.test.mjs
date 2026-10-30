@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
-import { allowedRepositories,repositoryAllowed,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
+import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
 import { sqlForPostgres } from '../src/db-postgres.mjs';
 
 test('repository allowlist defaults to deny all, matches only exact repos',()=>{
@@ -62,4 +62,17 @@ test('atomically reserve exactly N model calls in the daily budget', async()=>{
    assert.equal(await reserveDailyReview(db,3,at,1),false);
    assert.equal(db.prepare('SELECT used FROM ai_daily_limits WHERE day=?').get('2026-10-30').used,3);
  } finally {db.close();rmSync(root,{recursive:true,force:true});}
+});
+
+test('shadow repositories cannot post reviews even when global mode is live',()=>{
+ const shadow=allowedRepositories('ibboabdoli-ai/Proffera');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/Proffera','live',shadow),'dry-run');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','live',shadow),'dry-run');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/reviewforge-sandbox','live',shadow),'live');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/Proffera','dry-run',shadow),'dry-run');
+});
+test('shadow mode is explicitly passed into review pipeline',async()=>{
+ const {readFileSync}=await import('node:fs');
+ const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ assert.match(source,/postMode:effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories\)/);
 });

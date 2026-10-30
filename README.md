@@ -37,3 +37,7 @@ The app starts at `http://localhost:3000`. The local demo uses a deterministic r
 7. Configure Stripe **test mode** and verify subscription webhooks before any live billing.
 
 **Public repository does not imply a public working SaaS.** Open issues and pull requests before changes are merged. See `GITHUB_AI_SETUP_FA.md` and `VERCEL_NEON_SETUP_FA.md` for the longer setup guides.
+
+## Proffera shadow pilot (CodeRabbit comparison)
+
+The only authorized Proffera pilot runs in **dry-run**: keep `REVIEW_POST_MODE=dry-run`, set `AI_SHADOW_REPOSITORIES=ibboabdoli-ai/proffera` as an additional immutable-at-review-time gate, and include only `ibboabdoli-ai/proffera` in `AI_ALLOWED_REPOSITORIES`. Use a very small `AI_DAILY_REQUEST_LIMIT`; one model batch consumes one reservation. A review needing more than the cap is not started. The review results remain only in ReviewForge. The GitHub App has repository permission but may not publish review comments to Proffera through this pipeline. Do not remove CodeRabbit or modify Proffera code during shadow evaluation.

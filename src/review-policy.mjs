@@ -11,6 +11,12 @@ export function repositoryAllowed(name,allowlist) {
   return typeof name==='string' && Array.isArray(allowlist)
     && allowlist.includes(name.toLowerCase());
 }
+/** Force approved shadow repositories into a no-post review mode,
+ * even if an operator changes the global posting setting. */
+export function effectiveReviewPostMode(repository,globalMode,shadowRepositories){
+  if(repositoryAllowed(repository,shadowRepositories))return 'dry-run';
+  return globalMode;
+}
 export function dailyRequestLimit(raw='1') {
   const limit=Number(raw);
   // Reject malformed, negative or excessive limits instead of falling back.

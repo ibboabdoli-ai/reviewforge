@@ -11,6 +11,7 @@ export const config = {
   reviewPostMode: process.env.REVIEW_POST_MODE || 'dry-run',
   aiReviewEnabled: process.env.AI_REVIEW_ENABLED === 'true',
   aiAllowedRepositories: allowedRepositories(process.env.AI_ALLOWED_REPOSITORIES),
+  aiShadowRepositories: allowedRepositories(process.env.AI_SHADOW_REPOSITORIES),
   aiDailyRequestLimit: dailyRequestLimit(process.env.AI_DAILY_REQUEST_LIMIT ?? '1'),
   nodeEnv: process.env.NODE_ENV || 'development',
   github: {
