@@ -15,7 +15,7 @@ export function validPrNumber(value) {
   const number=Number(str);
   return Number.isSafeInteger(number)?number:null;
 }
-export async function enqueueManualReview(db,{userId,repoFullName,prNumber,policy,fetchPull,installationToken}){
+export async function enqueueManualReview(db,{userId,repoFullName,prNumber,expectedHeadSha=null,policy,fetchPull,installationToken}){
   if(!manualReviewAllowed(repoFullName,policy))throw Object.assign(new Error('Manual review is not enabled for this repository.'),{status:403});
   const number=validPrNumber(prNumber);
   if(!number)throw Object.assign(new Error('Invalid PR number.'),{status:400});
@@ -25,6 +25,9 @@ export async function enqueueManualReview(db,{userId,repoFullName,prNumber,polic
   const token=await installationToken(repo.installation_id);
   const pull=await fetchPull('/repos/'+repo.full_name+'/pulls/'+number,token);
   const head=pull.head?.sha;
+  if(expectedHeadSha !== null &&
+     (!/^[a-f0-9]{40}$/i.test(expectedHeadSha) || expectedHeadSha.toLowerCase()!==String(head||'').toLowerCase()))
+    throw Object.assign(new Error('PR HEAD changed or does not match requested SHA.'),{status:409});
   if(pull.state!=='open'||pull.base?.ref!=='main'||!(/^[a-f0-9]{40}$/i.test(head||''))||pull.head?.repo?.full_name!==repo.full_name)
     throw Object.assign(new Error('PR must be open, target main, and originate from the connected repository.'),{status:409});
   const current=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,number,head);
