@@ -75,6 +75,16 @@ export function openDatabase(file) {
       review_id INTEGER PRIMARY KEY REFERENCES reviews(id) ON DELETE CASCADE,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
+    CREATE TABLE IF NOT EXISTS review_progress (
+      review_id INTEGER PRIMARY KEY REFERENCES reviews(id) ON DELETE CASCADE,
+      plan_hash TEXT NOT NULL,
+      total_batches INTEGER NOT NULL CHECK(total_batches BETWEEN 1 AND 4),
+      completed_batches INTEGER NOT NULL DEFAULT 0 CHECK(completed_batches >= 0),
+      results_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      CHECK(completed_batches <= total_batches)
+    );
     CREATE TABLE IF NOT EXISTS jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       review_id INTEGER NOT NULL UNIQUE REFERENCES reviews(id),
