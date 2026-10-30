@@ -71,6 +71,10 @@ export function openDatabase(file) {
       last_result TEXT NOT NULL,
       runs INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS manual_review_requests (
+      review_id INTEGER PRIMARY KEY REFERENCES reviews(id) ON DELETE CASCADE,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE IF NOT EXISTS jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       review_id INTEGER NOT NULL UNIQUE REFERENCES reviews(id),
