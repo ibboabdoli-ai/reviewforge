@@ -101,3 +101,18 @@ test('worker always forces marker-backed reviews into dry-run mode even if fallb
  assert.match(source,/enqueueManualReview\(db,/);
  assert.match(source,/formPost\(req,c\)/);
 });
+
+
+test('authenticated manual handler wakes only an owned, already-queued, non-posted review',()=>{
+ const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ assert.match(source,/created\.created\?null:await db\.prepare\(/);
+ assert.match(source,/JOIN manual_review_requests m ON m\.review_id=r\.id/);
+ assert.match(source,/JOIN installations i ON i\.id=r\.installation_id WHERE r\.id=\? AND i\.owner_user_id=\?/);
+ assert.match(source,/prior\?\.job_status==='queued'/);
+ assert.match(source,/prior\?\.review_status==='queued'/);
+ assert.match(source,/Number\(prior\.posted\)===0/);
+ assert.match(source,/Number\(prior\.next_attempt_at\)<=Date\.now\(\)/);
+ assert.match(source,/processQueue\(Number\(created\.id\)\)/);
+ assert.match(source,/if\(\(created\.created \|\| queued\) && process\.env\.VERCEL\)/);
+ assert.match(source,/postMode:manual\?'dry-run'/);
+});
