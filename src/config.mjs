@@ -12,6 +12,8 @@ export const config = {
   aiReviewEnabled: process.env.AI_REVIEW_ENABLED === 'true',
   aiAllowedRepositories: allowedRepositories(process.env.AI_ALLOWED_REPOSITORIES),
   aiShadowRepositories: allowedRepositories(process.env.AI_SHADOW_REPOSITORIES),
+  aiUnlimitedRepositories: allowedRepositories(process.env.AI_UNLIMITED_REPOSITORIES),
+  aiAutoModelRepositories: allowedRepositories(process.env.AI_AUTO_MODEL_REPOSITORIES),
   aiDailyRequestLimit: dailyRequestLimit(process.env.AI_DAILY_REQUEST_LIMIT ?? '1'),
   nodeEnv: process.env.NODE_ENV || 'development',
   github: {
@@ -24,7 +26,9 @@ export const config = {
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY || '',
-    model: process.env.OPENAI_MODEL || 'gpt-4.1-mini'
+    model: process.env.OPENAI_MODEL || 'gpt-4.1-mini',
+    modelFast: process.env.OPENAI_MODEL_FAST || 'gpt-6-luna',
+    modelDeep: process.env.OPENAI_MODEL_DEEP || 'gpt-6.1-sol'
   },
   stripe: {
     secret: process.env.STRIPE_SECRET_KEY || '',
