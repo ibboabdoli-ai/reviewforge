@@ -182,7 +182,9 @@ export async function collectReviewContext({repository,sha,files,token,api}){
         desired.push({test:tests[i].filename,options});
     }
   }
-  if(!tests.length){
+  // Keep production import context when the selected tests have no resolvable
+  // local implementation links (for example a test built entirely on mocks).
+  if(desired.length<3){
     for(let i=0;i<sources.length;i++){
       if(!sourceBodies[i])continue;
       for(const path of importedPaths(sources[i].filename,sourceBodies[i])){
