@@ -198,5 +198,11 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
   if(!res.ok)throw new Error(`AI request failed (${res.status}): ${(data.error?.message||'unknown').slice(0,150)}`);
   const raw=data.output_text ?? (data.output?.flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('') || '');
   if(!raw)throw new Error('AI response contained no review text');
-  const result=JSON.parse(raw);return {summary:String(result.summary||'Review complete.').slice(0,600),findings:validateFindings(result.findings,files)};
+  const result=JSON.parse(raw);
+  const rawFindings=Array.isArray(result.findings)?result.findings:[];
+  const findings=validateFindings(rawFindings,files);
+  // Counts only; no raw model response, source code or credentials persisted.
+  return {summary:String(result.summary||'Review complete.').slice(0,600),findings,
+    diagnostics:{modelSuggestions:rawFindings.length,acceptedFindings:findings.length,
+      filteredFindings:Math.max(0,rawFindings.length-findings.length)}};
 }

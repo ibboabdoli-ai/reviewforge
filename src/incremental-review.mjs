@@ -120,9 +120,18 @@ export async function analyzePullRequestStep({
     let response;
     try{response=await (deps.reviewWithAI || reviewWithAI)(batch,options);}
     catch(error){error.nonRetryable=true;throw error;}
+    const accepted=validateFindings(response.findings,batch);
+    const stats=response.diagnostics;
     const item={
       summary:'Batch '+(next+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350),
-      findings:validateFindings(response.findings,batch)
+      findings:accepted,
+      // Integer counts help diagnose false negatives without retaining raw
+      // model output or unvalidated potentially sensitive suggestions.
+      diagnostics:stats&&[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings].every(
+        n=>Number.isSafeInteger(n)&&n>=0&&n<=1000)
+        ?{modelSuggestions:stats.modelSuggestions,
+          acceptedFindings:stats.acceptedFindings,filteredFindings:stats.filteredFindings}
+        :null
     };
     results=[...results,item];
     const saved=await deps.saveProgress({

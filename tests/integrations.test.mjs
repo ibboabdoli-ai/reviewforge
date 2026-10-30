@@ -58,6 +58,7 @@ test('OpenAI structured result is validated before findings are accepted',async(
     };
     const result=await reviewWithAI(files);assert.ok(called);assert.equal(result.findings.length,1);
     assert.equal(result.findings[0].line,2);
+    assert.deepEqual(result.diagnostics,{modelSuggestions:2,acceptedFindings:1,filteredFindings:1});
   }finally{config.openai.apiKey=oldKey;globalThis.fetch=oldFetch;}
 });
 test('GitHub reviews send added-line inline comments with commit SHA',async()=>{
