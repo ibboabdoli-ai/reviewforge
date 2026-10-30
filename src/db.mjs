@@ -65,6 +65,12 @@ export function openDatabase(file) {
       day TEXT PRIMARY KEY,
       used INTEGER NOT NULL DEFAULT 0 CHECK(used >= 0)
     );
+    CREATE TABLE IF NOT EXISTS scheduler_heartbeats (
+      source TEXT PRIMARY KEY,
+      last_run_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_result TEXT NOT NULL,
+      runs INTEGER NOT NULL DEFAULT 0
+    );
     CREATE TABLE IF NOT EXISTS jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       review_id INTEGER NOT NULL UNIQUE REFERENCES reviews(id),

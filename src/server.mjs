@@ -12,6 +12,7 @@ import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
 import { repositoryAllowed, reserveDailyReview, nextUtcDay } from './review-policy.mjs';
+import { retryState } from './queue-policy.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
@@ -124,13 +125,14 @@ async function webhookGithub(req,res){
 }
 let busy=false;
 export async function processQueue(){
-  if(busy||!integrations().github||!integrations().ai)return;
+  if(busy)return 'busy';
+  if(!integrations().github||!integrations().ai)return 'disabled';
   const job=db.claimJob
     ? await db.claimJob()
     : await db.prepare(`SELECT j.id job_id,j.attempts,r.*,p.full_name FROM jobs j JOIN reviews r ON r.id=j.review_id
       JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id
       WHERE j.status='queued' AND j.next_attempt_at<=? AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now());
-  if(!job)return;busy=true;
+  if(!job)return 'idle';busy=true;
   if(!db.claimJob) await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
   await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
   try {
@@ -138,14 +140,14 @@ export async function processQueue(){
       await db.prepare('UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?')
         .run('skipped','Repository not approved for AI review.',job.id);
       await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
-      return;
+      return 'skipped';
     }
     if(!await reserveDailyReview(db,config.aiDailyRequestLimit)){
       await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=?,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE id=?")
         .run(nextUtcDay(),job.job_id);
       await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
         .run('queued','Daily AI request limit reached; deferred until tomorrow (UTC).',job.id);
-      return;
+      return 'deferred';
     }
     const result=await analyzePullRequest({
       repository:job.full_name,
@@ -156,12 +158,14 @@ export async function processQueue(){
     await db.prepare("UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?")
       .run(result.status,result.summary,JSON.stringify(result.findings),result.posted,job.id);
     await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
+    return 'completed';
   }catch(err){
     const retries=job.attempts + (db.claimJob?0:1);
-    const last=retries>=3;
-    await db.prepare('UPDATE jobs SET status=?,next_attempt_at=? WHERE id=?').run(last?'failed':'queued',Date.now()+Math.pow(2,retries)*30000,job.job_id);
-    await db.prepare('UPDATE reviews SET status=?,error=?,summary=? WHERE id=?').run(last?'failed':'queued',String(err.message).slice(0,260),'Review failed; check server configuration or GitHub permissions.',job.id);
+    const next=retryState(Number(retries));
+    await db.prepare('UPDATE jobs SET status=?,next_attempt_at=? WHERE id=?').run(next.failed?'failed':'queued',next.nextAttemptAt,job.job_id);
+    await db.prepare('UPDATE reviews SET status=?,error=?,summary=? WHERE id=?').run(next.failed?'failed':'queued',String(err.message).slice(0,260),'Review failed; check server configuration or GitHub permissions.',job.id);
     console.error('[worker] review',job.id,'failed:',String(err.message).slice(0,180));
+    return next.failed?'failed':'retry';
   }finally{busy=false;}
 }
 export async function handler(req,res){
@@ -179,7 +183,12 @@ export async function handler(req,res){
       // Vercel Cron uses GET with CRON_SECRET; external workers use POST with WORKER_SECRET.
       const expected=req.method==='GET'?process.env.CRON_SECRET:process.env.WORKER_SECRET;
       if (!expected || expected.length<32 || !safeCompare(req.headers.authorization,`Bearer ${expected}`)) {send(res,403,'Forbidden','text/plain');return;}
-      await processQueue();send(res,200,'processed','text/plain');return;
+      const outcome=await processQueue();
+      const source=req.method==='GET'?'cron':'worker';
+      await db.prepare(`INSERT INTO scheduler_heartbeats(source,last_result,runs) VALUES(?,?,1)
+        ON CONFLICT(source) DO UPDATE SET last_run_at=CURRENT_TIMESTAMP,
+        last_result=excluded.last_result,runs=scheduler_heartbeats.runs+1`).run(source,outcome);
+      send(res,200,JSON.stringify({status:outcome}),'application/json');return;
     }
 
     if(path==='/webhooks/github'&&req.method==='POST'){await webhookGithub(req,res);return;}
