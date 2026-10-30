@@ -17,6 +17,13 @@ export function effectiveReviewPostMode(repository,globalMode,shadowRepositories
   if(repositoryAllowed(repository,shadowRepositories))return 'dry-run';
   return globalMode;
 }
+// Daily/monthly review-count exemptions apply only to explicitly approved
+// shadow repositories, never to arbitrary tenants or repositories.
+export function isUnlimitedShadowRepository(repository,{allowed=[],shadow=[],unlimited=[]}={}){
+  return repositoryAllowed(repository,allowed)
+    && repositoryAllowed(repository,shadow)
+    && repositoryAllowed(repository,unlimited);
+}
 export function dailyRequestLimit(raw='1') {
   const limit=Number(raw);
   // Reject malformed, negative or excessive limits instead of falling back.
