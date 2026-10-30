@@ -29,3 +29,14 @@ test('current-head CodeRabbit review or inline findings block fallback',()=>{
  assert.equal(alreadyReviewedExactHead([{user:{login:'coderabbitai[bot]'},commit_id:'b'.repeat(40),state:'COMMENTED',submitted_at:noticeAt}],[],sha,requestAt),false);
  assert.equal(alreadyReviewedExactHead(null,[],sha,requestAt),true);
 });
+
+test('fallback-only webhook path is present and protected by exact allowlists',async()=>{
+ const {readFileSync}=await import('node:fs');
+ const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ assert.match(server,/event==='issue_comment' && isCodeRabbitQuotaEvent\(payload\)/);
+ assert.match(server,/repositoryAllowed\(payload\.repository\?\.full_name,config\.aiFallbackOnlyRepositories\)/);
+ assert.match(server,/currentHeadReviewRequest\(comments,head,payload\.comment\)/);
+ assert.match(server,/alreadyReviewedExactHead\(reviews,inline,head,request\.created_at\)/);
+ assert.match(server,/!repositoryAllowed\(payload\.repository\?\.full_name,config\.aiFallbackOnlyRepositories\)/);
+ assert.match(server,/ON CONFLICT\(repository_id,pr_number,head_sha\) DO NOTHING/);
+});
