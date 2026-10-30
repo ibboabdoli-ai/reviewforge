@@ -43,16 +43,26 @@ export async function analyzePullRequest({ repository, number, headSha, installa
           : 'AI daily request allowance exhausted; review deferred until next UTC day. No model calls made.'};
     }
   }
-  const summaries=[],rawFindings=[];
-  for(let index=0;index<batches.length;index++){
-    const part=batches[index];
-    const autoModel=repositoryAllowed(repository,config.aiAutoModelRepositories);
+  // A Vercel invocation has a 120-second budget. Up to four independent model
+  // batches must not each consume their 85-second deadline sequentially.
+  // allSettled waits for every already-started call before failing closed.
+  const autoModel=repositoryAllowed(repository,config.aiAutoModelRepositories);
+  const batchResults=await Promise.allSettled(batches.map(async (part,index)=>{
     const choice=autoModel?selectReviewModel(part,{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep}):null;
     const response=await ai(part,{batchIndex:index+1,totalBatches:batches.length,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})});
-    summaries.push('Batch '+(index+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350));
-    rawFindings.push(...validateFindings(response.findings,part));
+    return {
+      summary:'Batch '+(index+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350),
+      findings:validateFindings(response.findings,part)
+    };
+  }));
+  if(batchResults.some(result=>result.status!=='fulfilled')){
+    const failure=new Error('A model batch failed; no complete review verdict is available.');
+    failure.nonRetryable=true;
+    throw failure;
   }
+  const summaries=batchResults.map(result=>result.value.summary);
+  const rawFindings=batchResults.flatMap(result=>result.value.findings);
   const severityRank={critical:0,high:1,medium:2,low:3};
   const findings=rawFindings.sort((a,b)=>(severityRank[a.severity]??4)-(severityRank[b.severity]??4)||b.confidence-a.confidence)
     .filter((f,i,all)=>all.findIndex(g=>g.path===f.path&&g.line===f.line)===i).slice(0,8);

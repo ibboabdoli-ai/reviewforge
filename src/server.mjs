@@ -199,6 +199,7 @@ export async function processQueue(){
   if(!job)return 'idle';busy=true;
   if(!db.claimJob) await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
   await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
+  let modelCallsMayHaveStarted=false;
   try {
     if(!repositoryAllowed(job.full_name,config.aiAllowedRepositories)){
       await db.prepare('UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?')
@@ -227,9 +228,10 @@ export async function processQueue(){
       reserveModelCalls:async count=>{
         // Explicitly approved shadow repositories bypass only daily attempts.
         // Each PR remains deduplicated by SHA and limited to four batches.
-        if(shadowUnlimited)return {allowed:true};
+        if(shadowUnlimited){modelCallsMayHaveStarted=true;return {allowed:true};}
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
         const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
+        if(allowed)modelCallsMayHaveStarted=true;
         return allowed?{allowed:true}:{allowed:false,reason:'daily-used'};
       }
     });
@@ -246,10 +248,20 @@ export async function processQueue(){
     return 'completed';
   }catch(err){
     const retries=job.attempts + (db.claimJob?0:1);
-    const next=retryState(Number(retries));
+    const next=retryState(Number(retries),Date.now(),modelCallsMayHaveStarted||err?.nonRetryable===true);
     await db.prepare('UPDATE jobs SET status=?,next_attempt_at=? WHERE id=?').run(next.failed?'failed':'queued',next.nextAttemptAt,job.job_id);
-    await db.prepare('UPDATE reviews SET status=?,error=?,summary=? WHERE id=?').run(next.failed?'failed':'queued',String(err.message).slice(0,260),'Review failed; check server configuration or GitHub permissions.',job.id);
-    console.error('[worker] review',job.id,'failed:',String(err.message).slice(0,180));
+    const errorText=String(err.message).slice(0,260);
+    if(next.failed){
+      const summary=modelCallsMayHaveStarted
+        ? 'AI review incomplete; automatic replay disabled to prevent duplicate model costs.'
+        : 'Review failed after the maximum safe attempts.';
+      await db.prepare("UPDATE reviews SET status='failed',error=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?")
+        .run(errorText,summary,job.id);
+    } else {
+      await db.prepare("UPDATE reviews SET status='queued',error=?,summary=? WHERE id=?")
+        .run(errorText,'Review failed before model execution; retry is scheduled.',job.id);
+    }
+    console.error('[worker] review',job.id,'failed:',errorText);
     return next.failed?'failed':'retry';
   }finally{busy=false;}
 }
@@ -285,7 +297,11 @@ export async function handler(req,res){
           const result=await requestWorkerReview(db,input,{
             policy:config,fetchPull:githubApi,installationToken
           });
-          if(result.created && process.env.VERCEL){
+          // Repeating an authenticated exact-HEAD request may kick a queued
+          // job again without inserting a duplicate or replaying a failed job.
+          const priorJob=result.created?null:await db.prepare('SELECT status,next_attempt_at FROM jobs WHERE review_id=?').get(result.id);
+          const runnable=result.created || (priorJob?.status==='queued' && Number(priorJob.next_attempt_at)<=Date.now());
+          if(runnable && process.env.VERCEL){
             try{
               const {waitUntil}=await import('@vercel/functions');
               waitUntil(processQueue().catch(error=>

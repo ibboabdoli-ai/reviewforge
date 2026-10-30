@@ -133,3 +133,40 @@ test('unapproved repository keeps legacy model without forcing routing',async()=
   assert.equal(calls[0].model,undefined);
  }finally{config.aiAutoModelRepositories=previous;}
 });
+
+test('independent model batches start together within one serverless invocation',async()=>{
+ const m=mock(makeFiles(36));
+ const started=[];
+ let unblock;
+ const gate=new Promise(resolve=>{unblock=resolve;});
+ const review=analyzePullRequest({...target,postMode:'dry-run'},{
+  ...m.dependencies,
+  reviewWithAI:async (_part,{batchIndex})=>{
+   started.push(batchIndex);
+   await gate;
+   return {summary:'Completed one batch',findings:[]};
+  }
+ });
+ await new Promise(resolve=>setImmediate(resolve));
+ const simultaneouslyStarted=[...started];
+ unblock();
+ const result=await review;
+ assert.deepEqual(simultaneouslyStarted,[1,2]);
+ assert.equal(result.status,'completed');
+ assert.equal(result.coverage.batches,2);
+ assert.equal(result.posted,0);
+});
+test('a failed batch never publishes a partial or clean review',async()=>{
+ const m=mock(makeFiles(36));
+ await assert.rejects(
+  analyzePullRequest({...target,postMode:'live'},{
+   ...m.dependencies,
+   reviewWithAI:async (_part,{batchIndex})=>{
+    if(batchIndex===2)throw new Error('Model timeout');
+    return {summary:'Only one batch completed',findings:[]};
+   }
+  }),
+  error=>error?.nonRetryable===true && /no complete review verdict/.test(error.message)
+ );
+ assert.equal(m.calls().posts,0);
+});

@@ -7,6 +7,7 @@ import {readFileSync} from 'node:fs';
 import {openDatabase} from '../src/db.mjs';
 import {allowedRepositories} from '../src/review-policy.mjs';
 import {requestWorkerReview,getWorkerReviewStatus,validateWorkerReviewInput,workerReviewAllowed} from '../src/worker-review.mjs';
+import {retryState} from '../src/queue-policy.mjs';
 const repo='ibboabdoli-ai/Proffera',sha='a'.repeat(40);
 const policy={
  aiManualReviewRepositories:allowedRepositories(repo),
@@ -112,4 +113,14 @@ test('stale PostgreSQL worker lease fails closed without paid replays',()=>{
  assert.match(source,/UPDATE jobs SET status='failed'/);
  assert.match(source,/UPDATE reviews SET status='failed'/);
  assert.doesNotMatch(source,/UPDATE jobs SET status='queued' WHERE status='running'/);
+});
+
+test('possible AI spending makes the first failed attempt terminal, without an automatic paid retry',()=>{
+ assert.deepEqual(retryState(1,1000,true),{failed:true,nextAttemptAt:1000});
+ assert.deepEqual(retryState(1,1000,false),{failed:false,nextAttemptAt:61000});
+ assert.equal(retryState(3,1000,false).failed,true);
+ const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
+ assert.match(server,/modelCallsMayHaveStarted\|\|err\?\.nonRetryable===true/);
+ assert.match(server,/finished_at=CURRENT_TIMESTAMP WHERE id=\?/);
+ assert.match(server,/priorJob\?\.status==='queued'/);
 });
