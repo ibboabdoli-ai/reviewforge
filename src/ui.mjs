@@ -56,8 +56,28 @@ const issueSummary=r=> {let items=[];try{items=JSON.parse(r.findings_json||'[]')
 function reviewRow(r){const n=issueSummary(r);return `<a class="review-row" href="/reviews/${r.id}"><span class="pr-ico">⌘</span><span class="pr-title"><strong>${s(r.pr_title)}</strong><small>${s(r.full_name||'demo / sample-repository')} <b>·</b> #${s(r.pr_number)} <b>·</b> ${s(r.author)}</small></span><span class="review-issues ${n?'':'none'}">${r.status==='partial'?'⚠ Partial review':n?`⚑ ${n} ${n===1?'issue':'issues'}`:r.status==='completed'?'✓ Clean':'Pending'}</span>${badge(r.status)}<span class="row-arrow">›</span></a>`;}
 export async function reviewsPage(db,user,token,{demo=false}={}){
   const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 100`).all(user.id);
-  const body=header('Code reviews','A searchable history of reviewed pull requests.',demo?'<a href="/demo/analyze" class="btn btn-primary">+ New demo review</a>':'')+`<section class="panel full-panel"><div class="panel-header"><div><h3>Review activity</h3><p>${reviews.length} most recent records</p></div><div class="filter-label">Newest first</div></div><div class="review-list">${reviews.length?reviews.map(reviewRow).join(''):'<div class="empty-state">No reviews to display.</div>'}</div></section>`;
+  const body=header('Code reviews','A searchable history of reviewed pull requests.',demo?'<a href="/demo/analyze" class="btn btn-primary">+ New demo review</a>':'<a href="/reviews/manual" class="btn btn-primary">+ Manual shadow review</a>')+`<section class="panel full-panel"><div class="panel-header"><div><h3>Review activity</h3><p>${reviews.length} most recent records</p></div><div class="filter-label">Newest first</div></div><div class="review-list">${reviews.length?reviews.map(reviewRow).join(''):'<div class="empty-state">No reviews to display.</div>'}</div></section>`;
   return base({title:'Code reviews',body,user,active:'/reviews',demo,csrfToken:token});
+}
+export async function manualReviewPage(db,user,token,query=new URLSearchParams()){
+  const repos=await db.prepare("SELECT p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND i.status='active' AND p.enabled=1 ORDER BY p.full_name").all(user.id);
+  const allowed=repos.filter(r=>config.aiManualReviewRepositories.includes(String(r.full_name).toLowerCase()) &&
+    config.aiShadowRepositories.includes(String(r.full_name).toLowerCase()) &&
+    config.aiAllowedRepositories.includes(String(r.full_name).toLowerCase()));
+  const preferred=String(query.get('repository')||'ibboabdoli-ai/Proffera');
+  const pr=String(query.get('pr')||'').replace(/[^0-9]/g,'').slice(0,8);
+  const body=header('Manual shadow review','Review the current exact PR commit without posting any GitHub comments or approvals.',
+    '<a class="btn btn-outline" href="/reviews">← Back to reviews</a>')+
+    '<div class="panel padded-panel demo-form"><div class="panel-header"><div><h3>Request a code review</h3><p>The live GitHub commit SHA is captured when you submit. Draft PRs can be inspected.</p></div><span class="plan-chip">NO POSTING</span></div>'+
+    (allowed.length&&integrations().ai?'<form method="post" action="/reviews/manual">'+csrf(token)+
+      '<label for="repository">Repository</label><select id="repository" name="repository" required>'+
+      allowed.map(r=>'<option value="'+s(r.full_name)+'"'+(r.full_name===preferred?' selected':'')+'>'+s(r.full_name)+'</option>').join('')+
+      '</select><label for="pr_number">Pull request number</label><input id="pr_number" type="number" min="1" max="99999999" name="pr_number" value="'+s(pr)+'" required>'+
+      '<p class="form-note">Read-only AI review. No PR modifications, GitHub comments, approvals, or merges. AI API usage may incur a charge.</p>'+
+      '<button class="btn btn-primary btn-xl" type="submit">Start manual shadow review →</button></form>':
+      '<div class="empty-state">Manual review is not enabled for your connected workspace, or AI is unavailable.</div>')+
+    '</div>';
+  return base({title:'Manual review',body,user,active:'/reviews',csrfToken:token});
 }
 export async function reviewDetail(db,user,token,id,{demo=false}={}){
   const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND i.owner_user_id=?`).get(id,user.id);
