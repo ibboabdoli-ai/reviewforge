@@ -41,3 +41,15 @@ The app starts at `http://localhost:3000`. The local demo uses a deterministic r
 ## Proffera shadow pilot (CodeRabbit comparison)
 
 The only authorized Proffera pilot runs in **dry-run**: keep `REVIEW_POST_MODE=dry-run`, set `AI_SHADOW_REPOSITORIES=ibboabdoli-ai/proffera` as an additional immutable-at-review-time gate, and include only `ibboabdoli-ai/proffera` in `AI_ALLOWED_REPOSITORIES`. Use a very small `AI_DAILY_REQUEST_LIMIT`; one model batch consumes one reservation. A review needing more than the cap is not started. The review results remain only in ReviewForge. The GitHub App has repository permission but may not publish review comments to Proffera through this pipeline. Do not remove CodeRabbit or modify Proffera code during shadow evaluation.
+
+## Proffera model routing and unlimited shadow-review count
+
+Proffera's optional shadow pilot (read-only analysis) can bypass daily AI-attempt and monthly SaaS review-count caps **only** when `ibboabdoli-ai/proffera` appears in all three variables:
+
+- `AI_ALLOWED_REPOSITORIES`
+- `AI_SHADOW_REPOSITORIES` (forces dry-run and no comments, even if global posting is changed)
+- `AI_UNLIMITED_REPOSITORIES`
+
+Automatic model routing is a separate explicit opt-in: `AI_AUTO_MODEL_REPOSITORIES=ibboabdoli-ai/proffera`. The code selects `gpt-6-luna` (medium reasoning) for routine changes and `gpt-6.1-sol` (high reasoning) for security, billing, data integrity, infrastructure or complex changes. The selected model appears in the review summary.
+
+**Removing daily attempt limits does not remove API costs or provider rate limits.** At most four model batches are processed per PR, and SHA deduplication is retained. Set OpenAI project usage alerts and spending limits separately. No code in Proffera is changed; CodeRabbit continues independently.
