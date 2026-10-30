@@ -5,7 +5,7 @@ ReviewForge is an AI-assisted GitHub pull-request review application. This is an
 ## Current status
 
 - Dashboard, OAuth routes, GitHub App webhook, review analysis, dry-run pipeline, and Stripe test-mode handlers are implemented.
-- GitHub App OAuth, signed webhooks and OpenAI integration have been verified on **reviewforge-sandbox**: one dry-run and one live review found three sample issues; the live test posted inline GitHub comments. The AI key is configured as a Vercel secret, but **AI_REVIEW_ENABLED=false** for safety.
+- GitHub App OAuth, signed webhooks and OpenAI integration have been verified on **reviewforge-sandbox**: one dry-run and one live review found three sample issues; the live test posted inline GitHub comments. The AI key is a Vercel secret. As verified on 30 October 2026, **AI_REVIEW_ENABLED=true** only for explicitly allowlisted Proffera shadow reviews; GitHub review publishing remains `dry-run`. Model calls can incur charges.
 - **Review posting disabled** by default: `REVIEW_POST_MODE=dry-run`.
 - The beta restricts AI jobs to the exact `AI_ALLOWED_REPOSITORIES` list (`reviewforge-sandbox` in production); a database-atomic `AI_DAILY_REQUEST_LIMIT=2` counts **model attempts per UTC day**. This is not a guaranteed dollar cap; use provider billing alerts/limits too.
 - **Billing not enabled** until Stripe test credentials and webhook tests are configured.
@@ -81,4 +81,8 @@ This Worker endpoint **never** submits comments, GitHub approvals, merges, or di
 
 ### Expired serverless review attempts
 
-If an AI review exceeds Vercel's execution lease, the authenticated Worker status API returns `stalled` rather than implying success. On the next queue claim, ReviewForge atomically marks the expired review/job as `failed`. It does **not** replay paid model calls automatically. The Worker must report the failed/stalled result; no approval or merge is permitted. This addresses the risk of repeated charges or misleading clean reviews after a serverless timeout. Long multi-batch reviews still need a separate durable incremental processing design for reliable completion.
+An expired Vercel execution is never treated as a clean review. Authenticated status reads and owner dashboard reads reconcile expired `running` jobs to terminal `failed` without starting AI. A request timing out while a paid model may have run is **never replayed automatically**; a failed/stalled review is not eligible for approval, posting, or merge.
+
+**Incremental execution (migration 005):** Each serverless invocation processes **at most one model batch** and saves a durable SHA-256 plan digest and validated results to `review_progress`. Full patches are NOT stored. If more batches remain, the review returns `queued` with `progress.completed_batches` and `progress.total_batches`. The trusted Worker must request the **same exact repository/PR/HEAD** again using the already documented authenticated `POST /internal/reviews/request`; this idempotently resumes the existing queued job and triggers only that review ID. Check `GET /internal/reviews/status` after each continuation, and stop on `completed`, `partial`, `failed`, `skipped` or `superseded`. Do not press Start again for failed/stalled work or try to manually reset it to queued.
+
+When no external Worker invokes another step, the daily authenticated Vercel Cron can process one queued batch, but **rapid unattended multi-batch completion is not guaranteed** on the Hobby schedule. The daily cron's first actual execution must still be verified. If the diff is too large to cover within four bounded batches, the review is explicitly `partial` without a paid model call or a clean verdict.
