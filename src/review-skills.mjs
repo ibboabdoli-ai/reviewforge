@@ -33,6 +33,8 @@ const SKILLS=[
    instruction:'CONCURRENCY SKILL: inspect at-least-once delivery, duplicate workers, job ownership, retries, backoff, stale status transitions, idempotency and partial-failure recovery.'},
   {id:'frontend',match:/(?:^|\/)(?:components?|pages?|views?|ui|app|public|client|frontend)(?:\/|\.|-)|\.(?:vue|svelte|tsx|jsx|html|css)$/i,
    instruction:'FRONTEND SKILL: look for stale state, async loading races, incorrect navigation, conditional rendering regressions, unsafe DOM operations and missing error states. Report accessibility only when it causes a demonstrable user-facing functional failure.'},
+  {id:'domain-integrity',match:/(?:^|[-_./])(?:discovery|directory|validation|verification|queue|backoff|retry|publication)(?:[-_./]|$)/i,
+   instruction:'STATEFUL DOMAIN SKILL: compare error classification to the exact requested entity; inspect mixed-record responses, API partial failures, per-entity identity, retry units, source fingerprints, idempotency and old/new behavior. Check that regression tests cover each stateful branch and cannot pass with the intended bug present.'},
   {id:'tests',match:/(?:^|\/)(?:tests?|__tests__|e2e|specs?|fixtures?)(?:\/|\.)|\.(?:test|spec)\.[cm]?[jt]sx?$/i,
    instruction:'TEST INTEGRITY SKILL: detect false-positive tests, assertions that never run, mocks that skip real behavior, stale fixtures, missing negative paths and tests that cannot fail when production behavior breaks. Cite the precise faulty assertion or setup.'},
   {id:'supply-chain',match:/(?:^|\/)(?:package\.json|\.github\/workflows\/|Dockerfile|dependabot|ci|scripts\/)/i,

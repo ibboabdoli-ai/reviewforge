@@ -14,6 +14,8 @@ export const config = {
   aiShadowRepositories: allowedRepositories(process.env.AI_SHADOW_REPOSITORIES),
   aiUnlimitedRepositories: allowedRepositories(process.env.AI_UNLIMITED_REPOSITORIES),
   aiAutoModelRepositories: allowedRepositories(process.env.AI_AUTO_MODEL_REPOSITORIES),
+  // Opt-in to bounded, SHA-pinned context fetching; default is deny all.
+  aiContextRepositories: allowedRepositories(process.env.AI_CONTEXT_REPOSITORIES),
   aiFallbackOnlyRepositories: allowedRepositories(process.env.AI_FALLBACK_ONLY_REPOSITORIES),
   aiManualReviewRepositories: allowedRepositories(process.env.AI_MANUAL_REVIEW_REPOSITORIES),
   aiWorkerRequestRepositories: allowedRepositories(process.env.AI_WORKER_REQUEST_REPOSITORIES),

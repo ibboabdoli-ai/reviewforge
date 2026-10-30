@@ -4,6 +4,7 @@ import { githubApi, installationToken, changedFiles, postReview } from './github
 import { planReviewBatches, coverageSummary, validateFindings, reviewWithAI } from './reviewer.mjs';
 import { repositoryAllowed } from './review-policy.mjs';
 import { selectReviewModel } from './model-router.mjs';
+import { collectReviewContext } from './review-context.mjs';
 
 /**
  * One paid model batch per invocation, with a durable checkpoint between calls.
@@ -45,6 +46,17 @@ export async function analyzePullRequestStep({
   // Keep individual LLM calls modest enough for Vercel's 120s maximum.
   // The legacy all-at-once pipeline retains its previous batch size.
   const {batches,coverage}=planReviewBatches(files,{maxBatchCharacters:24000});
+  const useContext=repositoryAllowed(repository,config.aiContextRepositories);
+  // For staged reviews, compute every input before the first paid attempt.
+  const reviewContext=useContext
+    ? await (deps.collectReviewContext || collectReviewContext)({
+        repository,sha:headSha,files,token,api
+      })
+    : null;
+  // Model selection must consider the entire PR, not only the current batch.
+  const modelChoice=repositoryAllowed(repository,config.aiAutoModelRepositories)
+    ?selectReviewModel(batches.flat(),{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep})
+    :null;
   // Never pay for a scan that is known to omit required diff hunks.
   if(!coverage.complete || !batches.length) return {
     status:'partial',posted:0,findings:[],coverage,
@@ -52,7 +64,7 @@ export async function analyzePullRequestStep({
   };
 
   const planHash=createHash('sha256').update(JSON.stringify({
-    headSha,postMode,allowDraft,batches,coverage,
+    headSha,postMode,allowDraft,batches,coverage,reviewContext,
     modelPolicy:{
       auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
       defaultModel:config.openai.model,
@@ -99,10 +111,9 @@ export async function analyzePullRequestStep({
 
   if(next<batches.length){
     const batch=batches[next];
-    const choice=repositoryAllowed(repository,config.aiAutoModelRepositories)
-      ?selectReviewModel(batch,{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep})
-      :null;
+    const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
+      ...(reviewContext?{reviewContext}:{}) ,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})};
     deps.onModelStart?.();
     let response;
