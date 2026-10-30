@@ -42,7 +42,9 @@ export async function analyzePullRequestStep({
   const files=await (deps.changedFiles || changedFiles)({
     repoFullName:repository,prNumber:number,token
   });
-  const {batches,coverage}=planReviewBatches(files);
+  // Keep individual LLM calls modest enough for Vercel's 120s maximum.
+  // The legacy all-at-once pipeline retains its previous batch size.
+  const {batches,coverage}=planReviewBatches(files,{maxBatchCharacters:24000});
   // Never pay for a scan that is known to omit required diff hunks.
   if(!coverage.complete || !batches.length) return {
     status:'partial',posted:0,findings:[],coverage,
@@ -50,7 +52,13 @@ export async function analyzePullRequestStep({
   };
 
   const planHash=createHash('sha256').update(JSON.stringify({
-    headSha,postMode,allowDraft,batches,coverage
+    headSha,postMode,allowDraft,batches,coverage,
+    modelPolicy:{
+      auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
+      defaultModel:config.openai.model,
+      fastModel:config.openai.modelFast,
+      deepModel:config.openai.modelDeep
+    }
   })).digest('hex');
   let progress=await deps.loadProgress(reviewId);
   let results=[];
