@@ -6,7 +6,7 @@ import { redactKnownTokens } from './reviewer.mjs';
 export const MAX_CONTEXT_CHARS=12000;
 const SOURCE_LIMIT=2, IMPORT_LIMIT=3;
 const SAFE_SOURCE=/^(?:src|app|lib|tests)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
-const DENIED=/(^|\/)(?:\.|node_modules\/|__secrets__\/)|(?:^|\/)(?:secret|credentials|private-key|id_rsa)(?:[./-]|$)/i;
+const DENIED=/(^|\/)(?:\.|node_modules\/|__secrets__\/)|(?:^|\/)(?:secrets?|credentials|private-key|id_rsa)(?:[./-]|$)/i;
 export function safeContextPath(path){
   return typeof path==='string' && path.length<180 && SAFE_SOURCE.test(path)
     && !path.split('/').includes('..') && !DENIED.test(path);
