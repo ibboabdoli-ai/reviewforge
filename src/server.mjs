@@ -212,7 +212,11 @@ export async function processQueue(){
       number:job.pr_number,
       headSha:job.head_sha,
       installationId:job.installation_id,
-      postMode:effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories)
+      postMode:effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
+        fallbackOnly:config.aiFallbackOnlyRepositories,
+        approval:config.aiFallbackApprovalRepositories,
+        allowed:config.aiAllowedRepositories
+      })
     },{
       reserveModelCalls:async count=>{
         // Explicitly approved shadow repositories bypass only daily attempts.
