@@ -11,7 +11,7 @@ import { analyzePullRequest } from './pipeline.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 
 assertConfig();
@@ -84,7 +84,11 @@ async function webhookGithub(req,res){
         ON CONFLICT(id) DO NOTHING`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
       const allowance=await allowedReviews(db,installed.owner_user_id);
-      if(rr&&allowance.used<allowance.limit){
+      const shadowUnlimited=isUnlimitedShadowRepository(repo.full_name,{
+        allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
+        unlimited:config.aiUnlimitedRepositories
+      });
+      if(rr&&(allowance.used<allowance.limit||shadowUnlimited)){
         const row=await db.prepare(`INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status)
           VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING`).run(inst.id,repo.id,pr.number,pr.title?.slice(0,250)||'',pr.user?.login||'',pr.head?.sha||'');
         if(row.changes){
@@ -142,6 +146,10 @@ export async function processQueue(){
       await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
       return 'skipped';
     }
+    const shadowUnlimited=isUnlimitedShadowRepository(job.full_name,{
+      allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
+      unlimited:config.aiUnlimitedRepositories
+    });
     const result=await analyzePullRequest({
       repository:job.full_name,
       number:job.pr_number,
@@ -150,6 +158,9 @@ export async function processQueue(){
       postMode:effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories)
     },{
       reserveModelCalls:async count=>{
+        // Explicitly approved shadow repositories bypass only daily attempts.
+        // Each PR remains deduplicated by SHA and limited to four batches.
+        if(shadowUnlimited)return {allowed:true};
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
         const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
         return allowed?{allowed:true}:{allowed:false,reason:'daily-used'};
