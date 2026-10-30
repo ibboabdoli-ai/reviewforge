@@ -1,131 +1,107 @@
-# مرحله دوم: اتصال واقعی GitHub App و هوش مصنوعی
+# اتصال واقعی ReviewForge به GitHub App و OpenAI — راهنمای محیط فعلی
 
-نسخه: ReviewForge v0.2.0
+**به‌روزرسانی: ۳۰ اکتبر ۲۰۲۶ | شاخه توسعه: `work/neon-vercel-bootstrap`**
 
-**نکته امنیتی:** کلید خصوصی، رمز وبهوک، کلید OpenAI و رمز کلاینت GitHub را در چت، تصویر، GitHub Issue یا فایل کد قرار ندهید. آن‌ها را فقط در secrets محیط اجرای خودتان ذخیره کنید.
+این راهنما مخصوص نسخه فعلی ReviewForge روی **Vercel + Neon PostgreSQL** است. دستورهای Docker/SQLite نسخه‌های قدیمی را برای انتشار فعلی دنبال نکنید.
 
-## وضعیت فعلی
+## وضعیت تأییدشده
 
-- موتور بررسی و دو حالت `dry-run` و `live` پیاده‌سازی شده‌اند.
-- حالت پیش‌فرض `dry-run` است: تحلیل هوش مصنوعی اجرا می‌شود، ولی هیچ کامنتی در GitHub نوشته نمی‌شود.
-- تست‌های محلی با پاسخ‌های ساختگی GitHub و OpenAI انجام شده‌اند؛ اتصال به حساب واقعی هنوز تست نشده است.
+- مخزن: https://github.com/ibboabdoli-ai/reviewforge
+- سرویس: https://reviewforge-wzardmn.vercel.app
+- انتشار آخر در Vercel: READY؛ پاسخ HTTP زنده باید جداگانه بررسی شود.
+- `APP_URL` در Vercel روی همین آدرس تنظیم شده است.
+- `GITHUB_APP_ID`، `GITHUB_APP_SLUG` و `GITHUB_CLIENT_ID` موجودند. نام App: `reviewforge-ibbo-dev`.
+- نام متغیرهای رمزدار `GITHUB_CLIENT_SECRET`، `GITHUB_PRIVATE_KEY` و `GITHUB_WEBHOOK_SECRET` در تنظیمات Production ثبت شده‌اند، **اما درست‌بودن مقدارشان تأیید نشده است**.
+- `DATABASE_URL` و `SESSION_SECRET` و `WORKER_SECRET` در پروژه ثبت شده‌اند؛ مقادیر مخفی را آشکار نکنید.
+- `REVIEW_POST_MODE=dry-run` و `AI_REVIEW_ENABLED=false`. بنابراین **هیچ بررسی پولی و هیچ کامنت خودکاری نباید فعال باشد**.
+- `OPENAI_API_KEY` در فهرست تنظیمات فعلی وجود ندارد.
+- پرداخت Stripe هنوز فعال نشده است. این نسخه هنوز آماده فروش عمومی نیست.
 
-## قدم ۱ — راه‌اندازی سرور دارای HTTPS
+## ۱. نشانی‌های GitHub App را بدون ساخت App جدید تطبیق بدهید
 
-برای دریافت رویدادهای GitHub به یک نشانی عمومی HTTPS احتیاج دارید. `http://localhost:3000` برای دریافت وبهوک‌های مستقیم GitHub کافی نیست.
+در GitHub وارد **Settings → Developer settings → GitHub Apps → reviewforge-ibbo-dev** شوید:
 
-می‌توانید برنامه را روی سرور دائمی دارای Docker و HTTPS reverse proxy اجرا کنید. از SQLite همراه با Volume پایدار استفاده کنید؛ این نسخه برای اجرای چند نمونه همزمان یا سرورلس طراحی نشده است.
+| فیلد | مقدار دقیق |
+| --- | --- |
+| Homepage URL | `https://reviewforge-wzardmn.vercel.app/` |
+| User authorization callback URL | `https://reviewforge-wzardmn.vercel.app/auth/github/callback` |
+| Setup URL | `https://reviewforge-wzardmn.vercel.app/github/setup` |
+| Webhook URL | `https://reviewforge-wzardmn.vercel.app/webhooks/github` |
 
-نشانی نمونه زیر را با نشانی سرور خودتان جایگزین کنید:
+Webhook را روشن و **SSL verification** را فعال نگه دارید.
 
-```env
-APP_URL=https://review.example.com
-```
+Repository permissions:
+- **Contents**: Read-only
+- **Pull requests**: Read and write
+- **Issues**: Read and write (برای fallback summary comment)
+- **Metadata**: Read-only
 
-## قدم ۲ — ساخت GitHub App
+Subscribe to events: **Pull request**, **Installation**, **Installation repositories**.
 
-به آدرس زیر بروید:
+**هشدار:** مقدار Webhook secret در GitHub App و `GITHUB_WEBHOOK_SECRET` در Vercel باید دقیقاً یکسان باشد. Private Key و Client Secret نیز باید متعلق به همین App باشند. کلیدها را در چت، لاگ، ریپازیتوری یا تصویر منتشر نکنید؛ فقط در Secret/Environment Variables سرور وارد کنید.
 
-https://github.com/settings/apps/new
+## ۲. تنظیمات Vercel را بررسی کنید
 
-**نام:** `ReviewForge-Dev` (فقط یک پیشنهاد؛ نام باید در GitHub آزاد باشد)
+مسیر: Vercel → project **reviewforge** → Settings → Environment Variables.
 
-| قسمت در GitHub | مقدار |
-|---|---|
-| Homepage URL | `https://review.example.com/` |
-| User authorization callback URL | `https://review.example.com/auth/github/callback` |
-| Setup URL | `https://review.example.com/github/setup` |
-| Webhook URL | `https://review.example.com/webhooks/github` |
+در محیط Production نام‌های زیر باید وجود داشته باشند:
+`APP_URL`, `DATABASE_URL`, `SESSION_SECRET`, `WORKER_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_SLUG`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`.
 
-در بخش Permissions:
+نکته: صرف وجود اسم یک متغیر به‌معنای معتبر بودن مقدارش نیست. اگر مقدار رمزدار را اصلاح کردید، انتشار جدید لازم است تا Runtime نسخه جدید آن را دریافت کند. **بدون نیاز کلید را دوباره تولید نکنید**.
 
-- `Contents` → `Read-only`
-- `Pull requests` → `Read and write`
-- `Issues` → `Read and write` (فقط برای کامنت خلاصه در زمان خطای 422)
-- `Metadata` → `Read-only` (پیش‌فرض)
-
-در بخش Subscribe to events:
-
-- `Pull request`
-- `Installation`
-- `Installation repositories`
-
-**Webhook:** فعال و SSL verification روشن باشد. یک رشته تصادفی قوی برای webhook secret بسازید. بعد از ساخت برنامه، یک private key بسازید، و App ID، App slug، Client ID و Client secret را از پنل GitHub دریافت کنید. قابلیت expiring user access tokens توصیه می‌شود.
-
-برای یک تست ایمن، برنامه را روی مخزن آزمایشی نصب کنید؛ نه مخزن محصول یا سرویس مشتری.
-
-## قدم ۳ — اتصال مدل هوش مصنوعی
-
-از داشبورد سرویس OpenAI، کلید API مخصوص پروژه توسعه ایجاد کنید و سقف هزینه مشخص بگذارید.
+فعلاً این دو مقدار باید تغییر نکنند:
 
 ```env
-OPENAI_API_KEY=...
-OPENAI_MODEL=gpt-4.1-mini
-```
-
-کد منبع در قالب diff به API هوش مصنوعی ارسال می‌شود. قبل از استفاده روی کد خصوصی یا مشتری، مقررات دسترسی، حریم خصوصی و پردازش داده را بررسی کنید. حذف احتمالی tokenها در کد تضمین نمی‌کند هیچ داده حساسی ارسال نشود.
-
-## قدم ۴ — تنظیمات محلی
-
-در PowerShell، در پوشه ReviewForge:
-
-```powershell
-Copy-Item .env.example .env
-node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
-```
-
-خروجی دستور دوم را در متغیر `SESSION_SECRET` ذخیره کنید. بقیه مقادیر را فقط در فایل `.env` محلی یا secrets سرور وارد کنید:
-
-```env
-SESSION_SECRET=...
-GITHUB_APP_ID=...
-GITHUB_APP_SLUG=...
-GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
-GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"
-GITHUB_WEBHOOK_SECRET=...
-OPENAI_API_KEY=...
 REVIEW_POST_MODE=dry-run
+AI_REVIEW_ENABLED=false
 ```
 
-**مهم:** ساختار PEM ممکن است با `BEGIN PRIVATE KEY` نیز شروع شود؛ خط‌های واقعی فایل PEM خودتان را حفظ کنید. واردکردن مقدار ساختگی باعث احراز هویت ناموفق می‌شود.
+## ۳. ورود واقعی GitHub را تست کنید
 
-سپس:
+1. از https://reviewforge-wzardmn.vercel.app بازدید کنید.
+2. **Sign in with GitHub** را بزنید و ورود را کامل کنید.
+3. اگر با خطای 503 مواجه شدید، Client Secret و callback URL را تطبیق دهید.
+4. پس از ورود، بررسی کنید Dashboard باز شود و بتوانید صفحه Repositories را ببینید.
 
-```powershell
-npm test
-npm run doctor
-npm start
-```
+**تا قبل از موفقیت ورود، App را روی هیچ مخزن کاری نصب نکنید.**
 
-`npm run doctor` فقط وجود و شکل کلی تنظیمات را بررسی می‌کند؛ با GitHub/OpenAI تماس نمی‌گیرد و کلیدها را چاپ نمی‌کند.
+## ۴. نصب امن GitHub App
 
-## قدم ۵ — اولین آزمایش با GitHub
+1. از Dashboard گزینه **Install GitHub App** را بزنید.
+2. فقط یک مخزن آزمایشی غیرمهم را با **Only select repositories** انتخاب کنید.
+3. در Dashboard گزینه **Sync GitHub** را بزنید.
+4. در GitHub App Settings → **Advanced → Recent Deliveries** ارسال‌های وبهوک را بررسی کنید. برای payload معتبر، پاسخ قابل انتظار از ReviewForge معمولاً HTTP `202` است.
+5. ابتدا صرفاً یک PR آزمایشی غیر Draft باز کنید. **تا قبل از فعال‌سازی AI، قرار نیست Review هوشمند ساخته شود**.
 
-1. با گزینه `Sign in with GitHub` وارد ReviewForge شوید.
-2. `Install GitHub App` را بزنید و فقط یک مخزن تست انتخاب کنید.
-3. در داشبورد `Sync GitHub` را اجرا کنید تا آن مخزن ثبت شود.
-4. یک Pull Request **غیردرفت** با تغییر کوچک در مخزن تست باز کنید.
-5. GitHub وبهوک امضاشده را ارسال می‌کند، ReviewForge تغییرات را می‌گیرد و مدل AI تحلیل را انجام می‌دهد.
-6. در `Reviews` نتیجه را ببینید. در `dry-run` نباید هیچ کامنتی در GitHub ایجاد شده باشد.
+## ۵. فعال‌کردن هوش مصنوعی، تنها برای آزمایش کنترل‌شده
 
-اگر خروجی با انتظار شما مطابقت داشت، در تنظیمات سرور:
+1. در OpenAI یک **API Key مجزا برای توسعه** و سقف هزینه مشخص ایجاد کنید.
+2. آن را **مستقیماً در Vercel** به‌صورت Secret با کلید `OPENAI_API_KEY` ذخیره کنید.
+3. تا قبل از تأیید ورود، نصب، رویداد وبهوک و بررسی صف، `AI_REVIEW_ENABLED` را تغییر ندهید.
+4. بعد از تأیید، با مجوز مالک و سقف هزینه پایین، `AI_REVIEW_ENABLED=true` را فعال و نسخه جدید را منتشر کنید؛ `REVIEW_POST_MODE=dry-run` باقی بماند.
+5. یک PR آزمایشی جدید باز کنید، گزارش را در داشبورد بررسی و تأیید کنید که **هیچ کامنتی در GitHub منتشر نشده است**.
 
-```env
-REVIEW_POST_MODE=live
-```
+محتوای Diff به سرویس هوش مصنوعی ارسال می‌شود. روی کد مشتری یا اطلاعات حساس بدون بازبینی حریم خصوصی تست نکنید.
 
-سرویس را مجدداً راه‌اندازی کنید و یک commit **جدید** به همان PR آزمایشی بفرستید تا بررسی جدیدی اجرا شود. این‌بار کامنت در GitHub منتشر می‌شود.
+## ۶. پیش‌شرط‌های حالت LIVE
 
-## رفع اشکال سریع
+تنها پس از موفقیت آزمایش dry-run، بررسی زمان‌بندی و بازیابی Jobها، محدودکردن هزینه، و تأیید مالک می‌توان `REVIEW_POST_MODE=live` را در محیط آزمایش فعال کرد. یک Commit جدید روی PR آزمایشی ایجاد کنید و بررسی کنید که نتیجه مرتبط با همان HEAD منتشر شود.
 
-- **نمی‌توان وارد شد:** Client ID، Client secret و آدرس callback را بررسی کنید.
-- **مخزن نمایش داده نمی‌شود:** Installation permissions، حساب GitHub و Sync را بررسی کنید.
-- **هیچ بررسی شروع نمی‌شود:** وضعیت webhook deliveries در تنظیمات GitHub App، اتصال HTTPS، وجود OpenAI key و لاگ Worker را بررسی کنید.
-- **بررسی انجام می‌شود ولی کامنتی وجود ندارد:** ممکن است `REVIEW_POST_MODE=dry-run` باشد؛ یا PR در زمان تحلیل تغییر کرده باشد.
-- **خطای 403:** مجوزهای نصب‌شده در GitHub App را بررسی کنید.
-- **خطای AI یا قبض بالا:** محدودیت حجم diff، تعداد PRها، کلید OpenAI و سقف هزینه را بررسی کنید.
+برای سرورلس، پردازش اولیه با `waitUntil` شروع می‌شود؛ بازیابی کارهای معوق به Scheduler و مسیر محافظت‌شده `POST /internal/process-queue` با `WORKER_SECRET` نیاز دارد. این بخش را قبل از اتکای عملیاتی آزمایش کنید.
 
-## قبل از مشتری واقعی
+## ۷. پرداخت و عرضه عمومی
 
-نسخه فعلی هنوز به PostgreSQL، صف پایدار، کنترل هزینه/محدودیت، تنظیمات سازمانی، پشتیبان‌گیری، قوانین حفظ داده، پایش خطا و تست end-to-end با حساب آزمایشی نیاز دارد.
+فعلاً Stripe، اشتراک پولی و نصب روی مخزن‌های مشتری **غیرفعال بمانند**. ابتدا GitHub OAuth و webhook و صف و AI را تست کنید؛ سپس Stripe Test Mode، کنترل امنیت کاربران، مدیریت داده، حریم خصوصی و پایش هزینه را تکمیل کنید.
+
+## چک‌لیست اعتبارسنجی
+
+- [ ] ورود GitHub موفق
+- [ ] نصب App فقط روی مخزن تست
+- [ ] Sync installations موفق
+- [ ] دریافت Webhook امضاشده HTTP 202
+- [ ] مشاهده Review در داشبورد در حالت dry-run
+- [ ] عدم ارسال کامنت در dry-run
+- [ ] بازیابی Jobهای معوق تست‌شده
+- [ ] بررسی امنیت و هزینه قبل از live
+
+**هیچ کلید خصوصی را از طریق چت ارسال نکنید.**
