@@ -15,19 +15,46 @@ export function redactKnownTokens(patch){
   return patch.replace(/sk-(?:proj-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}/g,'[REDACTED_TOKEN]')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi,'$1[REDACTED_TOKEN]');
 }
-export function safeFiles(files) {
-  let length=0; const result=[];
-  for(const file of files) {
-    if(result.length>=35)break;
-    if(!file.patch||!file.filename||file.status==='removed')continue;
-    if(/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i.test(file.filename))continue;
-    if(/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/.test(file.filename))continue;
-    const patch=redactKnownTokens(file.patch.slice(0,6500));
-    if(length+patch.length>65000)break;
-    length+=patch.length;
-    result.push({filename:file.filename,patch});
+// Selection is deterministic, cost-bounded and never silently truncates a
+// unified diff: a partial patch can invalidate line numbers or hide a bug.
+const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
+const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
+const MAX_FILES=35, MAX_FILE_PATCH=6500, MAX_TOTAL_PATCH=65000;
+function priority(path){
+  if(/(?:^|\/)(?:auth|security|billing|payments?|api|webhooks?|middleware)(?:\/|\.|-)|(?:stripe|permissions|session|checkout)/i.test(path))return 0;
+  if(/(?:^|\/)(?:tests?|e2e|__tests__|docs?)(?:\/|\.)|\.(?:md|mdx)$/i.test(path))return 2;
+  return 1;
+}
+export function selectFilesForReview(changedFiles){
+  if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
+  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,complete:true};
+  const candidates=[];
+  for(const [index,file] of changedFiles.entries()){
+    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || GENERATED_PATH.test(file.filename)){
+      coverage.excluded++;continue;
+    }
+    coverage.reviewable++;
+    if(typeof file.patch!=='string' || !file.patch.trim()){coverage.missingPatch++;continue;}
+    // Do not cut file hunks into invalid patches. Mark the review partial.
+    if(file.patch.length>MAX_FILE_PATCH){coverage.oversized++;continue;}
+    candidates.push({index,filename:file.filename,patch:redactKnownTokens(file.patch)});
   }
-  return result;
+  candidates.sort((a,b)=>priority(a.filename)-priority(b.filename)||a.index-b.index);
+  let used=0;
+  const files=[];
+  for(const f of candidates){
+    if(files.length>=MAX_FILES||used+f.patch.length>MAX_TOTAL_PATCH){coverage.limited++;continue;}
+    files.push({filename:f.filename,patch:f.patch});used+=f.patch.length;
+  }
+  coverage.reviewed=files.length;
+  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0;
+  return {files,coverage};
+}
+// Compatibility for callers that only require the bounded payload.
+export function safeFiles(files){return selectFilesForReview(files).files;}
+export function coverageSummary(c){
+  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed or sensitive path(s) ignored.`;
+  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity omissions. Unchecked changes may contain bugs.`;
 }
 const severity=['critical','high','medium','low'];
 export function validateFindings(raw,files) {

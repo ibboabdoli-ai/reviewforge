@@ -100,11 +100,14 @@ export async function changedFiles({repoFullName,prNumber,token}) {
   const [owner,repo]=repoFullName.split('/');
   if(!/^[\w.-]+$/.test(owner||'')|| !/^[\w.-]+$/.test(repo||''))throw new Error('Invalid repository');
   const files=[];
-  for(let page=1;page<=2;page++) {
+  for(let page=1;page<=5;page++) {
     const part=await githubApi(`/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=100&page=${page}`,token);
+    if(!Array.isArray(part))throw new Error('Unexpected GitHub file list response');
     files.push(...part);
-    if(part.length<100)break;
+    if(part.length<100)return files;
   }
+  // A safety guard: don't represent 500/possibly-more files as complete.
+  throw new Error('PR has at least 500 changed files; full review coverage unavailable.');
   return files;
 }
 export async function postReview({repoFullName,prNumber,headSha,token,summary,findings}) {

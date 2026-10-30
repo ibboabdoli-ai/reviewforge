@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addedLines,safeFiles,validateFindings,localDemoReview } from '../src/reviewer.mjs';
+import { addedLines,safeFiles,selectFilesForReview,coverageSummary,validateFindings,localDemoReview } from '../src/reviewer.mjs';
 
 const patch='@@ -7,4 +7,5 @@\n context\n-oldCall();\n+safeCall();\n+console.log(secret);\n last\n';
 test('Unified diff parser returns only new-file changed line numbers',()=>{
@@ -15,7 +15,12 @@ test('Review findings must be anchored to added lines with high confidence',()=>
 });
 test('Large diffs and lockfiles are limited',()=>{
   const files=[{filename:'package-lock.json',patch:'@@ -1 +1 @@\n+a'}, {filename:'src/app.ts',patch:'x'.repeat(70000)}];
-  const got=safeFiles(files);assert.equal(got.length,1);assert.ok(got[0].patch.length<=6500);
+  const selected=selectFilesForReview(files);
+  assert.equal(selected.files.length,0);
+  assert.equal(selected.coverage.oversized,1);
+  assert.equal(selected.coverage.excluded,1);
+  assert.equal(selected.coverage.complete,false);
+  assert.match(coverageSummary(selected.coverage),/INCOMPLETE REVIEW/);
 });
 test('Demo scanner is explicitly labeled non-AI',()=>{
   const result=localDemoReview('@@ -1 +1 @@\n+eval(code)\n+console.log(password)');
