@@ -93,3 +93,23 @@ test('machine API uses existing worker token, no sessions or Github posting',()=
  assert.match(source,/getWorkerReviewStatus\(db,input,config\)/);
  assert.match(source,/postMode:manual\?'dry-run'/);
 });
+
+test('expired worker lease reports stalled, never clean or successful',async()=>{
+ const f=fixture();
+ try{
+  await requestWorkerReview(f.db,f.body,f.deps);
+  f.db.prepare("UPDATE reviews SET status='running' WHERE id=1").run();
+  f.db.prepare("UPDATE jobs SET status='running',next_attempt_at=? WHERE review_id=1").run(Date.now()-1000);
+  const result=await getWorkerReviewStatus(f.db,f.body,policy);
+  assert.equal(result.status,'stalled');
+  assert.equal(result.posted,0);
+  assert.match(result.error,/Timed-out worker/);
+ }finally{f.dispose();}
+});
+test('stale PostgreSQL worker lease fails closed without paid replays',()=>{
+ const source=readFileSync(new URL('../src/db-postgres.mjs',import.meta.url),'utf8');
+ assert.match(source,/WITH expired AS \(/);
+ assert.match(source,/UPDATE jobs SET status='failed'/);
+ assert.match(source,/UPDATE reviews SET status='failed'/);
+ assert.doesNotMatch(source,/UPDATE jobs SET status='queued' WHERE status='running'/);
+});
