@@ -30,3 +30,14 @@ batch count is reserved atomically against the daily model-attempt budget
 before contacting the model. A 79-file PR typically needs at least three
 model attempts: **the existing production daily cap of two means it cannot
 run there until the cap is deliberately raised**. AI is still off.
+
+## PR #953 quality baseline (offline)
+
+- Golden set: proffera-pr953-gold.json, three reviewed cases from exact PR SHA.
+- Earlier ReviewForge review #4 returned zero findings; this is the **0/3 observed baseline**, not a measured improvement.
+- Run: node benchmarks/score-review.mjs to print the zero-findings baseline; optionally pass a local sanitized JSON findings file.
+- Synthetic tests verify cross-file input, scoped project hints, risk routing, and zero GitHub posts. They do not run OpenAI or prove the new reviewer detects the cases.
+- AI_CONTEXT_REPOSITORIES defaults to empty. Explicitly allowing a repository enables immutable SHA-pinned source snippets and stronger routing, which can increase model cost.
+- Any project guidance or source excerpt is untrusted data. Only actual added diff lines can anchor a finding.
+- New model reviews record model-suggestion counts and filtered-finding counts without storing raw model responses.
+- Do not turn a 3/3 gold-set score into a general accuracy claim; test unseen PRs and false positives first.
