@@ -35,7 +35,7 @@ export function home(){
 function header(title,desc,aside=''){return `<div class="page-header"><div><div class="page-eyebrow">OVERVIEW / ${s(title).toUpperCase()}</div><h1>${s(title)}</h1><p>${s(desc)}</p></div><div class="page-actions">${aside}</div></div>`;}
 function statusItems(demo){ const ints=integrations();return [{name:'GitHub App',ready:ints.github},{name:'AI analysis',ready:ints.ai},{name:'Stripe billing',ready:ints.billing}].map(c=>`<div class="config-row"><span><i class="status-dot ${c.ready?'ok':'off'}"></i>${c.name}</span><strong>${c.ready?'Configured':'Needs setup'}</strong></div>`).join('');}
 export async function dashboard(db,user,token,{demo=false,notice=''}={}){
-  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 6`).all(user.id);
+  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 6`).all(user.id);
   const repoCount=demo?3:Number((await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND p.enabled=1 AND i.status='active'`).get(user.id))?.n ?? 0);
   const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=?`).get(user.id))?.n ?? 0);
   const issues=reviews.reduce((sum,r)=>sum+JSON.parse(r.findings_json||'[]').length,0);
@@ -53,9 +53,21 @@ export async function dashboard(db,user,token,{demo=false,notice=''}={}){
   return base({title:'Dashboard',body,user,active:'/dashboard',demo,info:notice,csrfToken:token});
 }
 const issueSummary=r=> {let items=[];try{items=JSON.parse(r.findings_json||'[]')}catch{}return items.length;};
-function reviewRow(r){const n=issueSummary(r);return `<a class="review-row" href="/reviews/${r.id}"><span class="pr-ico">⌘</span><span class="pr-title"><strong>${s(r.pr_title)}</strong><small>${s(r.full_name||'demo / sample-repository')} <b>·</b> #${s(r.pr_number)} <b>·</b> ${s(r.author)}</small></span><span class="review-issues ${n?'':'none'}">${r.status==='partial'?'⚠ Partial review':n?`⚑ ${n} ${n===1?'issue':'issues'}`:r.status==='completed'?'✓ Clean':'Pending'}</span>${badge(r.status)}<span class="row-arrow">›</span></a>`;}
+function reviewRow(r){
+  const n=issueSummary(r);
+  const message=r.status==='failed'?'⚠ Review failed':
+    r.status==='partial'?'⚠ Incomplete review':
+    r.status==='superseded'?'↻ Commit changed':
+    r.status==='skipped'?'Skipped':
+    r.status==='queued' && r.total_batches!=null
+      ?'⏳ Batch '+Number(r.completed_batches)+'/'+Number(r.total_batches):
+    r.status==='running'?'⏳ Reviewing':
+    n?'⚑ '+n+' '+(n===1?'issue':'issues'):
+    r.status==='completed'?'✓ Clean':'Queued';
+  return `<a class="review-row" href="/reviews/${r.id}"><span class="pr-ico">⌘</span><span class="pr-title"><strong>${s(r.pr_title)}</strong><small>${s(r.full_name||'demo / sample-repository')} <b>·</b> #${s(r.pr_number)} <b>·</b> ${s(r.author)}</small></span><span class="review-issues ${n?'':'none'}">${s(message)}</span>${badge(r.status)}<span class="row-arrow">›</span></a>`;
+}
 export async function reviewsPage(db,user,token,{demo=false}={}){
-  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 100`).all(user.id);
+  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 100`).all(user.id);
   const body=header('Code reviews','A searchable history of reviewed pull requests.',demo?'<a href="/demo/analyze" class="btn btn-primary">+ New demo review</a>':'<a href="/reviews/manual" class="btn btn-primary">+ Manual shadow review</a>')+`<section class="panel full-panel"><div class="panel-header"><div><h3>Review activity</h3><p>${reviews.length} most recent records</p></div><div class="filter-label">Newest first</div></div><div class="review-list">${reviews.length?reviews.map(reviewRow).join(''):'<div class="empty-state">No reviews to display.</div>'}</div></section>`;
   return base({title:'Code reviews',body,user,active:'/reviews',demo,csrfToken:token});
 }
@@ -80,11 +92,17 @@ export async function manualReviewPage(db,user,token,query=new URLSearchParams()
   return base({title:'Manual review',body,user,active:'/reviews',csrfToken:token});
 }
 export async function reviewDetail(db,user,token,id,{demo=false}={}){
-  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND i.owner_user_id=?`).get(id,user.id);
+  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND i.owner_user_id=?`).get(id,user.id);
   if(!r)return null; const findings=JSON.parse(r.findings_json||'[]');
+  const progressInfo=r.total_batches!=null?'<p class="meta-note">Batch progress: '+Number(r.completed_batches)+'/'+Number(r.total_batches)+'. Incomplete progress is not a review verdict.</p>':'';
+  const emptyText=r.status==='failed'
+    ?'This review failed. No reliable findings or clean verdict are available.'
+    :r.status==='queued'||r.status==='running'
+      ?'The review is not finished; findings will appear only after all batches complete.'
+      :'No findings recorded for this review.';
   let body=header('Review details',`Pull request #${r.pr_number} · ${r.author}`,`<a class="btn btn-outline" href="/reviews">← Back to reviews</a>`);
-  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p></div></div>
-  <div class="section-title"><h3>Findings <span class="count-badge">${findings.length}</span></h3></div>${findings.length?findings.map(f=>`<article class="finding"><div class="finding-head"><span class="severity severity-${s(f.severity)}">${s(f.severity)}</span><span class="finding-path">${s(f.path)}:${s(f.line)}</span><span class="confidence">${Math.round(Number(f.confidence||0)*100)}% confidence</span></div><h4>${s(f.title)}</h4><p>${s(f.body)}</p></article>`).join(''):'<div class="empty-state small-empty">No findings recorded for this review.</div>'}</div>`;
+  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p>${progressInfo}</div></div>
+  <div class="section-title"><h3>Findings <span class="count-badge">${findings.length}</span></h3></div>${findings.length?findings.map(f=>`<article class="finding"><div class="finding-head"><span class="severity severity-${s(f.severity)}">${s(f.severity)}</span><span class="finding-path">${s(f.path)}:${s(f.line)}</span><span class="confidence">${Math.round(Number(f.confidence||0)*100)}% confidence</span></div><h4>${s(f.title)}</h4><p>${s(f.body)}</p></article>`).join(''):'<div class="empty-state small-empty">${s(emptyText)}</div>'}</div>`;
   return base({title:'Review details',body,user,active:'/reviews',demo,csrfToken:token});
 }
 export async function reposPage(db,user,token,{demo=false,notice=""}={}) {
