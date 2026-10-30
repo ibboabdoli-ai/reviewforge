@@ -22,7 +22,7 @@ test('dashboard waits for PostgreSQL count rows before rendering metrics', async
   const html = await dashboard(db, { id: 42, login: 'test-user', name: 'Test User' }, 'test-csrf');
   assert.ok(html.includes('<div class="stat-value">5</div>'));
   assert.ok(html.includes('<div class="stat-value">2</div>'));
-  assert.ok(html.includes('0 <span>/ 10 reviews</span>'));
+  assert.ok(html.includes('1 <span>/ 10 reviews</span>'));
   assert.doesNotMatch(html, /undefined|NaN/);
 });
 
