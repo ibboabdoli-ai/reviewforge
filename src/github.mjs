@@ -110,17 +110,18 @@ export async function changedFiles({repoFullName,prNumber,token}) {
   throw new Error('PR has at least 500 changed files; full review coverage unavailable.');
   return files;
 }
-export async function postReview({repoFullName,prNumber,headSha,token,summary,findings}) {
+export async function postReview({repoFullName,prNumber,headSha,token,summary,findings,approval=false}) {
   const [owner,repo]=repoFullName.split('/');
   const comments=findings.slice(0,8).map(f=>({path:f.path,line:f.line,side:'RIGHT',body:`**${f.severity.toUpperCase()} · ${f.title}**\n\n${f.body}\n\n_ReviewForge AI · Confidence: ${Math.round(f.confidence*100)}%_`}));
-  const body={commit_id:headSha,event:'COMMENT',body:`## ReviewForge AI review\n\n${summary}\n\n${findings.length} actionable finding(s). AI suggestions may contain mistakes; verify before merging.`,comments};
+  if(approval && findings.length)throw new Error('Cannot approve a PR with findings');
+  const body={commit_id:headSha,event:approval?'APPROVE':'COMMENT',body:(approval?'<!-- reviewforge-fallback-approval:'+headSha+' -->\n':'')+`## ReviewForge AI review\n\n${summary}\n\n${findings.length} actionable finding(s). AI suggestions may contain mistakes; verify before merging.`,comments};
   try {
     await githubApi(`/repos/${owner}/${repo}/pulls/${prNumber}/reviews`,token,{method:'POST',body});
     return 'inline';
   } catch(e) {
     // Fallback is safe only for validation failures, not auth/rate-limit/server errors.
     // Other errors must surface to the bounded retry worker.
-    if (!String(e.message).startsWith('GitHub 422:')) throw e;
+    if (approval || !String(e.message).startsWith('GitHub 422:')) throw e;
     await githubApi(`/repos/${owner}/${repo}/issues/${prNumber}/comments`,token,{method:'POST',body:{body:body.body+`\n\nInline annotations could not be attached. Please check the ReviewForge dashboard.`}});
     return 'summary';
   }
