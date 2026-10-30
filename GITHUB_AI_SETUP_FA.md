@@ -110,3 +110,7 @@ AI_REVIEW_ENABLED=false
 - [ ] رصد هزینه، امنیت چندمستاجری و فعال‌سازی Stripe Test Mode
 
 **هیچ کلید خصوصی را از طریق چت ارسال نکنید.**
+
+### Proffera CodeRabbit fallback subscription
+
+To enable the quota-triggered ReviewForge fallback, visit the GitHub App settings for `ReviewForge-Ibbo-Dev`, open **Permissions & events → Subscribe to events**, enable **Issue comment**, save and accept requested installation permissions if GitHub asks. Keep `Pull request`, `Installation` and `Installation repositories` enabled. No issue-comment trigger means no fallback, even when `AI_FALLBACK_ONLY_REPOSITORIES` is set. `ReviewForge` stays in dry-run without review comments or automatic merges.
