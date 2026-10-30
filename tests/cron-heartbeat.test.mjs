@@ -45,7 +45,7 @@ test('cron and manual worker endpoints authenticate and record safe heartbeats',
   try{
     const res=spawnSync(process.execPath,['--input-type=module','-e',source],{
       cwd:process.cwd(),encoding:'utf8',
-      env:{...process.env,DB_PATH:join(tmp,'cron.sqlite'),DATABASE_URL:'',NODE_ENV:'development',VERCEL:'1',DEMO_MODE:'false',AI_REVIEW_ENABLED:'false',CRON_SECRET:cronSecret,WORKER_SECRET:workerSecret}
+      env:{...process.env,DB_PATH:join(tmp,'cron.sqlite'),DATABASE_URL:'',APP_URL:'https://reviewforge-test.example',NODE_ENV:'development',VERCEL:'1',DEMO_MODE:'false',AI_REVIEW_ENABLED:'false',CRON_SECRET:cronSecret,WORKER_SECRET:workerSecret}
     });
     assert.equal(res.status,0,res.stderr||res.stdout);
     assert.match(res.stdout,/CRON_AUTH_AND_HEARTBEATS_OK/);
