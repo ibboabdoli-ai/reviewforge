@@ -1,6 +1,8 @@
 import { config } from './config.mjs';
 import { githubApi, installationToken, changedFiles, postReview } from './github.mjs';
 import { planReviewBatches, coverageSummary, validateFindings, reviewWithAI } from './reviewer.mjs';
+import { repositoryAllowed } from './review-policy.mjs';
+import { selectReviewModel } from './model-router.mjs';
 
 /**
  * Review pipeline. All GitHub write operations are disabled by default.
@@ -43,8 +45,11 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   const summaries=[],rawFindings=[];
   for(let index=0;index<batches.length;index++){
     const part=batches[index];
-    const response=await ai(part,{batchIndex:index+1,totalBatches:batches.length});
-    summaries.push('Batch '+(index+1)+'/'+batches.length+': '+String(response.summary||'').slice(0,350));
+    const autoModel=repositoryAllowed(repository,config.aiAutoModelRepositories);
+    const choice=autoModel?selectReviewModel(part,{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep}):null;
+    const response=await ai(part,{batchIndex:index+1,totalBatches:batches.length,
+      ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})});
+    summaries.push('Batch '+(index+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350));
     rawFindings.push(...validateFindings(response.findings,part));
   }
   const severityRank={critical:0,high:1,medium:2,low:3};
