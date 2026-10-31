@@ -23,8 +23,17 @@ export function scoreReviewQuality(reference,found){
 }
 
 if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
- const gold=JSON.parse(readFileSync(new URL('./proffera-pr953-gold.json',import.meta.url),'utf8'));
- const actual=process.argv[2] ? JSON.parse(readFileSync(process.argv[2],'utf8')):[];
- const findings=Array.isArray(actual)?actual:actual.findings||[];
- console.log(JSON.stringify(scoreReviewQuality(gold,findings),null,2));
+ const args=process.argv.slice(2);
+ const named=args[0]==='--pr';
+ const pr=named?args[1]:'953';
+ if(!['944','953'].includes(pr)||args.length>(named?3:1)){
+   console.error('Usage: node benchmarks/score-review.mjs [--pr 944|953] [findings.json]');
+   process.exitCode=2;
+ }else{
+   const gold=JSON.parse(readFileSync(new URL('./proffera-pr'+pr+'-gold.json',import.meta.url),'utf8'));
+   const path=named?args[2]:args[0];
+   const actual=path ? JSON.parse(readFileSync(path,'utf8')):[];
+   const findings=Array.isArray(actual)?actual:actual.findings||[];
+   console.log(JSON.stringify(scoreReviewQuality(gold,findings),null,2));
+ }
 }
