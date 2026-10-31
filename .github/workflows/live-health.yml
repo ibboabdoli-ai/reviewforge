@@ -1,0 +1,44 @@
+name: ReviewForge live health
+on:
+  push:
+    branches:
+      - work/neon-vercel-bootstrap
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Wait for deployment to be ready
+        run: sleep 15
+      - name: Verify public health endpoint and Neon connectivity
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --retry 5 --retry-delay 5 --retry-all-errors \
+            --max-time 20 \
+            https://reviewforge-wzardmn.vercel.app/healthz \
+            -o /tmp/reviewforge-health.json
+          node -e '
+            const fs = require("node:fs");
+            const h = JSON.parse(fs.readFileSync("/tmp/reviewforge-health.json","utf8"));
+            if(h.ok !== true || h.database !== "ready") {
+              console.error("Unhealthy response", JSON.stringify(h));
+              process.exit(1);
+            }
+            console.log("ReviewForge health and database OK");
+          '
+      - name: Verify public landing page
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-delay 5 --retry-all-errors \
+            --max-time 20 \
+            https://reviewforge-wzardmn.vercel.app/ \
+            -o /tmp/reviewforge-home.html
+          grep -qi "reviewforge" /tmp/reviewforge-home.html
+          echo "ReviewForge landing page OK"

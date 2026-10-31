@@ -1,0 +1,29 @@
+{
+  "asOf": "2026-10-30",
+  "source": "GitHub PR metadata and discussion at snapshot; no model review performed",
+  "scope": "read-only metadata, no Proffera code sent to ReviewForge or OpenAI",
+  "comparators": [
+    {
+      "pr": 949,
+      "changedFiles": 9,
+      "additions": 230,
+      "coderabbitComments": 9,
+      "coderabbitAnchoredInlineComments": 6
+    },
+    {
+      "pr": 943,
+      "changedFiles": 79,
+      "additions": 4481,
+      "coderabbitComments": 13,
+      "coderabbitAnchoredInlineComments": 2
+    },
+    {
+      "pr": 941,
+      "changedFiles": 40,
+      "additions": 8334,
+      "coderabbitComments": 123,
+      "coderabbitAnchoredInlineComments": 36
+    }
+  ],
+  "notes": "Comment counts include summaries and follow-ups; they are not true positive metrics. Many comments may refer to earlier commits. ReviewForge still needs side-by-side evaluation of verified bugs, false positives, PR coverage, latency and API cost. Do not infer performance parity from these counts."
+}

@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "description": "Sanitized, archived accepted ReviewForge findings from read-only Neon inspection 2026-10-31. Offline bench only, never sent to model. Historical observations; do not rerun paid calls.",
+  "repository": "ibboabdoli-ai/Proffera",
+  "entries": [
+    {
+      "pr": 953,
+      "reviewId": 4,
+      "headSha": "b00783f246b4393c403026acf1b5335ad28a5797",
+      "model": "gpt-6-luna",
+      "method": "legacy-diff-only",
+      "status": "completed",
+      "posted": 0,
+      "findings": []
+    },
+    {
+      "pr": 949,
+      "reviewId": 5,
+      "headSha": "412e7e32b579fd18ede7ec6c44c507c0b4f78dd9",
+      "model": "gpt-6.1-sol",
+      "method": "related-context-before-dual-lens",
+      "status": "completed",
+      "posted": 0,
+      "findings": [
+        {
+          "path": "src/components/salon/salon-dashboard-demo.tsx",
+          "line": 38,
+          "severity": "low",
+          "category": "correctness",
+          "title": "Preserve email links for valid local-part characters",
+          "body": "For a booking with an address such as o'connor@example.se, this regex returns undefined, causing conditional rendering to remove the Mejla action. Apostrophes are valid in unquoted email local parts, and this address previously produced a working mailto link. Accept valid local-part characters while retaining URI encoding.",
+          "confidence": 0.93
+        }
+      ]
+    },
+    {
+      "pr": 944,
+      "reviewId": 6,
+      "headSha": "9cd94db396b196b0a5d0818e8a066845704e5bac",
+      "model": "gpt-6.1-sol",
+      "method": "related-context-with-dual-lens",
+      "status": "completed",
+      "posted": 0,
+      "findings": [
+        {
+          "path": "src/lib/company-directory-scb-afr-v1.test.ts",
+          "line": 151,
+          "severity": "medium",
+          "category": "test-integrity",
+          "title": "Make the legal-entity rejection test reach company validation",
+          "body": "The mock supplies only the company response, but production fetches workplaces before calling companyRecord(). The second mocked fetch returns undefined before intended company validation. Deleting the identity guard would leave the test passing. Supply a valid workplace response.",
+          "confidence": 1
+        },
+        {
+          "path": "src/lib/company-directory-scb-afr-v1.test.ts",
+          "line": 160,
+          "severity": "medium",
+          "category": "test-integrity",
+          "title": "Assert that the error excludes the API key",
+          "body": "The credential-redaction test checks only that the error contains HTTP 429. An implementation appending the configured API key would pass; assert the key is absent from the error message.",
+          "confidence": 1
+        }
+      ]
+    }
+  ],
+  "disclaimer": "This is a frozen evaluation snapshot. It is not training data, not a blind test, and not comparable across model versions without caveats. No API keys or source-code payloads are included."
+}
