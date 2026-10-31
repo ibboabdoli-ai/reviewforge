@@ -60,3 +60,34 @@ run there until the cap is deliberately raised**. AI is still off.
 - Existing `PR #953` and `PR #949` completed evaluations are not replayed.
   Their historical findings are not inputs to the live reviewer. A new real
   model-quality comparison requires separate user authorization and a cap.
+
+## PR #944 shadow baseline and isolated mutation demonstrations (2026-10-31)
+
+- Golden set: `proffera-pr944-gold.json`, two test-integrity defects
+  independently checked against exact Proffera HEAD
+  `9cd94db396b196b0a5d0818e8a066845704e5bac`.
+- ReviewForge shadow review #6 used `gpt-6.1-sol`: **3 raw model
+  suggestions, 2 accepted, 1 filtered**, 0 GitHub posts. The 2 accepted
+  findings match the two confirmed narrow reference cases. This is an
+  **observed 2/2 on one PR**, not a predicted detection rate or proof of
+  general quality.
+- The earlier CodeRabbit defect about fictitious workplaces (`aeTyp=3`)
+  was fixed in this HEAD and its final review was approved; do **not**
+  count that historical, already-fixed issue as a current open bug.
+- `tests/pr944-mutation-demonstrations.test.mjs` uses **local synthetic
+  functions**, not the actual Proffera implementation. It establishes
+  that (1) a missing second mocked response can make the weak
+  company-validation assertion pass even with the real guard removed,
+  and (2) an HTTP-429-only assertion can pass after a simulated API-key
+  disclosure. It also verifies that targeted negative assertions would
+  reject both simulated mutations. This is evidence for an improved
+  test design, **not an executable mutation result against Proffera**.
+- Offline, no API, no GitHub post: `node benchmarks/score-review.mjs --pr 944`
+  shows the 0/2 empty-findings baseline; supply a sanitized local
+  findings JSON as a second argument to score a specific candidate.
+  `node benchmarks/score-review.mjs --pr 953` remains supported.
+- Gold sets and mutation fixtures must stay **outside the production
+  review input and prompt**; never train or prime the model with
+  expected answers before measuring unseen changes.
+- Keep the ReviewForge runtime shadow-only. No Proffera changes,
+  production database test data, or additional paid model calls here.
