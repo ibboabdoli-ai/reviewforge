@@ -11,7 +11,16 @@ export function scoreReviewQuality(reference,found){
      if(selected.has(i)||f.path!==c.path||!Number.isInteger(f.line)||
        f.line<c.lineMin||f.line>c.lineMax)return false;
      const evidence=(String(f.title||'')+' '+String(f.body||'')).toLowerCase();
-     return c.anyEvidence.some(word=>evidence.includes(word.toLowerCase()));
+     const groups=Array.isArray(c.evidenceGroups)?c.evidenceGroups:null;
+     if(groups){
+       // Grouped evidence requires separate facets of the same defect:
+       // location alone or a single generic word must not score as detected.
+       return groups.length>0&&groups.every(group=>Array.isArray(group)&&group.length>0&&
+         group.some(phrase=>typeof phrase==='string'&&phrase.length>=3&&
+           evidence.includes(phrase.toLowerCase())));
+     }
+     return Array.isArray(c.anyEvidence)&&c.anyEvidence.some(word=>
+       typeof word==='string'&&word.length>=3&&evidence.includes(word.toLowerCase()));
    });
    if(index>=0){selected.add(index);matched++;}
    return {id:c.id,detected:index>=0};
@@ -26,8 +35,8 @@ if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
  const args=process.argv.slice(2);
  const named=args[0]==='--pr';
  const pr=named?args[1]:'953';
- if(!['944','953'].includes(pr)||args.length>(named?3:1)){
-   console.error('Usage: node benchmarks/score-review.mjs [--pr 944|953] [findings.json]');
+ if(!['944','949','953'].includes(pr)||args.length>(named?3:1)){
+   console.error('Usage: node benchmarks/score-review.mjs [--pr 944|949|953] [findings.json]');
    process.exitCode=2;
  }else{
    const gold=JSON.parse(readFileSync(new URL('./proffera-pr'+pr+'-gold.json',import.meta.url),'utf8'));
