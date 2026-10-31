@@ -1,0 +1,122 @@
+{
+  "version": 1,
+  "benchmarkId": "sandbox-blind-2026-10-31-a",
+  "creationMode": "pre-registered before first model review; answer file kept outside target sandbox repository",
+  "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
+  "baseBranch": "main",
+  "targetBranch": "test/blind-review-20261031",
+  "targetHeadSha": "c0f62392822f72d122370753623dda483559130b",
+  "cases": [
+    {
+      "id": "workspace-boundary",
+      "kind": "runtime-security",
+      "path": "src/lib/workspace-ledger.mjs",
+      "lineMin": 2,
+      "lineMax": 3,
+      "description": "Receipt lookup uses ID without enforcing the requested workspace ID, allowing a receipt owned by a different workspace to be returned.",
+      "evidenceGroups": [
+        [
+          "workspace",
+          "tenant",
+          "scope",
+          "customer"
+        ],
+        [
+          "receipt",
+          "record",
+          "lookup",
+          "find"
+        ],
+        [
+          "other",
+          "different",
+          "cross",
+          "missing",
+          "ignore",
+          "check",
+          "filter",
+          "isolation"
+        ]
+      ]
+    },
+    {
+      "id": "retry-units",
+      "kind": "runtime-correctness",
+      "path": "src/lib/queue-coordinator.mjs",
+      "lineMin": 1,
+      "lineMax": 5,
+      "description": "Retry duration named minutes is multiplied by 1000 rather than 60000 milliseconds; a 15-minute retry occurs after 15 seconds.",
+      "evidenceGroups": [
+        [
+          "minutes",
+          "minute"
+        ],
+        [
+          "1000",
+          "seconds",
+          "millisecond",
+          "60_000",
+          "60000",
+          "units"
+        ]
+      ]
+    },
+    {
+      "id": "completion-before-durability",
+      "kind": "runtime-reliability",
+      "path": "src/lib/queue-coordinator.mjs",
+      "lineMin": 12,
+      "lineMax": 18,
+      "description": "Persistence errors are swallowed and completion event and {ok:true} are returned regardless of failure; workers can acknowledge tasks never saved.",
+      "evidenceGroups": [
+        [
+          "save",
+          "persist",
+          "write",
+          "storage",
+          "state"
+        ],
+        [
+          "fail",
+          "error",
+          "throw",
+          "catch",
+          "reject"
+        ],
+        [
+          "completion",
+          "emit",
+          "success",
+          "acknowledge",
+          "ok"
+        ]
+      ]
+    }
+  ],
+  "deliberatelyNotScored": [
+    {
+      "id": "weak-test-tenant-negative",
+      "note": "Missing cross-workspace test is supporting evidence for workspace-boundary, not a separate distinct defect."
+    },
+    {
+      "id": "weak-test-retry-exact",
+      "note": "Positive-only retry assertion is supporting evidence for retry-units, not an additional defect."
+    },
+    {
+      "id": "weak-test-write-failure",
+      "note": "No persistence-failure test is supporting evidence for completion-before-durability, not an additional defect."
+    }
+  ],
+  "constraints": {
+    "source": "standalone, non-production sandbox fixtures; only PR diff and immutable SHA-pinned related source visible to model",
+    "noPromptAnswers": true,
+    "noProfferaWrites": true,
+    "noGitHubComments": true,
+    "noAutoMerge": true,
+    "requireSingleManualShadowReview": true,
+    "maxModelBatches": 1,
+    "allowNoFindings": true,
+    "noReplayOnSameSha": true
+  },
+  "interpretation": "Pre-registered target set of three independent defects. Match findings using code evidence, not vague keyword matches. Verify all candidate detections independently and report false alarms. This set is intentionally constructed and is not a population-based performance benchmark."
+}
