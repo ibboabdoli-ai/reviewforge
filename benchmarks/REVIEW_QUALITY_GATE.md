@@ -91,3 +91,14 @@ run there until the cap is deliberately raised**. AI is still off.
   expected answers before measuring unseen changes.
 - Keep the ReviewForge runtime shadow-only. No Proffera changes,
   production database test data, or additional paid model calls here.
+
+## Three-PR retrospective benchmark (2026-10-31)
+
+See [THREE_PR_QUALITY_REPORT.md](./THREE_PR_QUALITY_REPORT.md). The **immutable, already completed**
+#944/#949/#953 shadow-review records are evaluated entirely offline:
+`node benchmarks/score-suite.mjs`. Historical cases: **2/2**, **1/6**, **0/3**
+matched respectively (**3/11 combined**, purely descriptive). This is **not**
+blind accuracy, a current-model comparison, or a valid estimate of real-world
+false-positive rate. Six synthetically modeled #949 behavior/test counterexamples
+and the earlier #944 synthetic mutations run under `npm test`, not against
+Proffera. No additional model calls, GitHub reviews or production changes.
