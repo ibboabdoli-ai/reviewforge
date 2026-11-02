@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "benchmarkId": "sandbox-mixed-blind-2026-11-02",
+  "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
+  "targetPr": 3,
+  "targetHeadSha": "19037e91babc7ab48e4b6cffa4cc4e53b792bd91",
+  "baseBranch": "main",
+  "targetBranch": "test/mixed-clean-bugs-20261102",
+  "registeredBeforeModelReview": true,
+  "cases": [
+    {
+      "id": "exact-capacity-rejected",
+      "kind": "functional",
+      "path": "src/lib/ticket-capacity.mjs",
+      "lineMin": 8,
+      "lineMax": 9,
+      "description": "Booking exactly the remaining ticket capacity is rejected by >= even though it should be allowed; boundary test missing.",
+      "evidenceGroups": [
+        [
+          "capacity",
+          "tickets",
+          "seats",
+          "reservation"
+        ],
+        [
+          "equal",
+          "exact",
+          ">=",
+          "boundary",
+          "full"
+        ]
+      ]
+    },
+    {
+      "id": "failed-delivery-consumes-id",
+      "kind": "reliability",
+      "path": "src/lib/delivery-once.mjs",
+      "lineMin": 7,
+      "lineMax": 12,
+      "description": "The delivery ID is marked as seen before publish resolves. If publish rejects, subsequent retry is classified duplicate and never delivered.",
+      "evidenceGroups": [
+        [
+          "seen",
+          "duplicate",
+          "dedupe",
+          "id"
+        ],
+        [
+          "failure",
+          "fails",
+          "reject",
+          "throw",
+          "retry",
+          "before",
+          "publish"
+        ]
+      ]
+    },
+    {
+      "id": "monthly-summary-ignores-year",
+      "kind": "correctness",
+      "path": "src/lib/monthly-summary.mjs",
+      "lineMin": 7,
+      "lineMax": 10,
+      "description": "Monthly customer aggregation checks UTC month but not the specified year, causing previous-year charges in the same month to be included.",
+      "evidenceGroups": [
+        [
+          "year",
+          "yearly",
+          "annual"
+        ],
+        [
+          "month",
+          "charges",
+          "filter",
+          "aggregate",
+          "sum"
+        ]
+      ]
+    }
+  ],
+  "cleanControls": [
+    {
+      "path": "src/lib/contact-links.mjs",
+      "functions": [
+        "safeEmailLink",
+        "safePhoneLink"
+      ],
+      "contract": "Only allow mailto/tel schemes with bounded normalized values; malformed, query-injection and unsafe inputs rejected in fixtures.",
+      "caveat": "Passing focused tests is not proof of full RFC coverage."
+    },
+    {
+      "path": "src/lib/task-lock.mjs",
+      "functions": [
+        "withTaskLock"
+      ],
+      "contract": "Per-key lock remains held until the awaited callback settles; finally releases it after success or failure.",
+      "caveat": "Only a single-process lock; intentionally not a distributed lock."
+    }
+  ],
+  "testWeaknessesNotSeparatelyScored": [
+    "Capacity tests do not exercise exact-fit booking.",
+    "Delivery tests do not simulate publish failure and later retry.",
+    "Monthly summary tests do not mix the same month across different years."
+  ],
+  "scoringRules": {
+    "primary": "Match three distinct runtime findings to the exact changed paths and added-line ranges, with evidence for the behavioral counterexample.",
+    "negativeControls": "Manually examine any findings on cleanControls for concrete counterexamples; do not automatically equate them to false positives.",
+    "extras": "Genuine test-effectiveness observations are supplementary and not scored as extra runtime defects.",
+    "requireCompletedSameSha": true,
+    "requirePostedZero": true
+  },
+  "precautions": "All values synthetic. Reference answers are in a separate ReviewForge development branch, not this sandbox PR. Do not feed gold to reviewer. Single authorized shadow review only. No Proffera writes, merge, GitHub comments or repeat charge.",
+  "limitation": "One intentionally constructed benchmark cannot establish real-world precision/recall; independently validate every output."
+}
