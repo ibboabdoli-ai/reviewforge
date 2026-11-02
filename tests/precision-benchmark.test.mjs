@@ -10,7 +10,7 @@ const base = {
 };
 test('answers are pre-registered at the exact PR commit and cover four healthy modules', () => {
   assert.equal(reference.targetPr, 4);
-  assert.equal(reference.targetHeadSha, 'a54cf27eaddc0e9d54d1baad1fd660ede072cd09');
+  assert.equal(reference.targetHeadSha, 'd7fbf0ae810cdee283996e2db3ca691332a96396');
   assert.equal(reference.primaryCases.length, 1);
   assert.equal(reference.cleanControls.length, 4);
   assert.equal(reference.primaryCases[0].lineMin, 15);
