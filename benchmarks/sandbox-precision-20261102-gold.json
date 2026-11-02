@@ -1,10 +1,10 @@
 {
   "version": 1,
   "benchmarkId": "precision-healthy-majority-2026-11-02",
-  "registration": "Pre-registered before any ReviewForge model call for this SHA.",
+  "registration": "Pre-registered before any ReviewForge model call for this SHA. The immutable HEAD was updated for a healthy-control guard before model review; previous fixture SHA was never reviewed.",
   "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
   "targetBranch": "test/precision-mix-20261102",
-  "targetHeadSha": "a54cf27eaddc0e9d54d1baad1fd660ede072cd09",
+  "targetHeadSha": "d7fbf0ae810cdee283996e2db3ca691332a96396",
   "targetPr": 4,
   "primaryCases": [
     {
