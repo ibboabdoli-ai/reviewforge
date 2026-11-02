@@ -5,7 +5,7 @@
   "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
   "targetBranch": "test/precision-mix-20261102",
   "targetHeadSha": "a54cf27eaddc0e9d54d1baad1fd660ede072cd09",
-  "targetPr": null,
+  "targetPr": 4,
   "primaryCases": [
     {
       "id": "audit-cursor-timestamp-tie",
