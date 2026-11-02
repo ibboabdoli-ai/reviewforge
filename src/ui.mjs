@@ -1,0 +1,133 @@
+import { htmlEscape as e } from './security.mjs';
+import { integrations,config } from './config.mjs';
+import { activePlan, allowedReviews } from './db.mjs';
+
+const fmt=(v)=>new Intl.DateTimeFormat('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format((v instanceof Date ? v : new Date((v||'').replace(' ','T')+'Z')));
+const s=(x)=>e(x??'');
+const initials=(x)=>String(x||'RF').slice(0,2).toUpperCase();
+const badge=(status)=>`<span class="pill pill-${s(status||'queued')}"><i></i>${s(status||'queued')}</span>`;
+const csrf=(token)=>`<input type="hidden" name="csrf" value="${s(token)}">`;
+const action=(path,title,token,kind='secondary')=>`<form method="post" action="${path}" class="inline-form">${csrf(token)}<button class="btn btn-${kind}">${s(title)}</button></form>`;
+function base({title,body,user,active='',demo=false,info='',csrfToken=''}) {
+  const nav=[['/dashboard','▦','Overview'],['/repositories','⌘','Repositories'],['/reviews','☷','Code reviews'],['/billing','◈','Billing'],['/settings','⚙','Settings']];
+  const navHtml=nav.map(([path,glyph,label])=>`<a href="${path}" class="nav-link ${active===path?'selected':''}"><span class="nav-glyph">${glyph}</span>${label}${label==='Code reviews'?'<span class="nav-counter">AI</span>':''}</a>`).join('');
+  const sidebar=user?`<aside class="sidebar"><a class="brand" href="/dashboard"><span class="brand-mark">◆</span><span>review<span class="brand-emphasis">forge</span></span><span class="brand-beta">BETA</span></a>
+    <div class="workspace-tag"><span class="workspace-avatar">${s(initials(user.login))}</span><span class="workspace-name"><strong>${s(user.login)}</strong><small>${demo?'Demo workspace':'GitHub workspace'}</small></span><span class="chevron">⌄</span></div>
+    <div class="nav-label">WORKSPACE</div><nav>${navHtml}</nav><div class="sidebar-bottom">
+    ${demo?'<div class="sidebar-tip"><span class="tip-light">✦</span><strong>Demo environment</strong><small>Explore the interface without GitHub credentials. Analyses use sample rules.</small></div>':'<div class="sidebar-tip"><span class="tip-light">✦</span><strong>Better reviews, less noise.</strong><small>AI-assisted insights directly on your pull requests.</small></div>'}
+    <div class="account"><span class="user-avatar">${s(initials(user.login))}</span><div><strong>${s(user.name||user.login)}</strong><small>${demo?'Demo access':'Signed in with GitHub'}</small></div>${action('/logout','↗',csrfToken)}</div>
+    </div></aside>`:'';
+  const top=user?`<div class="topbar"><div class="crumb">Workspace <span>/</span> <strong>${s(title)}</strong></div><div class="top-actions"><span class="top-live"><i></i>${demo?'Demo mode':integrations().github&&integrations().ai?'Review engine on':'Setup required'}</span><a class="small-help" href="/settings" title="Settings">?</a></div></div>`:'';
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark"><title>${s(title)} · ReviewForge</title><link rel="stylesheet" href="/styles.css"><link rel="icon" href="/favicon.svg" type="image/svg+xml"></head>
+  <body class="${user?'app-shell':'landing-page'}"><div class="site-wrap">${sidebar}${user?'<main class="main-content">'+top:'<main class="landing-content">'}${info?`<div class="flash">${s(info)}</div>`:''}${body}</main></div><script src="/app.js" defer></script></body></html>`;
+}
+export function home(){
+  const body=`<header class="landing-header"><a class="brand" href="/"><span class="brand-mark">◆</span>review<span class="brand-emphasis">forge</span></a><div><a href="/demo" class="btn btn-ghost">Live demo</a> <a href="/auth/github" class="btn btn-primary">Connect GitHub ↗</a></div></header>
+  <div class="hero"><div class="eyebrow"><span class="tiny-dot"></span> THE AI CODE REVIEW PLATFORM</div><h1>Ship faster.<br><span>Review smarter.</span></h1>
+  <p>AI-powered pull request reviews that catch real bugs, flag security issues, and help your team merge with confidence.</p><div class="hero-actions"><a class="btn btn-primary btn-xl" href="/demo">Explore interactive demo →</a><a class="btn btn-outline btn-xl" href="/auth/github">Sign in with GitHub</a></div>
+  <div class="hero-foot"><span>✓ Inline review comments</span><span>✓ GitHub App integration</span><span>✓ Subscription-ready</span></div></div>
+  <div class="hero-preview"><div class="preview-header"><span class="dots"><i></i><i></i><i></i></span><span>ReviewForge / Pull requests</span><span class="preview-indicator">AI analysis complete</span></div>
+  <div class="preview-body"><div class="preview-line">➜ <span class="muted">src/api/payments.ts</span> <strong>+42 −13</strong></div><div class="code-line">32 &nbsp; <span class="code-purple">async function</span> createPayment(order) {'{'}</div><div class="code-line">33 &nbsp; &nbsp; <span class="code-blue">const</span> payment = await stripe.charge(...)</div><div class="code-line danger-line">34 + &nbsp; return processPayment(order.id)</div><div class="review-callout"><span class="severity-icon">!</span><div><strong>Potential duplicate charge <span class="red-text">HIGH</span></strong><p>Multiple requests can trigger payments without an idempotency key. Consider guarding repeated submissions.</p></div></div></div></div>
+  <div class="landing-features"><div><span class="feature-icon">◈</span><strong>Context-aware findings</strong><p>Actionable feedback tied to changed lines.</p></div><div><span class="feature-icon">⌘</span><strong>Seamless GitHub flow</strong><p>Automatically review new and updated PRs.</p></div><div><span class="feature-icon">▦</span><strong>Team-wide visibility</strong><p>All your reviews, repositories, and usage in one place.</p></div></div>
+  <footer class="landing-footer"><span>ReviewForge · Independent MVP</span><span>Built for responsible engineering teams</span></footer>`;
+  return base({title:'AI code reviews',body});
+}
+function header(title,desc,aside=''){return `<div class="page-header"><div><div class="page-eyebrow">OVERVIEW / ${s(title).toUpperCase()}</div><h1>${s(title)}</h1><p>${s(desc)}</p></div><div class="page-actions">${aside}</div></div>`;}
+function statusItems(demo){ const ints=integrations();return [{name:'GitHub App',ready:ints.github},{name:'AI analysis',ready:ints.ai},{name:'Stripe billing',ready:ints.billing}].map(c=>`<div class="config-row"><span><i class="status-dot ${c.ready?'ok':'off'}"></i>${c.name}</span><strong>${c.ready?'Configured':'Needs setup'}</strong></div>`).join('');}
+export async function dashboard(db,user,token,{demo=false,notice=''}={}){
+  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 6`).all(user.id);
+  const repoCount=demo?3:Number((await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND p.enabled=1 AND i.status='active'`).get(user.id))?.n ?? 0);
+  const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=?`).get(user.id))?.n ?? 0);
+  const issues=reviews.reduce((sum,r)=>sum+JSON.parse(r.findings_json||'[]').length,0);
+  const clean=reviews.filter(r=>r.status==='completed'&&JSON.parse(r.findings_json||'[]').length===0).length;
+  const plan=demo?{plan:'demo',limit:10,used:0}:await allowedReviews(db,user.id);
+  let body=header('Dashboard','Monitor your pull requests and catch issues before they ship.',demo?'<a class="btn btn-primary" href="/demo/analyze">✦ Try a demo review</a>':action('/settings/sync','↻ Sync GitHub',token,'primary'));
+  body+=`<div class="welcome"><div><div class="tagline">✦ SMARTER CODE REVIEWS</div><h2>Good ${new Date().getHours()<12?'morning':new Date().getHours()<18?'afternoon':'evening'}, ${s(user.login)} <span class="waving">✳</span></h2><p>Your code deserves a second set of eyes. See what ReviewForge has found.</p></div><div class="welcome-orb">✧</div></div>`;
+  body+=`<div class="stats-grid"><div class="stat-card"><div class="stat-header"><span>Pull requests reviewed</span><span class="stat-icon purple">⌘</span></div><div class="stat-value">${total}</div><div class="stat-foot">All tracked reviews</div></div>
+  <div class="stat-card"><div class="stat-header"><span>Issues detected</span><span class="stat-icon orange">⚑</span></div><div class="stat-value">${issues}</div><div class="stat-foot">Across latest ${reviews.length} reviews</div></div>
+  <div class="stat-card"><div class="stat-header"><span>Clean reviews</span><span class="stat-icon green">✓</span></div><div class="stat-value">${clean}</div><div class="stat-foot">No findings in latest reviews</div></div>
+  <div class="stat-card"><div class="stat-header"><span>Connected repositories</span><span class="stat-icon blue">▧</span></div><div class="stat-value">${repoCount}</div><div class="stat-foot">Across your workspace</div></div></div>`;
+  body+=`<div class="dash-grid"><div class="panel"><div class="panel-header"><div><h3>Recent code reviews</h3><p>Your latest pull request activity</p></div><a href="/reviews" class="text-link">View all →</a></div><div class="review-list">${reviews.length?reviews.map(r=>reviewRow(r)).join(''):'<div class="empty-state">No reviews yet. Connect a GitHub repository to start.</div>'}</div></div>
+  <div class="right-panels"><div class="panel plan-panel"><div class="panel-header"><div><h3>Usage this month</h3><p>Current plan: ${s(plan.plan.toUpperCase())}</p></div><span class="plan-chip">${s(plan.plan)}</span></div><div class="meter-label"><strong>${plan.used} <span>/ ${plan.limit} reviews</span></strong><small>${Math.round(plan.used/plan.limit*100)}%</small></div><div class="progress"><span style="width:${Math.min(100,plan.used/plan.limit*100)}%"></span></div><p class="meta-note">Limits reset at the beginning of each calendar month.</p><a href="/billing" class="btn btn-outline btn-full">View plans →</a></div>
+  <div class="panel setup-panel"><div class="panel-header"><div><h3>Integration status</h3><p>Required for live automation</p></div></div>${statusItems(demo)}<a class="text-link" href="/settings">Setup instructions →</a></div></div></div>`;
+  return base({title:'Dashboard',body,user,active:'/dashboard',demo,info:notice,csrfToken:token});
+}
+const issueSummary=r=> {let items=[];try{items=JSON.parse(r.findings_json||'[]')}catch{}return items.length;};
+function reviewRow(r){
+  const n=issueSummary(r);
+  const message=r.status==='failed'?'⚠ Review failed':
+    r.status==='partial'?'⚠ Incomplete review':
+    r.status==='superseded'?'↻ Commit changed':
+    r.status==='skipped'?'Skipped':
+    r.status==='queued' && r.total_batches!=null
+      ?'⏳ Batch '+Number(r.completed_batches)+'/'+Number(r.total_batches):
+    r.status==='running'?'⏳ Reviewing':
+    n?'⚑ '+n+' '+(n===1?'issue':'issues'):
+    r.status==='completed'?'✓ Clean':'Queued';
+  return `<a class="review-row" href="/reviews/${r.id}"><span class="pr-ico">⌘</span><span class="pr-title"><strong>${s(r.pr_title)}</strong><small>${s(r.full_name||'demo / sample-repository')} <b>·</b> #${s(r.pr_number)} <b>·</b> ${s(r.author)}</small></span><span class="review-issues ${n?'':'none'}">${s(message)}</span>${badge(r.status)}<span class="row-arrow">›</span></a>`;
+}
+export async function reviewsPage(db,user,token,{demo=false}={}){
+  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? ORDER BY r.id DESC LIMIT 100`).all(user.id);
+  const body=header('Code reviews','A searchable history of reviewed pull requests.',demo?'<a href="/demo/analyze" class="btn btn-primary">+ New demo review</a>':'<a href="/reviews/manual" class="btn btn-primary">+ Manual shadow review</a>')+`<section class="panel full-panel"><div class="panel-header"><div><h3>Review activity</h3><p>${reviews.length} most recent records</p></div><div class="filter-label">Newest first</div></div><div class="review-list">${reviews.length?reviews.map(reviewRow).join(''):'<div class="empty-state">No reviews to display.</div>'}</div></section>`;
+  return base({title:'Code reviews',body,user,active:'/reviews',demo,csrfToken:token});
+}
+export async function manualReviewPage(db,user,token,query=new URLSearchParams()){
+  const repos=await db.prepare("SELECT p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND i.status='active' AND p.enabled=1 ORDER BY p.full_name").all(user.id);
+  const allowed=repos.filter(r=>config.aiManualReviewRepositories.includes(String(r.full_name).toLowerCase()) &&
+    config.aiShadowRepositories.includes(String(r.full_name).toLowerCase()) &&
+    config.aiAllowedRepositories.includes(String(r.full_name).toLowerCase()));
+  const preferred=String(query.get('repository')||'ibboabdoli-ai/Proffera');
+  const pr=String(query.get('pr')||'').replace(/[^0-9]/g,'').slice(0,8);
+  const body=header('Manual shadow review','Review the current exact PR commit without posting any GitHub comments or approvals.',
+    '<a class="btn btn-outline" href="/reviews">← Back to reviews</a>')+
+    '<div class="panel padded-panel demo-form"><div class="panel-header"><div><h3>Request a code review</h3><p>The live GitHub commit SHA is captured when you submit. Draft PRs can be inspected.</p></div><span class="plan-chip">NO POSTING</span></div>'+
+    (allowed.length&&integrations().ai?'<form method="post" action="/reviews/manual">'+csrf(token)+
+      '<label for="repository">Repository</label><select id="repository" name="repository" required>'+
+      allowed.map(r=>'<option value="'+s(r.full_name)+'"'+(r.full_name===preferred?' selected':'')+'>'+s(r.full_name)+'</option>').join('')+
+      '</select><label for="pr_number">Pull request number</label><input id="pr_number" type="number" min="1" max="99999999" name="pr_number" value="'+s(pr)+'" required>'+
+      '<p class="form-note">Read-only AI review. No PR modifications, GitHub comments, approvals, or merges. AI API usage may incur a charge.</p>'+
+      '<button class="btn btn-primary btn-xl" type="submit">Start manual shadow review →</button></form>':
+      '<div class="empty-state">Manual review is not enabled for your connected workspace, or AI is unavailable.</div>')+
+    '</div>';
+  return base({title:'Manual review',body,user,active:'/reviews',csrfToken:token});
+}
+export async function reviewDetail(db,user,token,id,{demo=false}={}){
+  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND i.owner_user_id=?`).get(id,user.id);
+  if(!r)return null; const findings=JSON.parse(r.findings_json||'[]');
+  const progressInfo=r.total_batches!=null?'<p class="meta-note">Batch progress: '+Number(r.completed_batches)+'/'+Number(r.total_batches)+'. Incomplete progress is not a review verdict.</p>':'';
+  const emptyText=r.status==='failed'
+    ?'This review failed. No reliable findings or clean verdict are available.'
+    :r.status==='queued'||r.status==='running'
+      ?'The review is not finished; findings will appear only after all batches complete.'
+      :'No findings recorded for this review.';
+  let body=header('Review details',`Pull request #${r.pr_number} · ${r.author}`,`<a class="btn btn-outline" href="/reviews">← Back to reviews</a>`);
+  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p>${progressInfo}</div></div>
+  <div class="section-title"><h3>Findings <span class="count-badge">${findings.length}</span></h3></div>${findings.length?findings.map(f=>`<article class="finding"><div class="finding-head"><span class="severity severity-${s(f.severity)}">${s(f.severity)}</span><span class="finding-path">${s(f.path)}:${s(f.line)}</span><span class="confidence">${Math.round(Number(f.confidence||0)*100)}% confidence</span></div><h4>${s(f.title)}</h4><p>${s(f.body)}</p></article>`).join(''):('<div class="empty-state small-empty">'+s(emptyText)+'</div>')}</div>`;
+  return base({title:'Review details',body,user,active:'/reviews',demo,csrfToken:token});
+}
+export async function reposPage(db,user,token,{demo=false,notice=""}={}) {
+  const repos=demo?[{name:'saas-platform',full_name:'demo/saas-platform',private:1},{name:'payment-service',full_name:'demo/payment-service',private:1},{name:'landing-page',full_name:'demo/landing-page',private:0}]:await db.prepare(`SELECT p.* FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.owner_user_id=? AND i.status='active' ORDER BY p.full_name`).all(user.id);
+  const body=header('Repositories','Manage the codebases ReviewForge can review.',demo?'<a href="/auth/github" class="btn btn-primary">Connect real GitHub</a>':`<a href="/connect/github" class="btn btn-primary">+ Install GitHub App</a>`)+`<div class="panel full-panel"><div class="panel-header"><div><h3>Connected repositories</h3><p>${repos.length} repositories in this workspace</p></div>${!demo?action('/settings/sync','↻ Sync',token):''}</div>${repos.length?repos.map(r=>`<div class="repo-row"><span class="repo-icon">▧</span><span class="repo-main"><strong>${s(r.full_name)}</strong><small>${r.private?'Private repository':'Public repository'} · ${demo?'Demo only':'Managed by GitHub App'}</small></span><span class="repo-tag">${demo?'Sample':r.enabled?'Auto review on':'Disabled'}</span>${!demo?`<a class="text-link" href="${s(r.html_url)}" target="_blank" rel="noreferrer noopener">Open ↗</a>`:''}</div>`).join(''):'<div class="empty-state">Nothing connected yet. Install the GitHub App, then sync repositories.</div>'}</div>`;
+  return base({title:'Repositories',body,user,active:'/repositories',demo,csrfToken:token,info:notice});
+}
+export async function billingPage(db,user,token,{demo=false,notice=''}={}){
+  const plan=demo?'demo':await activePlan(db,user.id);
+  const subscription=demo?null:await db.prepare('SELECT * FROM subscriptions WHERE user_id=?').get(user.id);
+  const body=header('Billing & plans','Simple, predictable pricing for your code reviews.')+`<div class="billing-intro"><span class="eyebrow">CURRENT SUBSCRIPTION</span><h2>${s(plan==='pro'?'Pro plan':plan==='demo'?'Demo workspace':'Free plan')}</h2><p>${demo?'Preview only — no payments are processed.':`Your subscription status: ${s(subscription?.status||'free')}. Plan changes are confirmed by Stripe webhooks.`}</p></div>
+  <div class="pricing-grid"><div class="price-card"><div class="price-kicker">STARTER</div><h3>Free</h3><div class="price">$0 <span>/ month</span></div><p>For solo developers getting started.</p><div class="price-line"></div><ul><li>✓ 10 pull request reviews / month</li><li>✓ GitHub App integration</li><li>✓ AI inline comments</li><li>✓ Review history</li></ul><span class="btn btn-outline btn-full">${plan==='free'?'Current plan':'Free tier available'}</span></div>
+  <div class="price-card featured"><div class="popular">MOST POPULAR</div><div class="price-kicker">PRO</div><h3>Pro</h3><div class="price">Custom <span>Stripe price</span></div><p>For growing teams that review every day.</p><div class="price-line"></div><ul><li>✓ 500 pull request reviews / month</li><li>✓ Automatic AI inline comments</li><li>✓ All connected repositories</li><li>✓ Stripe customer portal</li></ul>${demo?'<a href="/auth/github" class="btn btn-primary btn-full">Connect to activate →</a>':subscription?.stripe_customer_id?action('/billing/portal','Manage subscription →',token,'primary'):integrations().billing?action('/billing/checkout','Choose Pro →',token,'primary'):'<span class="btn btn-disabled btn-full">Stripe not configured</span>'}</div></div>
+  <p class="disclaimer">Pro pricing is set in your Stripe dashboard. ReviewForge does not charge you unless you complete Stripe Checkout. No live purchases occur in demo mode.</p>`;
+  return base({title:'Billing',body,user,active:'/billing',demo,csrfToken:token,info:notice});
+}
+export function settingsPage(user,token,{demo=false,notice=''}={}){
+  const status=integrations();
+  const body=header('Settings','Your integration checklist and environment configuration.')+`<div class="settings-grid"><div class="panel padded-panel"><div class="panel-header"><div><h3>Integration checklist</h3><p>Three services power the live product</p></div></div>${statusItems(demo)}<div class="setting-divider"></div><h4>Required GitHub permissions</h4><p class="settings-copy">Repository: Contents (read), Pull requests (read/write), Issues (write), Metadata (read). Subscribe to <code>pull_request</code> and <code>installation</code> webhook events.</p><h4>Callback URLs</h4><div class="code-copy">${s(config.baseUrl)}/auth/github/callback</div><div class="code-copy">${s(config.baseUrl)}/github/setup</div><div class="code-copy">${s(config.baseUrl)}/webhooks/github</div></div>
+  <div class="panel padded-panel"><div class="panel-header"><div><h3>Review automation</h3><p>GitHub posting: ${s(config.reviewPostMode==='live'?'LIVE — comments enabled':'DRY RUN — no comments posted')}</p></div></div><div class="feature-row"><span>☑</span><div><strong>Automatically scan PR updates</strong><p>Opened, reopened, synchronized and marked-ready events.</p></div></div><div class="feature-row"><span>☑</span><div><strong>Protect sensitive information</strong><p>Encrypted OAuth tokens, signed webhooks, strict diff size limits.</p></div></div><div class="feature-row"><span>☑</span><div><strong>Conservative findings</strong><p>Only actionable findings anchored to added diff lines can be posted (live mode only).</p></div></div><div class="setting-divider"></div>${!demo?action('/settings/sync','↻ Sync installations and repositories',token,'primary'):'<a href="/demo/analyze" class="btn btn-primary">Try heuristic demo review</a>'}</div></div>
+  <div class="settings-bottom">For production, use HTTPS, persistent storage, secrets management, observability, and a dedicated worker. See the included README for exact instructions.</div>`;
+  return base({title:'Settings',body,user,active:'/settings',demo,info:notice,csrfToken:token});
+}
+export function demoAnalyze(user,token){
+  const example=`@@ -1,3 +1,6 @@\n export function handle(input) {\n+  const value = eval(input);\n+  console.log('secret token', process.env.TOKEN);\n+  if (value == null) return;\n   return input;\n }`;
+  const body=header('Try a demo review','Paste a unified diff to see how findings are displayed. Demo uses deterministic rules, not AI.','<a class="btn btn-outline" href="/dashboard">← Dashboard</a>')+`<div class="panel padded-panel demo-form"><div class="panel-header"><div><h3>Review playground</h3><p>Analyze a code diff instantly with built-in demo rules</p></div><span class="plan-chip">No API key needed</span></div><form action="/demo/analyze" method="post">${csrf(token)}<label for="pr_title">Pull request title</label><input type="text" name="title" id="pr_title" maxlength="120" value="Demo: inspect code changes" required><label for="code">Unified diff <small>(up to 16KB)</small></label><textarea id="code" name="diff" maxlength="16000" rows="13" spellcheck="false" required>${s(example)}</textarea><div class="form-note">The demo looks for a few known risky patterns. Actual AI review requires OpenAI and GitHub credentials.</div><button class="btn btn-primary btn-xl">✦ Run demo analysis →</button></form></div>`;
+  return base({title:'Demo analysis',body,user,active:'/reviews',demo:true,csrfToken:token});
+}

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "source": "Independent static validation of ReviewForge shadow review #6 on Proffera PR #944 HEAD, 2026-10-31. Offline benchmark only; NEVER supplied to reviewer.",
+  "repository": "ibboabdoli-ai/Proffera",
+  "pr": 944,
+  "headSha": "9cd94db396b196b0a5d0818e8a066845704e5bac",
+  "cases": [
+    {
+      "id": "legal-entity-test-early-exit",
+      "kind": "test-integrity",
+      "path": "src/lib/company-directory-scb-afr-v1.test.ts",
+      "lineMin": 145,
+      "lineMax": 156,
+      "description": "Company validation negative test omits the second workplace response and merely expects any throw, so an earlier fetch error can mask missing identity/name validation.",
+      "anyEvidence": [
+        "second mocked fetch",
+        "second mock",
+        "second response",
+        "before company validation",
+        "companyrecord",
+        "workplace response",
+        "fetch returns undefined"
+      ]
+    },
+    {
+      "id": "api-key-negative-assertion",
+      "kind": "test-integrity",
+      "path": "src/lib/company-directory-scb-afr-v1.test.ts",
+      "lineMin": 157,
+      "lineMax": 164,
+      "description": "Credential redaction test asserts HTTP 429 but does not assert that the configured secret is absent from the error message.",
+      "anyEvidence": [
+        "api key",
+        "api-key",
+        "credential",
+        "secret",
+        "leak",
+        "redaction",
+        "key absent",
+        "key is absent"
+      ]
+    }
+  ],
+  "observed": {
+    "reviewId": 6,
+    "status": "completed",
+    "model": "gpt-6.1-sol",
+    "modelSuggestions": 3,
+    "acceptedFindings": 2,
+    "filteredFindings": 1,
+    "posted": 0,
+    "acceptedFindingsCount": 2,
+    "validation": "Both accepted observations independently corroborated from exact HEAD source and tests; static analysis, not an executed mutation test"
+  },
+  "scope": "Ground-truth for two narrowly scoped test-integrity problems only. Not training data or proof of unseen-PR accuracy. Do not import or fetch this JSON in runtime reviewer."
+}

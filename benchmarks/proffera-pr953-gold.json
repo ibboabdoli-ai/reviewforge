@@ -1,0 +1,59 @@
+{
+  "version": 1,
+  "source": "Independent human triage of CodeRabbit PR #953 findings (2026-10-30); benchmark only, NEVER supplied to reviewer",
+  "repository": "ibboabdoli-ai/Proffera",
+  "pr": 953,
+  "headSha": "b00783f246b4393c403026acf1b5335ad28a5797",
+  "cases": [
+    {
+      "id": "entity-scoping",
+      "kind": "functional",
+      "path": "src/lib/company-directory-detail-validation.ts",
+      "lineMin": 18,
+      "lineMax": 26,
+      "description": "Not-found classification must be scoped to the requested company record, not errors from other records",
+      "anyEvidence": [
+        "requested",
+        "record",
+        "organization",
+        "organisation",
+        "identity",
+        "scope"
+      ]
+    },
+    {
+      "id": "retry-unit-test",
+      "kind": "test-integrity",
+      "path": "tests/company-directory-discovery-not-found-backoff.test.ts",
+      "lineMin": 48,
+      "lineMax": 65,
+      "description": "The test must assert the SQL interval unit in addition to numeric delay minutes",
+      "anyEvidence": [
+        "minutes",
+        "interval",
+        "unit"
+      ]
+    },
+    {
+      "id": "existing-profile-branch",
+      "kind": "test-integrity",
+      "path": "tests/company-directory-discovery-not-found-backoff.test.ts",
+      "lineMin": 48,
+      "lineMax": 70,
+      "description": "Existing-profile targeted and controlled pilot requeue branches require tests",
+      "anyEvidence": [
+        "profile",
+        "pilot",
+        "branch",
+        "requeue"
+      ]
+    }
+  ],
+  "baseline": {
+    "reviewId": 4,
+    "reviewStatus": "completed",
+    "confirmedFindings": 0,
+    "model": "gpt-6-luna"
+  },
+  "scope": "Review-quality gold data is stored outside runtime. It is not a prompt, not training data and not proof of accuracy on unseen PRs."
+}

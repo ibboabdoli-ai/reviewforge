@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "source": "Static, independently triaged Proffera PR #949 evidence at immutable HEAD, 2026-10-31; includes five CodeRabbit test gaps and one ReviewForge functional issue. Offline only; never sent to reviewer.",
+  "repository": "ibboabdoli-ai/Proffera",
+  "pr": 949,
+  "headSha": "412e7e32b579fd18ede7ec6c44c507c0b4f78dd9",
+  "cases": [
+    {
+      "id": "transient-storage-write",
+      "kind": "test-integrity",
+      "origin": "coderabbit",
+      "path": "e2e/tests/public-critical-flows.e2e.mjs",
+      "lineMin": 244,
+      "lineMax": 258,
+      "description": "The E2E assertion checks storage only after navigation/cleanup; it cannot detect transient writes of private address/city/postcode before the switch or under a different key.",
+      "evidenceGroups": [
+        [
+          "storage",
+          "sessionstorage",
+          "browser storage"
+        ],
+        [
+          "write",
+          "setitem",
+          "transient",
+          "before the locale",
+          "before navigation",
+          "recorded writes"
+        ]
+      ]
+    },
+    {
+      "id": "fresh-session-randomness",
+      "kind": "test-integrity",
+      "origin": "coderabbit",
+      "path": "tests/public-business-session-key.test.ts",
+      "lineMin": 10,
+      "lineMax": 24,
+      "description": "Calling sessionKey twice on the same sessionStorage only tests cache reuse; it does not establish fresh independent session keys vary with random byte input.",
+      "evidenceGroups": [
+        [
+          "storage",
+          "session",
+          "cached"
+        ],
+        [
+          "different",
+          "vary",
+          "distinct",
+          "random",
+          "getrandomvalues",
+          "second fresh"
+        ]
+      ]
+    },
+    {
+      "id": "no-crypto-event-guard",
+      "kind": "test-integrity",
+      "origin": "coderabbit",
+      "path": "tests/public-business-session-key.test.ts",
+      "lineMin": 23,
+      "lineMax": 29,
+      "description": "The no-crypto test calls sessionKey alone; it does not prove sendEvent avoids fetch when the generated key is empty.",
+      "evidenceGroups": [
+        [
+          "crypto",
+          "empty",
+          "randomness"
+        ],
+        [
+          "sendevent",
+          "fetch",
+          "request",
+          "event",
+          "component"
+        ]
+      ]
+    },
+    {
+      "id": "rate-limit-conflict-real-db",
+      "kind": "test-integrity",
+      "origin": "coderabbit",
+      "path": "tests/public-form-protection-fingerprint-continuity.test.ts",
+      "lineMin": 46,
+      "lineMax": 55,
+      "description": "Mocking sql to return attempts:6 bypasses the ON CONFLICT SQL update and cannot catch a broken counter-reset/preservation path; a DB-backed integration check is required.",
+      "evidenceGroups": [
+        [
+          "sql",
+          "mock",
+          "database",
+          "db-backed",
+          "postgres"
+        ],
+        [
+          "conflict",
+          "attempts",
+          "counter",
+          "bucket",
+          "update"
+        ]
+      ]
+    },
+    {
+      "id": "rendered-contact-actions",
+      "kind": "test-integrity",
+      "origin": "coderabbit",
+      "path": "tests/salon-demo-contact-links.test.ts",
+      "lineMin": 10,
+      "lineMax": 27,
+      "description": "Tests call safePhoneHref and safeEmailHref in isolation but do not render the component from stored bookings, so component-level href or conditional rendering regressions are missed.",
+      "evidenceGroups": [
+        [
+          "component",
+          "render",
+          "dashboard",
+          "booking"
+        ],
+        [
+          "link",
+          "href",
+          "action",
+          "phone",
+          "email",
+          "mailto",
+          "tel:"
+        ]
+      ]
+    },
+    {
+      "id": "valid-email-local-part",
+      "kind": "functional",
+      "origin": "reviewforge",
+      "path": "src/components/salon/salon-dashboard-demo.tsx",
+      "lineMin": 35,
+      "lineMax": 40,
+      "description": "The new email regular expression rejects RFC-compatible local-part apostrophes, hiding the mailto action for otherwise valid booking email addresses.",
+      "evidenceGroups": [
+        [
+          "email",
+          "mailto",
+          "local-part"
+        ],
+        [
+          "apostrophe",
+          "valid",
+          "character",
+          "o'connor"
+        ]
+      ]
+    }
+  ],
+  "unscored": [
+    {
+      "origin": "coderabbit",
+      "id": "quote-draft-focused-coverage",
+      "reason": "A recommendation for more focused unit tests, but some restore behavior is already covered by E2E. Not a proven broken contract from the inspected code alone.",
+      "path": "tests/quote-request-language-switch-guard.test.ts",
+      "line": 188
+    },
+    {
+      "origin": "codex",
+      "id": "second-locale-switch-race",
+      "reason": "Plausible RAF/state race, but not reproduced in an isolated browser; defer as candidate runtime defect, not verified ground truth.",
+      "path": "src/features/quote-request/localized-quote-request-form.tsx",
+      "line": 194
+    }
+  ],
+  "observed": {
+    "reviewId": 5,
+    "status": "completed",
+    "model": "gpt-6.1-sol",
+    "acceptedFindings": 1,
+    "posted": 0,
+    "note": "Historical review executed before the new two-lens prompt was deployed. Do not credit the newer method for this result."
+  },
+  "limitations": "Test-integrity labels describe concrete blind spots visible from source, not exploited production faults. These references were selected after viewing historical reviews, so cross-PR percentages are descriptive only. Gold data is strictly offline; no model prompt contamination."
+}

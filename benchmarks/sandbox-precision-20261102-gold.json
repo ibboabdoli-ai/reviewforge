@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "benchmarkId": "precision-healthy-majority-2026-11-02",
+  "registration": "Pre-registered before any ReviewForge model call for this SHA. The immutable HEAD was updated for a healthy-control guard before model review; previous fixture SHA was never reviewed.",
+  "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
+  "targetBranch": "test/precision-mix-20261102",
+  "targetHeadSha": "d7fbf0ae810cdee283996e2db3ca691332a96396",
+  "targetPr": 4,
+  "primaryCases": [
+    {
+      "id": "audit-cursor-timestamp-tie",
+      "kind": "functional",
+      "path": "src/lib/audit-cursor.mjs",
+      "lineMin": 15,
+      "lineMax": 16,
+      "description": "Stable cursor pagination sorts records by timestamp and ID, but filtering afterward uses only createdAt > cursor.createdAt. When two records share a timestamp and the first was the cursor, the remaining matching-timestamp record is omitted, producing missing audit events.",
+      "evidenceGroups": [
+        [
+          "cursor",
+          "pagination",
+          "page",
+          "audit"
+        ],
+        [
+          "same timestamp",
+          "same time",
+          "tie",
+          "equal",
+          "identical timestamp",
+          "duplicate timestamp"
+        ],
+        [
+          "id",
+          "skipped",
+          "lost",
+          "omitted",
+          "missing",
+          "filter"
+        ]
+      ]
+    }
+  ],
+  "cleanControls": [
+    {
+      "path": "src/lib/half-open-range.mjs",
+      "contracts": [
+        "Touching half-open intervals do not overlap; intersecting intervals do. Empty intervals are rejected."
+      ],
+      "nonClaims": [
+        "Do not assume this API means inclusive endpoints."
+      ]
+    },
+    {
+      "path": "src/lib/customer-ledger.mjs",
+      "contracts": [
+        "Amounts are signed safe-integer cents. Only matching customer IDs are summed; malformed entries and overflow fail closed."
+      ],
+      "nonClaims": [
+        "Refunds are intentionally negative, not a defect."
+      ]
+    },
+    {
+      "path": "src/lib/hmac-verify.mjs",
+      "contracts": [
+        "Valid nonempty shared secret and string body produce HMAC SHA-256; only hex digest of correct length may compare with timingSafeEqual."
+      ],
+      "nonClaims": [
+        "The caller supplies the configured secret; code is not required to retrieve or rotate secrets."
+      ]
+    },
+    {
+      "path": "src/lib/retry-backoff.mjs",
+      "contracts": [
+        "Attempt number is 1..12; doubling is capped at maximumMs, with millisecond units."
+      ],
+      "nonClaims": [
+        "The bounded attempt range is explicit; no unlimited exponential policy is required."
+      ]
+    }
+  ],
+  "unscoredSupportingCase": {
+    "id": "tie-case-not-tested",
+    "path": "tests/audit-cursor.test.mjs",
+    "description": "Tests only have distinct timestamps; no case with two records sharing one UTC timestamp and a cursor between them."
+  },
+  "scoring": {
+    "primary": "Count only unique, evidence-grounded functional findings on exact added lines 15-16 of src/lib/audit-cursor.mjs.",
+    "positive": "A finding must identify timestamp tie and cursor filtering omission; a vague pagination comment is insufficient.",
+    "negative": "Review all findings on four controls independently; do not automatically label every extra comment a false positive.",
+    "cost": "Use one authenticated manual shadow run with daily model cap; never repeat same SHA.",
+    "safety": "No post, merge, or change in Proffera."
+  },
+  "notes": "Purposefully mostly healthy fixture. A single pre-registered synthetic defect is not a population-level false-positive statistic."
+}

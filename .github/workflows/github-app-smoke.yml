@@ -1,0 +1,47 @@
+name: ReviewForge GitHub App configuration smoke
+on:
+  push:
+    branches:
+      - work/neon-vercel-bootstrap
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  github-app-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Test OAuth redirection without exposing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="https://reviewforge-wzardmn.vercel.app/auth/github"
+          status=$(curl --silent --show-error --max-time 25 --output /tmp/oauth-body --dump-header /tmp/oauth-headers --write-out '%{http_code}' "$URL")
+          test "$status" = "303" || { echo "OAuth route unexpected HTTP $status"; exit 1; }
+          grep -qi '^location: https://github.com/login/oauth/authorize?' /tmp/oauth-headers || { echo "OAuth target incorrect"; exit 1; }
+          echo "OAuth route: 303 redirect to GitHub authorization (credentials present)"
+
+      - name: Reject webhook with invalid signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error --max-time 25             --output /tmp/webhook-body --write-out '%{http_code}'             -X POST 'https://reviewforge-wzardmn.vercel.app/webhooks/github'             -H 'Content-Type: application/json'             -H 'X-GitHub-Event: ping'             -H 'X-GitHub-Delivery: 12345678-1234-1234-1234-123456789abc'             -H 'X-Hub-Signature-256: sha256=0000000000000000000000000000000000000000000000000000000000000000'             --data '{"zen":"unauthorized smoke test"}')
+          test "$status" = "401" || { echo "Webhook rejected with unexpected HTTP $status (expected 401)"; exit 1; }
+          echo "Webhook: invalid signature rejected (HTTP 401)"
+
+      - name: Reject unauthorized worker invocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error --max-time 25 --output /dev/null --write-out '%{http_code}'             -X POST 'https://reviewforge-wzardmn.vercel.app/internal/process-queue'             -H 'Authorization: Bearer intentionally-invalid'             --data '')
+          test "$status" = "403" || { echo "Worker unexpected HTTP $status (expected 403)"; exit 1; }
+          echo "Worker endpoint: authorization enforced (HTTP 403)"
+
+      - name: Verify Neon health
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 25             'https://reviewforge-wzardmn.vercel.app/healthz'             -o /tmp/reviewforge-health.json
+          node -e 'const x=JSON.parse(require("node:fs").readFileSync("/tmp/reviewforge-health.json","utf8")); if(x.ok!==true||x.database!=="ready")process.exit(1); console.log("Neon health OK")'
