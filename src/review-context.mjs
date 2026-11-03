@@ -5,11 +5,16 @@ import { redactKnownTokens } from './reviewer.mjs';
 // arbitrary URLs, secret files, or user-supplied file paths.
 export const MAX_CONTEXT_CHARS=12000;
 const SOURCE_LIMIT=2, IMPORT_LIMIT=3;
-const SAFE_SOURCE=/^(?:src|app|lib|tests)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
+const SAFE_SOURCE=/^(?:src|app|lib|tests|scripts)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
+// Workflow YAML is allowed only in this fixed repository-owned directory.
+// Do not permit dots in workflow basenames, hidden files or path traversal.
+const SAFE_WORKFLOW=/^\.github\/workflows\/[a-zA-Z0-9_/-]+\.ya?ml$/;
 const DENIED=/(^|\/)(?:\.|node_modules\/|__secrets__\/)|(?:^|\/)(?:secrets?|credentials|private-key|id_rsa)(?:[./-]|$)/i;
 export function safeContextPath(path){
-  return typeof path==='string' && path.length<180 && SAFE_SOURCE.test(path)
-    && !path.split('/').includes('..') && !DENIED.test(path);
+  if(typeof path!=='string'||path.length>=180||path.split('/').includes('..'))return false;
+  // .github is a fixed, vetted prefix; the remainder still must pass DENIED.
+  if(SAFE_WORKFLOW.test(path))return !DENIED.test(path.slice('.github/'.length));
+  return SAFE_SOURCE.test(path)&&!DENIED.test(path);
 }
 export function importedPaths(sourcePath,sourceText){
   const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)];
@@ -156,7 +161,11 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const changed=files.filter(f=>safeContextPath(f.filename)&&typeof f.patch==='string');
   const runtimeFiles=changed.filter(f=>!isTestPath(f.filename));
   const tests=prioritizeBehaviorTests(changed.filter(f=>isTestPath(f.filename)),runtimeFiles).slice(0,3);
-  const sources=runtimeFiles.slice(0,2);
+  // Keep the two-source budget, but do not let adjacent workflow files hide
+  // the corresponding runtime adapter from a final-gate review.
+  const workflow=runtimeFiles.find(f=>f.filename.startsWith('.github/workflows/'));
+  const adapter=runtimeFiles.find(f=>f.filename.startsWith('scripts/'));
+  const sources=workflow&&adapter?[workflow,adapter]:runtimeFiles.slice(0,SOURCE_LIMIT);
   const fetcher=path=>fetchFile({repository,sha,path,api,token});
   const [rule,...bodies]=await Promise.all([
     fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
