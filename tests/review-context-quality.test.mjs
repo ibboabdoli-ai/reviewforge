@@ -142,3 +142,53 @@ test('opted-in incremental flow passes context to model without GitHub posting',
   assert.ok(modelInputs.every(o=>o.reviewContext.sourceFiles.includes('src/lib/company-directory-official-facts-errors.ts')));
  }finally{config.aiAutoModelRepositories=previousModels;config.aiContextRepositories=previousContext;}
 });
+
+test('final-gate context pins a workflow and its live adapter, not just test snippets',async()=>{
+  // Synthetic version of the PR962 source-selection problem: two adjacent
+  // workflow patches would previously crowd the live adapter out entirely.
+  const targetSha='b'.repeat(40), files=[
+    {filename:'.github/workflows/ci.yml',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+const receiptCount = parseReceipt(body);'},
+    {filename:'.github/workflows/proffera-automerge.yml',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+const canMerge = receiptCount === 1;'},
+    {filename:'scripts/supervisor-final-gate-live.mjs',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+function cleanCodexComment(body) { return firstReceipt(body); }'},
+    {filename:'tests/codex-review-receipt-gate.test.ts',status:'added',
+      patch:'@@ -0,0 +1,1 @@\n+expect(checkReceipt("Reviewed commit: abc1234")).toBe(true);'}
+  ];
+  const sources={
+    '.github/workflows/ci.yml':'original\nconst receiptCount = parseReceipt(body);\nif (receiptCount !== 1) throw Error("reject");',
+    '.github/workflows/proffera-automerge.yml':'original\nconst canMerge = receiptCount === 1;',
+    'scripts/supervisor-final-gate-live.mjs':'original\nfunction cleanCodexComment(body) { return body.match(/Reviewed commit:/g)?.[0]; }',
+    'tests/codex-review-receipt-gate.test.ts':'expect(checkReceipt("Reviewed commit: abc1234")).toBe(true);'
+  };
+  const requests=[];
+  const api=async(path,token)=>{
+    requests.push(path);
+    assert.equal(token,'fixture-token');
+    const match=path.match(/^\/repos\/sample\/review-demo\/contents\/(.+)\?ref=([a-f0-9]{40})$/);
+    assert.ok(match);
+    assert.equal(match[2],targetSha);
+    const filename=decodeURIComponent(match[1]);
+    if(!Object.hasOwn(sources,filename))throw new Error('GitHub 404: Not Found');
+    const content=sources[filename];
+    return {type:'file',encoding:'base64',size:Buffer.byteLength(content),
+      content:Buffer.from(content).toString('base64')};
+  };
+  const context=await collectReviewContext({repository:repo,sha:targetSha,files,token:'fixture-token',api});
+  assert.deepEqual(context.sourceFiles.filter(f=>f.startsWith('.github/')||f.startsWith('scripts/')),
+    ['.github/workflows/ci.yml','scripts/supervisor-final-gate-live.mjs']);
+  assert.match(context.snippets.map(s=>s.text).join('\n'),/receiptCount/);
+  assert.match(context.snippets.map(s=>s.text).join('\n'),/cleanCodexComment/);
+  assert.ok(context.totalChars<=12000);
+  assert.ok(requests.every(req=>req.includes('?ref='+targetSha)));
+  assert.ok(!requests.some(req=>req.includes('proffera-automerge.yml')));
+});
+test('workflow and adapter context paths remain tightly constrained',()=>{
+  for(const path of ['.github/workflows/ci.yml','.github/workflows/proffera-final-gate-wakeup.yaml',
+    'scripts/supervisor-final-gate-live.mjs'])assert.equal(safeContextPath(path),true,path);
+  for(const path of ['.github/workflows/../secrets.yml','.github/workflows/.env',
+    '.github/other.yml','.github/workflows/secrets.yml','.github/workflows/ci.yml/other',
+    'scripts/.env','scripts/credentials.mjs','scripts/../.env','scripts/id_rsa',
+    'scripts/vendor/private-key.ts'])assert.equal(safeContextPath(path),false,path);
+});
