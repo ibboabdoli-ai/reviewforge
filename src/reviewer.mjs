@@ -158,7 +158,7 @@ export function validateFindings(raw,files) {
     for(const line of addedLines(f.patch))changed.add(line);
     byPath.set(f.filename,changed);
   }
-  const seen=new Set();const output=[];
+  const seen=new Map();const output=[];
   // Check a bounded candidate window before the existing eight-finding cap.
   // Invalid/duplicate early suggestions must not starve later valid anchors.
   for(const f of (Array.isArray(raw)?raw:[]).slice(0,64)) {
@@ -166,9 +166,18 @@ export function validateFindings(raw,files) {
     if(!Number.isFinite(f.confidence)||f.confidence<0.75||f.confidence>1)continue;
     if(typeof f.title!=='string'||typeof f.body!=='string'||f.body.length<8)continue;
     const key=f.path+':'+f.line;
-    if(seen.has(key))continue;seen.add(key);
-    output.push({path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
-      title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence});
+    const normalized={path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
+      title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence};
+    const priorIndex=seen.get(key);
+    if(priorIndex!==undefined){
+      // Keep the most serious validated finding at a shared changed-line anchor.
+      // Identical severity retains the earliest candidate as before.
+      if(severity.indexOf(normalized.severity)<severity.indexOf(output[priorIndex].severity))
+        output[priorIndex]=normalized;
+      continue;
+    }
+    seen.set(key,output.length);
+    output.push(normalized);
   }
   // Keep the existing eight-finding limit, but never let numerous low-risk
   // suggestions push a valid later critical/high finding out of the verdict.
