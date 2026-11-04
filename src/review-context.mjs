@@ -4,7 +4,7 @@ import { redactKnownTokens } from './reviewer.mjs';
 // Deliberately small, read-only context sampler. No checkout, tool execution,
 // arbitrary URLs, secret files, or user-supplied file paths.
 export const MAX_CONTEXT_CHARS=12000;
-const SOURCE_LIMIT=2, IMPORT_LIMIT=3;
+const SOURCE_LIMIT=2, WORKFLOW_SOURCE_LIMIT=3, IMPORT_LIMIT=3;
 const SAFE_SOURCE=/^(?:src|app|lib|tests|scripts)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
 // Workflow YAML is allowed only in this fixed repository-owned directory.
 // Do not permit dots in workflow basenames, hidden files or path traversal.
@@ -164,11 +164,14 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const changed=files.filter(f=>safeContextPath(f.filename)&&typeof f.patch==='string');
   const runtimeFiles=changed.filter(f=>!isTestPath(f.filename));
   const tests=prioritizeBehaviorTests(changed.filter(f=>isTestPath(f.filename)),runtimeFiles).slice(0,3);
-  // Keep the two-source budget, but do not let adjacent workflow files hide
-  // the corresponding runtime adapter from a final-gate review.
-  const workflow=runtimeFiles.find(f=>f.filename.startsWith('.github/workflows/'));
+  // A review gate can have multiple independent CI paths. The PR962-shaped
+  // fixture proves that keeping just the first workflow hides the wakeup and
+  // automerge validators from SHA-pinned supplemental source context.
+  // Retain the usual two-file budget outside this narrowly scoped pattern.
+  const workflows=runtimeFiles.filter(f=>f.filename.startsWith('.github/workflows/'))
+    .slice(0,WORKFLOW_SOURCE_LIMIT);
   const adapter=runtimeFiles.find(f=>f.filename.startsWith('scripts/'));
-  const sources=workflow&&adapter?[workflow,adapter]:runtimeFiles.slice(0,SOURCE_LIMIT);
+  const sources=workflows.length&&adapter?[...workflows,adapter]:runtimeFiles.slice(0,SOURCE_LIMIT);
   const fetcher=path=>fetchFile({repository,sha,path,api,token});
   const [rule,...bodies]=await Promise.all([
     fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
@@ -180,7 +183,7 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     if(!sourceBodies[i])continue;
     included.add(sources[i].filename);
     candidates.push({path:sources[i].filename,kind:'changed-file-excerpt',
-      text:sourceExcerpt(sourceBodies[i],sources[i].patch,1800)});
+      text:sourceExcerpt(sourceBodies[i],sources[i].patch,sources.length>2?1500:1800)});
   }
   for(let i=0;i<tests.length;i++){
     if(!testBodies[i])continue;
