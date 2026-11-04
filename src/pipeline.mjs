@@ -31,6 +31,19 @@ export async function analyzePullRequest({ repository, number, headSha, installa
     return {status:'skipped',summary:'Pull request is draft or no longer open.',findings:[],posted:0};
   }
   const {batches,coverage}=planReviewBatches(await filesFor({repoFullName:repository,prNumber:number,token}));
+  // A known incomplete diff cannot produce a trustworthy, postable verdict.
+  // Fail closed before reserving or spending any paid AI calls. Recheck the
+  // exact HEAD so a concurrent PR update cannot be labeled as reviewed.
+  if (!coverage.complete) {
+    const latest=await api(pullPath,token);
+    if (latest.head?.sha!==headSha || (latest.draft && !allowDraft) || latest.state!=='open') {
+      return {status:'superseded',summary:'PR changed during analysis; no comments posted.',findings:[],posted:0};
+    }
+    return {status:'partial',
+      summary:(postMode==='dry-run'?'[Preview only] ':'')+coverageSummary(coverage)
+        +' No AI calls made because coverage is incomplete.',
+      findings:[],posted:0,coverage};
+  }
   // Reserve all model attempts BEFORE the first model call. An insufficient
   // global daily cap must not result in a half-reviewed PR or overspend.
   if(batches.length && deps.reserveModelCalls){
