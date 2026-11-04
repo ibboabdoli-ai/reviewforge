@@ -215,3 +215,20 @@ test('workflow and adapter context paths remain tightly constrained',()=>{
     'scripts/.env','scripts/credentials.mjs','scripts/../.env','scripts/id_rsa',
     'scripts/vendor/private-key.ts'])assert.equal(safeContextPath(path),false,path);
 });
+
+test('PR962-shaped long workflow adapter excerpt prioritizes changed SHA predicates',()=>{
+  // Synthetic 320-line adapter: before the fix, a long unchanged region before
+  // the hunk consumed the entire 1,500-character gate-context budget.
+  const lines=Array.from({length:332},(_,i)=>i<14
+    ? '// safe header '+i
+    : 'const surrounding_'+i+" = '"+'x'.repeat(115)+"';");
+  const first='const receiptMatches = parseTrustedReviewedCommits(source.body);';
+  const second='if (receiptMatches.length !== 1) throw new Error("ambiguous receipt");';
+  lines[317]=first;
+  lines[318]=second;
+  const patch='@@ -315,5 +315,5 @@\n context1\n context2\n context3\n+'+first+'\n+'+second;
+  const excerpt=sourceExcerpt(lines.join('\n'),patch,1500);
+  assert.match(excerpt,/L318: const receiptMatches = parseTrustedReviewedCommits/);
+  assert.match(excerpt,/L319: if \(receiptMatches.length !== 1\)/);
+  assert.ok(excerpt.length<=1500);
+});
