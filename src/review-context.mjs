@@ -31,21 +31,47 @@ export function importedPaths(sourcePath,sourceText){
 }
 export function sourceExcerpt(source,patch,maxChars=2700){
   if(typeof source!=='string'||!source.trim())return '';
-  const lines=source.split('\n'), wanted=new Set();
-  // Include beginning of each module for imports and major declarations.
-  for(let i=0;i<Math.min(14,lines.length);i++)wanted.add(i);
-  for(const m of String(patch).matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/gm)){
-    const i=Math.max(0,Number(m[1])-1);
-    for(let n=Math.max(0,i-10);n<Math.min(lines.length,i+23);n++)wanted.add(n);
+  const lines=source.split('\n'), changed=[],hunks=[],nearHunks=new Set();
+  let newLine=-1;
+  // Select actual added/modified target lines before surrounding context.
+  // A long header or ten unchanged lines preceding a hunk must never crowd
+  // out the changed review-gate predicate from a bounded excerpt.
+  for(const row of String(patch).split('\n')){
+    const hunk=row.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if(hunk){
+      newLine=Math.max(0,Number(hunk[1])-1);
+      hunks.push(newLine);
+      for(let n=Math.max(0,newLine-10);n<Math.min(lines.length,newLine+23);n++)
+        nearHunks.add(n);
+      continue;
+    }
+    if(newLine<0)continue;
+    if(row.startsWith('+')&&!row.startsWith('+++')){
+      changed.push(newLine);newLine++;continue;
+    }
+    if(row.startsWith(' ')){newLine++;continue;}
+    // Removed lines do not advance the new-file line number.
   }
-  const sorted=[...wanted].sort((a,b)=>a-b);
-  const result=[];let used=0,previous=-2;
-  for(const i of sorted){
+  const selected=new Set();let reserved=0;
+  const take=i=>{
+    if(i<0||i>=lines.length||selected.has(i))return;
+    const row='L'+(i+1)+': '+lines[i]+'\n';
+    // Reserve the maximum five-character separator, even for adjacent rows.
+    if(reserved+row.length+5>maxChars)return;
+    selected.add(i);reserved+=row.length+5;
+  };
+  for(const i of changed)take(i);
+  for(const i of changed)for(let n=i-2;n<=i+3;n++)take(n);
+  for(const i of hunks)take(i);
+  for(let i=0;i<Math.min(14,lines.length);i++)take(i);
+  for(const i of [...nearHunks].sort((a,b)=>a-b))take(i);
+  let text='',previous=-2;
+  for(const i of [...selected].sort((a,b)=>a-b)){
     const row=(previous!==i-1?'\n...\n':'')+'L'+(i+1)+': '+lines[i]+'\n';
-    if(used+row.length>maxChars)break;
-    result.push(row);used+=row.length;previous=i;
+    if(text.length+row.length>maxChars)continue;
+    text+=row;previous=i;
   }
-  return redactKnownTokens(result.join(''));
+  return redactKnownTokens(text);
 }
 export function projectRuleExcerpts(yaml,paths){
   // Only accept the supported, narrowly scoped subset of CodeRabbit's path
