@@ -85,6 +85,23 @@ test('project guidance is only a scoped, untrusted excerpt',()=>{
  assert.doesNotMatch(rules,/auto_reply/);
  assert.equal(projectRuleExcerpts(configFile,['public/other.html']),'');
 });
+test('vetted workflow YAML guidance is selected for security-sensitive diffs',()=>{
+ const rules=[
+  'reviews:',
+  '  path_instructions:',
+  '    - path: ".github/workflows/**"',
+  '      instructions: |',
+  '        Treat workflow changes as security-sensitive.',
+  '        Reject privileged execution of untrusted PR code.'
+ ].join('\n');
+ const selected=projectRuleExcerpts(rules,['.github/workflows/ci.yml']);
+ assert.match(selected,/security-sensitive/);
+ assert.match(selected,/untrusted PR code/);
+ assert.equal(projectRuleExcerpts(rules,['src/lib/company-directory-public-search.ts']),'');
+ assert.equal(projectRuleExcerpts(rules,['.github/workflows/.env']),'');
+ assert.equal(projectRuleExcerpts(rules,['.github/workflows/../ci.yml']),'');
+});
+
 test('source excerpts include changed hunks with source line labels',()=>{
  const excerpt=sourceExcerpt(sourceB,files[1].patch);
  assert.match(excerpt,/L521:|L522:/);
