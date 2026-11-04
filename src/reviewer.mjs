@@ -170,7 +170,10 @@ export function validateFindings(raw,files) {
     output.push({path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
       title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence});
   }
-  return output.slice(0,8);
+  // Keep the existing eight-finding limit, but never let numerous low-risk
+  // suggestions push a valid later critical/high finding out of the verdict.
+  // JavaScript's stable sort preserves model order within each severity.
+  return output.sort((a,b)=>severity.indexOf(a.severity)-severity.indexOf(b.severity)).slice(0,8);
 }
 export function localDemoReview(diff) {
   const text=String(diff).slice(0,16000);const findings=[];
