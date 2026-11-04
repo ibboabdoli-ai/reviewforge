@@ -171,7 +171,11 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const workflows=runtimeFiles.filter(f=>f.filename.startsWith('.github/workflows/'))
     .slice(0,WORKFLOW_SOURCE_LIMIT);
   const adapter=runtimeFiles.find(f=>f.filename.startsWith('scripts/'));
-  const sources=workflows.length&&adapter?[...workflows,adapter]:runtimeFiles.slice(0,SOURCE_LIMIT);
+  // Multiple independent workflow gates must remain visible even when there
+  // is no JS adapter in the PR; retain the two-source limit for ordinary PRs.
+  const sources=(workflows.length>=2 || (workflows.length===1 && adapter))
+    ? [...workflows,...(adapter?[adapter]:[])]
+    : runtimeFiles.slice(0,SOURCE_LIMIT);
   const fetcher=path=>fetchFile({repository,sha,path,api,token});
   const [rule,...bodies]=await Promise.all([
     fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
