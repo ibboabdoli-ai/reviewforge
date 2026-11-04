@@ -149,7 +149,15 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
 
 const severity=['critical','high','medium','low'];
 export function validateFindings(raw,files) {
-  const byPath=new Map(files.map(f=>[f.filename,addedLines(f.patch)]));
+  // A bounded review batch can contain multiple patch segments of the same
+  // file. Union their changed-line anchors instead of discarding all but the
+  // final segment; otherwise valid earlier-segment findings are filtered out.
+  const byPath=new Map();
+  for(const f of files){
+    const changed=byPath.get(f.filename)||new Set();
+    for(const line of addedLines(f.patch))changed.add(line);
+    byPath.set(f.filename,changed);
+  }
   const seen=new Set();const output=[];
   for(const f of (Array.isArray(raw)?raw:[]).slice(0,12)) {
     if(!f||!byPath.has(f.path)||!byPath.get(f.path).has(f.line)||!severity.includes(f.severity))continue;
