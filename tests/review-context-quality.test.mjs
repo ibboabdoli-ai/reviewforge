@@ -168,6 +168,8 @@ test('final-gate context pins a workflow and its live adapter, not just test sni
       patch:'@@ -1,1 +1,2 @@\n original\n+const receiptCount = parseReceipt(body);'},
     {filename:'.github/workflows/proffera-automerge.yml',status:'modified',
       patch:'@@ -1,1 +1,2 @@\n original\n+const canMerge = receiptCount === 1;'},
+    {filename:'.github/workflows/proffera-final-gate-wakeup.yml',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+const wakeupReceipt = parseReceipt(body);'},
     {filename:'scripts/supervisor-final-gate-live.mjs',status:'modified',
       patch:'@@ -1,1 +1,2 @@\n original\n+function cleanCodexComment(body) { return firstReceipt(body); }'},
     {filename:'tests/codex-review-receipt-gate.test.ts',status:'added',
@@ -176,6 +178,7 @@ test('final-gate context pins a workflow and its live adapter, not just test sni
   const sources={
     '.github/workflows/ci.yml':'original\nconst receiptCount = parseReceipt(body);\nif (receiptCount !== 1) throw Error("reject");',
     '.github/workflows/proffera-automerge.yml':'original\nconst canMerge = receiptCount === 1;',
+    '.github/workflows/proffera-final-gate-wakeup.yml':'original\nconst wakeupReceipt = parseReceipt(body);',
     'scripts/supervisor-final-gate-live.mjs':'original\nfunction cleanCodexComment(body) { return body.match(/Reviewed commit:/g)?.[0]; }',
     'tests/codex-review-receipt-gate.test.ts':'expect(checkReceipt("Reviewed commit: abc1234")).toBe(true);'
   };
@@ -194,12 +197,15 @@ test('final-gate context pins a workflow and its live adapter, not just test sni
   };
   const context=await collectReviewContext({repository:repo,sha:targetSha,files,token:'fixture-token',api});
   assert.deepEqual(context.sourceFiles.filter(f=>f.startsWith('.github/')||f.startsWith('scripts/')),
-    ['.github/workflows/ci.yml','scripts/supervisor-final-gate-live.mjs']);
+    ['.github/workflows/ci.yml','.github/workflows/proffera-automerge.yml',
+     '.github/workflows/proffera-final-gate-wakeup.yml','scripts/supervisor-final-gate-live.mjs']);
   assert.match(context.snippets.map(s=>s.text).join('\n'),/receiptCount/);
   assert.match(context.snippets.map(s=>s.text).join('\n'),/cleanCodexComment/);
+  assert.match(context.snippets.map(s=>s.text).join('\n'),/wakeupReceipt/);
   assert.ok(context.totalChars<=12000);
   assert.ok(requests.every(req=>req.includes('?ref='+targetSha)));
-  assert.ok(!requests.some(req=>req.includes('proffera-automerge.yml')));
+  assert.ok(requests.some(req=>req.includes('proffera-automerge.yml')));
+  assert.ok(requests.some(req=>req.includes('proffera-final-gate-wakeup.yml')));
 });
 test('workflow and adapter context paths remain tightly constrained',()=>{
   for(const path of ['.github/workflows/ci.yml','.github/workflows/proffera-final-gate-wakeup.yaml',
