@@ -46,7 +46,8 @@ export function sourceExcerpt(source,patch,maxChars=2700){
       continue;
     }
     if(newLine<0)continue;
-    if(row.startsWith('+')&&!row.startsWith('+++')){
+    // +++ inside a hunk is a valid added source line starting with ++.
+    if(row.startsWith('+')){
       changed.push(newLine);newLine++;continue;
     }
     if(row.startsWith(' ')){newLine++;continue;}

@@ -3,11 +3,13 @@ import { reviewSkillInstructions } from './review-skills.mjs';
 import { BEHAVIOR_TEST_REVIEW_METHOD } from './review-method.mjs';
 
 export function addedLines(patch='') {
-  const lines=new Set(); let nextLine=0;
+  const lines=new Set(); let nextLine=0,seenHunk=false;
   for(const str of patch.split('\n')) {
     const match=str.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if(match){nextLine=Number(match[1]);continue;}
-    if(str.startsWith('+++')||str.startsWith('---'))continue;
+    if(match){nextLine=Number(match[1]);seenHunk=true;continue;}
+    // A source line beginning with ++ becomes +++ in a hunk. Only skip
+    // file headers before the first hunk, never valid added source lines.
+    if(!seenHunk)continue;
     if(str.startsWith('+')) {lines.add(nextLine);nextLine++;}
     else if(str.startsWith(' '))nextLine++;
   }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { collectReviewContext, importedPaths, projectRuleExcerpts, safeContextPath, sourceExcerpt } from '../src/review-context.mjs';
+import { addedLines, validateFindings } from '../src/reviewer.mjs';
 import { selectReviewModel } from '../src/model-router.mjs';
 import { selectedReviewSkills } from '../src/review-skills.mjs';
 import { analyzePullRequestStep } from '../src/incremental-review.mjs';
@@ -230,5 +231,37 @@ test('PR962-shaped long workflow adapter excerpt prioritizes changed SHA predica
   const excerpt=sourceExcerpt(lines.join('\n'),patch,1500);
   assert.match(excerpt,/L318: const receiptMatches = parseTrustedReviewedCommits/);
   assert.match(excerpt,/L319: if \(receiptMatches.length !== 1\)/);
+  assert.ok(excerpt.length<=1500);
+});
+
+test('review patches preserve source lines starting with ++ and later findings',()=>{
+  // A changed source line "++count" is encoded as "+++count" in unified diff.
+  // Earlier parsers treated it as a file header, shifting all following anchors.
+  const patch=[
+    '--- a/src/check.ts',
+    '+++ b/src/check.ts',
+    '@@ -1,1 +1,3 @@',
+    ' const count = 0;',
+    '+++count;',
+    '+dangerousThing();'
+  ].join('\n');
+  assert.deepEqual([...addedLines(patch)],[2,3]);
+  const finding={path:'src/check.ts',line:3,severity:'medium',
+    category:'correctness',title:'Detect changed behavior',
+    body:'The changed behavior introduces a reproducible correctness issue.',
+    confidence:0.93};
+  assert.equal(validateFindings([finding],[{filename:'src/check.ts',patch}]).length,1);
+
+  // With many ++ statements, an incorrectly shifted hunk index misses the
+  // final changed predicate even when there is ample excerpt budget.
+  const lines=[
+    ...Array.from({length:25},(_,i)=>'// HEAD '+i),
+    ...Array.from({length:25},(_,i)=>'++count'+i+';'),
+    'dangerousThing();'
+  ];
+  const longPatch='@@ -25,1 +25,27 @@\n '+lines[24]+'\n'
+    +lines.slice(25).map(row=>'+'+row).join('\n');
+  const excerpt=sourceExcerpt(lines.join('\n'),longPatch,1500);
+  assert.match(excerpt,/L51: dangerousThing\(\);/);
   assert.ok(excerpt.length<=1500);
 });
