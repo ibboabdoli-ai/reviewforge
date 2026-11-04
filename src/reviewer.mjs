@@ -159,7 +159,9 @@ export function validateFindings(raw,files) {
     byPath.set(f.filename,changed);
   }
   const seen=new Set();const output=[];
-  for(const f of (Array.isArray(raw)?raw:[]).slice(0,12)) {
+  // Check a bounded candidate window before the existing eight-finding cap.
+  // Invalid/duplicate early suggestions must not starve later valid anchors.
+  for(const f of (Array.isArray(raw)?raw:[]).slice(0,64)) {
     if(!f||!byPath.has(f.path)||!byPath.get(f.path).has(f.line)||!severity.includes(f.severity))continue;
     if(!Number.isFinite(f.confidence)||f.confidence<0.75||f.confidence>1)continue;
     if(typeof f.title!=='string'||typeof f.body!=='string'||f.body.length<8)continue;
