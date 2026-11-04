@@ -31,3 +31,18 @@ test('finding scan remains bounded and output stays capped at eight',()=>{
   assert.equal(accepted.length,8);
   assert.deepEqual(accepted.map(f=>f.line),[1,2,3,4,5,6,7,8]);
 });
+
+test('a later critical finding must not be crowded out by eight low-risk suggestions',()=>{
+  // Synthetic validation only: ranking happens after checking anchors and
+  // before the existing eight-finding output cap; no model/API call.
+  const lines=Array.from({length:9},(_,i)=>'+guard'+i+'();');
+  const patch='@@ -0,0 +1,9 @@\\n'.replace('\\n','\n')+lines.join('\n');
+  const raw=Array.from({length:9},(_,i)=>({
+    ...valid,line:i+1,severity:i===8?'critical':'low',
+    title:'Independent issue '+i,body:'Separate defect on changed line '+(i+1)
+  }));
+  const accepted=validateFindings(raw,[{filename,patch}]);
+  assert.equal(accepted.length,8);
+  assert.equal(accepted.filter(f=>f.severity==='critical').length,1);
+  assert.equal(accepted.filter(f=>f.severity==='low').length,7);
+});
