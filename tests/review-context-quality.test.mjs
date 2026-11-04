@@ -265,3 +265,20 @@ test('review patches preserve source lines starting with ++ and later findings',
   assert.match(excerpt,/L51: dangerousThing\(\);/);
   assert.ok(excerpt.length<=1500);
 });
+
+test('split file segments preserve all valid changed-line finding anchors',()=>{
+  // Synthetic two-segment output of the bounded unified-diff splitter.
+  // Each patch is independently anchored to the same NEW-file path.
+  const path='src/review-gate.ts';
+  const segments=[
+    {filename:path,patch:'@@ -1,2 +1,3 @@\n const before=true;\n+rejectConflictingReceipt();\n const after=true;'},
+    {filename:path,patch:'@@ -800,2 +801,3 @@\n const before=true;\n+rejectEditedReceipt();\n const after=true;'}
+  ];
+  const findings=[2,802].map(line=>({path,line,severity:'medium',
+    category:'correctness',title:'Reject unsafe review evidence',
+    body:'A synthetic test finding anchored on a changed line in this segment.',
+    confidence:0.95}));
+  // Before the fix, a Map keyed by filename replaced the first segment's
+  // changed-line set with the second segment's set (1/2 accepted).
+  assert.deepEqual(validateFindings(findings,segments).map(f=>f.line),[2,802]);
+});
