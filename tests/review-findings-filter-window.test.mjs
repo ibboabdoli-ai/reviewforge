@@ -1,0 +1,33 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { validateFindings } from '../src/reviewer.mjs';
+
+const filename='src/review-gate.ts';
+const patch='@@ -1,1 +1,2 @@\n unchanged\n+rejectEditedReceipt();';
+const valid={
+  path:filename,line:2,severity:'high',category:'correctness',
+  title:'Reject edited review receipt',
+  body:'A modified review receipt must not be trusted as current approval.',
+  confidence:0.95
+};
+
+test('a valid later finding survives a bounded window of malformed model suggestions',()=>{
+  // Synthetic, no model/API/network: the previous .slice(0,12) took the first
+  // 12 candidates BEFORE validation, and silently dropped the valid 13th.
+  const malformed=Array.from({length:12},(_,i)=>({...valid,line:900+i}));
+  assert.deepEqual(validateFindings([...malformed,valid],[{filename,patch}]),[
+    valid
+  ]);
+});
+
+test('finding scan remains bounded and output stays capped at eight',()=>{
+  const malformed=Array.from({length:64},(_,i)=>({...valid,line:900+i}));
+  // Never scan arbitrarily large or untrusted model output.
+  assert.equal(validateFindings([...malformed,valid],[{filename,patch}]).length,0);
+  const tenLines=Array.from({length:10},(_,i)=>'+'+'gateCheck'+i+'();');
+  const tenPatch='@@ -0,0 +1,10 @@\n'+tenLines.join('\n');
+  const tenFindings=Array.from({length:10},(_,i)=>({...valid,line:i+1}));
+  const accepted=validateFindings(tenFindings,[{filename,patch:tenPatch}]);
+  assert.equal(accepted.length,8);
+  assert.deepEqual(accepted.map(f=>f.line),[1,2,3,4,5,6,7,8]);
+});
