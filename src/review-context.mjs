@@ -65,11 +65,14 @@ export function projectRuleExcerpts(yaml,paths){
   const matches=(glob,path)=>{
     // Known GitHub project families only. No wildcard parser capable of
     // interpreting regex or arbitrary paths from a repository.
+    // Workflow guidance was silently skipped: YAML does not match JS/TS types.
+    // Admit only the exact vetted workflow glob and the existing safe paths.
     const types=/\.(?:ts|tsx|js|jsx)$/i.test(path);
-    return types && ((glob.startsWith('src/**')&&path.startsWith('src/'))||
+    const workflow=SAFE_WORKFLOW.test(path)&&!DENIED.test(path.slice('.github/'.length));
+    return (types && ((glob.startsWith('src/**')&&path.startsWith('src/'))||
       (glob.startsWith('tests/**')&&path.startsWith('tests/'))||
-      (glob.startsWith('.github/workflows/**')&&path.startsWith('.github/workflows/'))||
-      (glob.startsWith('**/migrations/**')&&path.includes('/migrations/')));
+      (glob.startsWith('**/migrations/**')&&path.includes('/migrations/'))))||
+      (workflow && glob==='.github/workflows/**');
   };
   const text=sections.filter(s=>paths.some(p=>matches(s.glob,p)))
     .slice(0,3).map(s=>s.body.join(' ').slice(0,1100)).filter(Boolean).join('\n');
