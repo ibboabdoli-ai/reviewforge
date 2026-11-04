@@ -58,7 +58,7 @@ export function selectFilesForReview(changedFiles){
 export function safeFiles(files){return selectFilesForReview(files).files;}
 export function coverageSummary(c){
   if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed or sensitive path(s) ignored.`;
-  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity omissions. Unchecked changes may contain bugs.`;
+  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. Unchecked changes may contain bugs.`;
 }
 /**
  * Plan a PR review as bounded, deterministic batches. This is separate from
@@ -112,7 +112,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   if(!Number.isSafeInteger(maxBatchCharacters)||maxBatchCharacters<MAX_FILE_PATCH||maxBatchCharacters>MAX_TOTAL_PATCH)
     throw new RangeError('Invalid model batch character budget');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
-    missingPatch:0,oversized:0,limited:0,complete:true,batches:0,segments:0,reviewedSegments:0};
+    missingPatch:0,oversized:0,limited:0,limitedSegments:0,complete:true,batches:0,segments:0,reviewedSegments:0};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
     if(!file||file.status==='removed'||typeof file.filename!=='string'
@@ -134,11 +134,12 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
     let allIncluded=true;
     for(const patch of file.chunks){
       if(batch.length&&(batch.length>=MAX_FILES||size+patch.length>maxBatchCharacters))flush();
-      if(batches.length>=maxBatches){coverage.limited++;allIncluded=false;continue;}
+      if(batches.length>=maxBatches){coverage.limitedSegments++;allIncluded=false;continue;}
       batch.push({filename:file.filename,patch});size+=patch.length;
       coverage.reviewedSegments++;
     }
     if(allIncluded)seen.add(file.filename);
+    else coverage.limited++;
   }
   flush();
   coverage.reviewed=seen.size;
