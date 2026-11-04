@@ -83,6 +83,21 @@ test('large unified hunk is split with correct GitHub new-line anchors',()=>{
  assert.equal(covered.size,800);
  assert.ok(covered.has(1));assert.ok(covered.has(800));
 });
+test('capacity omissions count distinct files rather than split patch segments',()=>{
+  // One changed file is split into several segments; only the first fits.
+  // Previous count incorrectly reported multiple omitted files for one file.
+  const patch='@@ -0,0 +1,1200 @@\n'+Array.from({length:1200},(_,i)=>'+const item'+i+" = 'long-value';").join('\n');
+  const {coverage}=planReviewBatches([{filename:'src/api/receipts.ts',status:'modified',patch}],{
+    maxBatches:1,maxBatchCharacters:6500
+  });
+  assert.equal(coverage.reviewable,1);
+  assert.equal(coverage.reviewed,0);
+  assert.equal(coverage.limited,1);
+  assert.ok(coverage.limitedSegments>1);
+  assert.equal(coverage.reviewedSegments+coverage.limitedSegments,coverage.segments);
+  assert.equal(coverage.complete,false);
+});
+
 test('partial patch coverage never reserves paid attempts or calls the model',async()=>{
  const m=mock(makeFiles(180));
  let reservations=0;
