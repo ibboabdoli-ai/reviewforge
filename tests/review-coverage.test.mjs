@@ -63,7 +63,7 @@ test('unknown or unavailable patches are disclosed, not silently skipped',async(
  const r=await analyzePullRequest({...target,postMode:'dry-run'},m.dependencies);
  assert.equal(r.status,'partial');assert.equal(r.coverage.missingPatch,1);
  assert.equal(r.coverage.reviewed,1);
- assert.deepEqual(m.calls(),{posts:0,models:1});
+ assert.deepEqual(m.calls(),{posts:0,models:0});
 });
 test('security sensitive files prioritized over components in bounded review',()=>{
  const selection=selectFilesForReview(makeFiles(50));
@@ -82,6 +82,21 @@ test('large unified hunk is split with correct GitHub new-line anchors',()=>{
  const covered=new Set(all.flatMap(x=>[...addedLines(x.patch)]));
  assert.equal(covered.size,800);
  assert.ok(covered.has(1));assert.ok(covered.has(800));
+});
+test('partial patch coverage never reserves paid attempts or calls the model',async()=>{
+ const m=mock(makeFiles(180));
+ let reservations=0;
+ const result=await analyzePullRequest({...target,postMode:'live'},{
+  ...m.dependencies,
+  reserveModelCalls:async()=>{reservations++;return {allowed:true};}
+ });
+ assert.equal(result.status,'partial');
+ assert.equal(result.posted,0);
+ assert.equal(result.coverage.complete,false);
+ assert.equal(reservations,0);
+ assert.deepEqual(m.calls(),{posts:0,models:0});
+ assert.match(result.summary,/INCOMPLETE REVIEW/);
+ assert.match(result.summary,/No AI calls made/);
 });
 test('too many reviewable files disclose incomplete coverage without posting',async()=>{
  const m=mock(makeFiles(180));
