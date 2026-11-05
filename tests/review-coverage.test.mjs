@@ -72,6 +72,28 @@ test('security sensitive files prioritized over components in bounded review',()
  assert.equal(selection.coverage.complete,false);
 });
 
+test('image assets missing textual patches are excluded without hiding missing source patches',()=>{
+ const images=Array.from({length:24},(_,i)=>({
+   filename:'public/demo/assets/photo-'+i+(i<22?'.jpg':'.png'),status:'added'
+ }));
+ const source={filename:'src/lib/verify.ts',status:'modified',
+   patch:'@@ -0,0 +1,1 @@\n+export const verified=true;'};
+ const input=[...images,source];
+ for(const select of [selectFilesForReview,planReviewBatches]){
+   const {coverage}=select(input);
+   assert.equal(coverage.excluded,24);
+   assert.equal(coverage.reviewable,1);
+   assert.equal(coverage.reviewed,1);
+   assert.equal(coverage.missingPatch,0);
+   assert.equal(coverage.complete,true);
+ }
+ const missingSource=planReviewBatches([...input,{
+   filename:'src/api/auth.ts',status:'modified'
+ }]).coverage;
+ assert.equal(missingSource.missingPatch,1);
+ assert.equal(missingSource.complete,false);
+});
+
 test('large unified hunk is split with correct GitHub new-line anchors',()=>{
  const lines=Array.from({length:800},(_,i)=>'+const item'+i+'='+i+';').join('\n');
  const {batches,coverage}=planReviewBatches([{filename:'src/api/security.ts',status:'modified',patch:'@@ -0,0 +1,800 @@\n'+lines}]);
