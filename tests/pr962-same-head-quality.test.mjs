@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdtempSync,rmSync} from 'node:fs';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
 import {scoreReviewQuality,scoreReviewQualitySameHead} from '../benchmarks/score-review.mjs';
 
 const gold=JSON.parse(readFileSync(new URL('../benchmarks/proffera-pr962-gold.json',import.meta.url),'utf8'));
@@ -58,4 +62,38 @@ test('offline PR962 references stay outside model prompts and review runtime',()
    const code=readFileSync(new URL(p,import.meta.url),'utf8');
    assert.doesNotMatch(code,/proffera-pr962-gold|scoreReviewQualitySameHead/);
  }
+});
+
+test('strict PR962 CLI scores matching SHA and rejects stale snapshots without API costs',()=>{
+ const directory=mkdtempSync(join(tmpdir(),'reviewforge-pr962-'));
+ const executable=fileURLToPath(new URL('../benchmarks/score-review.mjs',import.meta.url));
+ const findings=[
+  {path:'.github/workflows/proffera-final-gate-wakeup.yml',line:281,
+   title:'Second Reviewed commit receipt marker',body:'A 41-hex duplicate receipt bypasses the count.'},
+  {path:'tests/codex-review-receipt-gate.test.ts',line:94,
+   title:'Missing negative test',body:'The fixture lacks a malformed second marker.'}
+ ];
+ const run=(name,value)=>{
+  const path=join(directory,name+'.json');
+  writeFileSync(path,JSON.stringify(value));
+  return spawnSync(process.execPath,[executable,'--pr','962',path],{encoding:'utf8'});
+ };
+ try{
+  const valid=run('matching',{...observed,findings});
+  assert.equal(valid.status,0,valid.stderr);
+  assert.equal(JSON.parse(valid.stdout).detected,2);
+  const stale=run('other-head',{...observed,headSha:'b'.repeat(40),findings});
+  assert.equal(stale.status,2);
+  assert.match(stale.stderr,/same PR and HEAD SHA/);
+  const anonymous=run('anonymous',findings);
+  assert.equal(anonymous.status,2);
+  assert.match(anonymous.stderr,/same PR and HEAD SHA/);
+ }finally{rmSync(directory,{recursive:true,force:true});}
+});
+
+test('strict PR962 CLI refuses a missing snapshot rather than reporting 0/2',()=>{
+ const executable=fileURLToPath(new URL('../benchmarks/score-review.mjs',import.meta.url));
+ const missing=spawnSync(process.execPath,[executable,'--pr','962'],{encoding:'utf8'});
+ assert.equal(missing.status,2);
+ assert.match(missing.stderr,/requires a JSON snapshot/);
 });
