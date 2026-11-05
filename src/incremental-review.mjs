@@ -60,6 +60,15 @@ export async function analyzePullRequestStep({
         repository,sha:headSha,files,token,api
       })
     : null;
+  // The PR may advance while its changed-file list and optional SHA-pinned
+  // context are being fetched. Never reserve quota or call a paid model for
+  // a HEAD already superseded before the next batch starts.
+  const beforePaid=await api(pullPath,token);
+  if(beforePaid.head?.sha!==headSha || beforePaid.state!=='open' ||
+     (beforePaid.draft && !allowDraft)) return {
+    status:'superseded',posted:0,findings:[],coverage,
+    summary:'PR HEAD or state changed before paid review; no AI calls made.'
+  };
   // Model selection must consider the entire PR, not only the current batch.
   const modelChoice=repositoryAllowed(repository,config.aiAutoModelRepositories)
     ?selectReviewModel(batches.flat(),{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep,
