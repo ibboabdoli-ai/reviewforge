@@ -48,10 +48,20 @@ export async function analyzePullRequestStep({
   const {batches,coverage}=planReviewBatches(files,{maxBatchCharacters:24000});
   // Fail closed on incomplete diffs before optional SHA-pinned file reads.
   // Avoid unnecessary GitHub API calls; never reserve or spend paid AI work.
-  if(!coverage.complete || !batches.length) return {
-    status:'partial',posted:0,findings:[],coverage,
-    summary:coverageSummary(coverage)+' Review incomplete; no AI calls made.'
-  };
+  if(!coverage.complete || !batches.length) {
+    // Changed-file data is not SHA-pinned by GitHub's PR/files endpoint.
+    // Even an unpaid incomplete verdict must not be assigned to an old HEAD.
+    const current=await api(pullPath,token);
+    if(current.head?.sha!==headSha || current.state!=='open' ||
+       (current.draft && !allowDraft)) return {
+      status:'superseded',posted:0,findings:[],
+      summary:'PR HEAD or state changed during incomplete-diff preflight; no AI calls made.'
+    };
+    return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:coverageSummary(coverage)+' Review incomplete; no AI calls made.'
+    };
+  }
 
   const useContext=repositoryAllowed(repository,config.aiContextRepositories);
   // For staged reviews, compute every input before the first paid attempt.
