@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "source": "CodeRabbit comments with original_commit_id matching PR #962 HEAD a83c202; independently corroborated against source. Benchmark-only, never supplied to a model.",
+  "repository": "ibboabdoli-ai/Proffera",
+  "pr": 962,
+  "headSha": "a83c202335eb602d6b1c5858a984eaa105f5d169",
+  "cases": [
+    {
+      "id": "duplicate-reviewed-commit-wakeup",
+      "kind": "functional",
+      "path": ".github/workflows/proffera-final-gate-wakeup.yml",
+      "lineMin": 281,
+      "lineMax": 282,
+      "description": "Wakup's 7–40-hex-matching receipt count silently ignores a second Reviewed commit marker with 41 hex chars; a valid first marker then passes.",
+      "evidenceGroups": [
+        [
+          "second",
+          "duplicate",
+          "multiple",
+          "41-character",
+          "41-hex"
+        ],
+        [
+          "reviewed commit",
+          "receipt",
+          "marker"
+        ]
+      ],
+      "source": "https://github.com/ibboabdoli-ai/Proffera/pull/962#discussion_r4456215994"
+    },
+    {
+      "id": "missing-negative-duplicate-receipt-test",
+      "kind": "test-integrity",
+      "path": "tests/codex-review-receipt-gate.test.ts",
+      "lineMin": 90,
+      "lineMax": 100,
+      "description": "A negative fixture fails to test one valid receipt followed by a second malformed or overlong Reviewed commit line, so a vulnerable parser can pass.",
+      "evidenceGroups": [
+        [
+          "test",
+          "fixture",
+          "assertion"
+        ],
+        [
+          "second",
+          "duplicate",
+          "41",
+          "malformed",
+          "extra"
+        ]
+      ],
+      "source": "https://github.com/ibboabdoli-ai/Proffera/pull/962#discussion_r4456216036"
+    }
+  ],
+  "baseline": {
+    "reviewId": 10,
+    "reviewStatus": "completed",
+    "headSha": "a83c202335eb602d6b1c5858a984eaa105f5d169",
+    "acceptedFindings": 0,
+    "rawModelSuggestions": 0,
+    "model": "gpt-6.1-sol"
+  },
+  "validatedAt": "2026-11-05",
+  "verifiedFixAt": "b1aa4b87ca83dbb941459eb654688dd4be4bedd2",
+  "scope": "Two exact-original-commit CodeRabbit findings; validated by inspecting the old and corrected source plus a synthetic marker-count counterexample. Fixed later in Proffera, not open at latest HEAD. The gold set is offline only and must not influence the reviewer or prompt; the scorer does not prove model-level improvement."
+}

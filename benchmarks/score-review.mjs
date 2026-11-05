@@ -31,6 +31,21 @@ export function scoreReviewQuality(reference,found){
   unmatchedFindings:found.length-selected.size,cases};
 }
 
+/**
+ * Optional strict scorer for like-for-like, immutable PR-head comparisons.
+ * Legacy scoreReviewQuality stays unchanged for synthetic standalone fixtures.
+ * Never treat findings from another commit (or repository/PR) as recall.
+ */
+export function scoreReviewQualitySameHead(reference,snapshot){
+ if(!reference||!snapshot||Array.isArray(snapshot)||typeof snapshot!=='object'||
+   !Array.isArray(snapshot.findings)||
+   typeof snapshot.headSha!=='string'||!/^[0-9a-f]{40}$/i.test(snapshot.headSha)||
+   reference.repository!==snapshot.repository || reference.pr!==snapshot.pr ||
+   String(reference.headSha||'').toLowerCase()!==snapshot.headSha.toLowerCase())
+   throw new Error('Benchmark requires same PR and HEAD SHA; refusing cross-commit comparison');
+ return scoreReviewQuality(reference,snapshot.findings);
+}
+
 if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
  const args=process.argv.slice(2);
  const named=args[0]==='--pr';
