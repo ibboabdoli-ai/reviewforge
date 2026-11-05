@@ -46,6 +46,13 @@ export async function analyzePullRequestStep({
   // Keep individual LLM calls modest enough for Vercel's 120s maximum.
   // The legacy all-at-once pipeline retains its previous batch size.
   const {batches,coverage}=planReviewBatches(files,{maxBatchCharacters:24000});
+  // Fail closed on incomplete diffs before optional SHA-pinned file reads.
+  // Avoid unnecessary GitHub API calls; never reserve or spend paid AI work.
+  if(!coverage.complete || !batches.length) return {
+    status:'partial',posted:0,findings:[],coverage,
+    summary:coverageSummary(coverage)+' Review incomplete; no AI calls made.'
+  };
+
   const useContext=repositoryAllowed(repository,config.aiContextRepositories);
   // For staged reviews, compute every input before the first paid attempt.
   const reviewContext=useContext
@@ -58,12 +65,6 @@ export async function analyzePullRequestStep({
     ?selectReviewModel(batches.flat(),{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep,
       enhancedRisk:useContext})
     :null;
-  // Never pay for a scan that is known to omit required diff hunks.
-  if(!coverage.complete || !batches.length) return {
-    status:'partial',posted:0,findings:[],coverage,
-    summary:coverageSummary(coverage)+' Review incomplete; no AI calls made.'
-  };
-
   const planHash=createHash('sha256').update(JSON.stringify({
     headSha,postMode,allowDraft,batches,coverage,reviewContext,
     modelPolicy:{
