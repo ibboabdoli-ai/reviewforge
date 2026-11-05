@@ -135,6 +135,18 @@ test('partial patch coverage never reserves paid attempts or calls the model',as
  assert.match(result.summary,/INCOMPLETE REVIEW/);
  assert.match(result.summary,/No AI calls made/);
 });
+test('incomplete review never misreports preflight-selected files as AI-analyzed',async()=>{
+ const m=mock(makeFiles(180));
+ const r=await analyzePullRequest({...target,postMode:'dry-run'},m.dependencies);
+ assert.equal(r.status,'partial');
+ assert.ok(r.coverage.reviewed>0,'preflight selects candidates even though review is blocked');
+ assert.equal(r.coverage.complete,false);
+ assert.match(r.summary,/eligible files fit the preflight selection \(not AI-reviewed\)/);
+ assert.doesNotMatch(r.summary,/eligible files analyzed/);
+ assert.match(r.summary,/No AI calls made/);
+ assert.deepEqual(m.calls(),{posts:0,models:0});
+});
+
 test('too many reviewable files disclose incomplete coverage without posting',async()=>{
  const m=mock(makeFiles(180));
  const r=await analyzePullRequest({...target,postMode:'live'},m.dependencies);
