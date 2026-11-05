@@ -50,14 +50,28 @@ if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
  const args=process.argv.slice(2);
  const named=args[0]==='--pr';
  const pr=named?args[1]:'953';
- if(!['944','949','953'].includes(pr)||args.length>(named?3:1)){
-   console.error('Usage: node benchmarks/score-review.mjs [--pr 944|949|953] [findings.json]');
+ if(!['944','949','953','962'].includes(pr)||args.length>(named?3:1)){
+   console.error('Usage: node benchmarks/score-review.mjs [--pr 944|949|953|962] [findings.json]');
    process.exitCode=2;
  }else{
-   const gold=JSON.parse(readFileSync(new URL('./proffera-pr'+pr+'-gold.json',import.meta.url),'utf8'));
    const path=named?args[2]:args[0];
-   const actual=path ? JSON.parse(readFileSync(path,'utf8')):[];
-   const findings=Array.isArray(actual)?actual:actual.findings||[];
-   console.log(JSON.stringify(scoreReviewQuality(gold,findings),null,2));
+   // The PR962 gold set is commit-bound; an unlabeled list or omitted
+   // snapshot could accidentally count a later commit as recovered recall.
+   if(pr==='962'&&!path){
+     console.error('PR962 requires a JSON snapshot with repository, pr, headSha and findings.');
+     process.exitCode=2;
+   }else{
+     try{
+       const gold=JSON.parse(readFileSync(new URL('./proffera-pr'+pr+'-gold.json',import.meta.url),'utf8'));
+       const actual=path ? JSON.parse(readFileSync(path,'utf8')):[];
+       const score=pr==='962'
+         ?scoreReviewQualitySameHead(gold,actual)
+         :scoreReviewQuality(gold,Array.isArray(actual)?actual:actual.findings||[]);
+       console.log(JSON.stringify(score,null,2));
+     }catch(error){
+       console.error('Benchmark rejected: '+String(error?.message||error).slice(0,180));
+       process.exitCode=2;
+     }
+   }
  }
 }
