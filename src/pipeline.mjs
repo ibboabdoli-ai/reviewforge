@@ -44,6 +44,15 @@ export async function analyzePullRequest({ repository, number, headSha, installa
         +' No AI calls made because coverage is incomplete.',
       findings:[],posted:0,coverage};
   }
+  // A PR may advance while GitHub is returning the changed-file list.
+  // Recheck the exact HEAD/state before reserving daily quota or any model call,
+  // rather than discovering an already-stale review only after paid work.
+  const beforePaid=await api(pullPath,token);
+  if(beforePaid.head?.sha!==headSha || beforePaid.state!=='open' ||
+     (beforePaid.draft && !allowDraft)) return {
+    status:'superseded',summary:'PR changed before paid review; no AI calls made.',
+    findings:[],posted:0,coverage
+  };
   // Reserve all model attempts BEFORE the first model call. An insufficient
   // global daily cap must not result in a half-reviewed PR or overspend.
   if(batches.length && deps.reserveModelCalls){
