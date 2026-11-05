@@ -23,6 +23,8 @@ export function redactKnownTokens(patch){
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
 const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
+// GitHub omits text patches for image assets. Report them as excluded, never as reviewed code.
+const UNREVIEWABLE_IMAGE_PATH=/\.(?:jpe?g|png)$/i;
 const MAX_FILES=35, MAX_FILE_PATCH=6500, MAX_TOTAL_PATCH=65000;
 function priority(path){
   if(/(?:^|\/)(?:auth|security|billing|payments?|api|webhooks?|middleware)(?:\/|\.|-)|(?:stripe|permissions|session|checkout)/i.test(path))return 0;
@@ -34,7 +36,7 @@ export function selectFilesForReview(changedFiles){
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,complete:true};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
-    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || GENERATED_PATH.test(file.filename)){
+    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || (GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
     coverage.reviewable++;
@@ -57,7 +59,7 @@ export function selectFilesForReview(changedFiles){
 // Compatibility for callers that only require the bounded payload.
 export function safeFiles(files){return selectFilesForReview(files).files;}
 export function coverageSummary(c){
-  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed or sensitive path(s) ignored.`;
+  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed, image or sensitive path(s) ignored.`;
   return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. Unchecked changes may contain bugs.`;
 }
 /**
@@ -116,7 +118,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
     if(!file||file.status==='removed'||typeof file.filename!=='string'
-       ||SKIPPED_PATH.test(file.filename)||GENERATED_PATH.test(file.filename)){
+       ||SKIPPED_PATH.test(file.filename)||(GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
     coverage.reviewable++;
