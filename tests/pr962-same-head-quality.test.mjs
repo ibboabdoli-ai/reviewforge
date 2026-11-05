@@ -41,8 +41,8 @@ test('synthetic second malformed receipt exposes the previously missed gate patt
  // Standalone synthetic reproduction; does NOT execute or modify Proffera.
  const valid='Reviewed commit: '+'a'.repeat(10);
  const malformed='Reviewed commit: '+'b'.repeat(41);
- const body=valid+'\\n'+malformed;
- const acceptedPattern=/Reviewed commit:\\s*([0-9a-fA-F]{7,40})(?![0-9a-fA-F])/g;
+ const body=valid+'\n'+malformed;
+ const acceptedPattern=/Reviewed commit:\s*([0-9a-fA-F]{7,40})(?![0-9a-fA-F])/g;
  assert.equal([...body.matchAll(acceptedPattern)].length,1);
  assert.equal([...body.matchAll(/Reviewed commit:/g)].length,2);
  const unsafe= [...body.matchAll(acceptedPattern)].length===1;
