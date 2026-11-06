@@ -36,6 +36,10 @@ export function scoreReviewQuality(reference,found){
  * Legacy scoreReviewQuality stays unchanged for synthetic standalone fixtures.
  * Never treat findings from another commit (or repository/PR) as recall.
  */
+/** Score only matching completed snapshots with explicit, consistent file coverage.
+ * Exclusions make this strict whole-change benchmark ineligible; selective
+ * review results can still be examined through the raw, non-eligibility scorer.
+ */
 export function scoreReviewQualitySameHead(reference,snapshot){
  if(!reference||!snapshot||Array.isArray(snapshot)||typeof snapshot!=='object'||
    !Array.isArray(snapshot.findings)||
@@ -43,6 +47,12 @@ export function scoreReviewQualitySameHead(reference,snapshot){
    reference.repository!==snapshot.repository || reference.pr!==snapshot.pr ||
    String(reference.headSha||'').toLowerCase()!==snapshot.headSha.toLowerCase())
    throw new Error('Benchmark requires same PR and HEAD SHA; refusing cross-commit comparison');
+ if(snapshot.status!=='completed' || snapshot.coverage?.complete!==true)
+   throw new Error('Benchmark requires a completed review with verified complete coverage');
+ const {eligible,analyzed,excluded}=snapshot.coverage;
+ if(!Number.isSafeInteger(eligible)||eligible<0||!Number.isSafeInteger(analyzed)||
+    analyzed!==eligible||!Array.isArray(excluded)||excluded.length!==0)
+   throw new Error('Benchmark coverage requires equal nonnegative eligible/analyzed counts and no exclusions');
  return scoreReviewQuality(reference,snapshot.findings);
 }
 
@@ -58,7 +68,7 @@ if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
    // The PR962 gold set is commit-bound; an unlabeled list or omitted
    // snapshot could accidentally count a later commit as recovered recall.
    if(pr==='962'&&!path){
-     console.error('PR962 requires a JSON snapshot with repository, pr, headSha and findings.');
+     console.error('PR962 requires a JSON snapshot with repository, pr, headSha, status=completed, coverage.complete=true and findings.');
      process.exitCode=2;
    }else{
      try{

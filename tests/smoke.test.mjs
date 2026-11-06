@@ -5,6 +5,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {randomBytes} from 'node:crypto';
+import {trackChild} from './helpers/child-cleanup.mjs';
 
 const root=resolve(import.meta.dirname,'..');
 test('HTTP landing, isolated demo, CSRF, diff review, and security headers',async()=>{
@@ -12,6 +13,8 @@ test('HTTP landing, isolated demo, CSRF, diff review, and security headers',asyn
   const port=24000+Math.floor(Math.random()*15000),origin=`http://127.0.0.1:${port}`;
   const child=spawn(process.execPath,['src/server.mjs'],{cwd:root,
     env:{...process.env,PORT:String(port),APP_URL:origin,DB_PATH:join(dir,'db.sqlite'),SESSION_SECRET:randomBytes(32).toString('hex'),DEMO_MODE:'true',GITHUB_CLIENT_ID:'',GITHUB_CLIENT_SECRET:'',GITHUB_APP_ID:'',GITHUB_WEBHOOK_SECRET:'',OPENAI_API_KEY:'',NODE_ENV:'development'},stdio:'ignore'});
+  const cleanup=trackChild(child,()=>rmSync(dir,{force:true,recursive:true}));
+  let primaryError;
   try{
     let ready=false;
     for(let i=0;i<35;i++){
@@ -36,5 +39,8 @@ test('HTTP landing, isolated demo, CSRF, diff review, and security headers',asyn
     assert.equal(checked.status,303);
     const review=await fetch(origin+checked.headers.get('location'),{headers:{Cookie:session}});assert.equal(review.status,200);
     assert.match(await review.text(),/Use of eval detected/);
-  }finally{child.kill('SIGTERM');rmSync(dir,{force:true,recursive:true});}
+  }catch(error){primaryError=error;throw error;}
+  finally{
+    await cleanup(primaryError);
+  }
 });
