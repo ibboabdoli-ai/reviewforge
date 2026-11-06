@@ -4,6 +4,13 @@ import { decrypt, encrypt } from './security.mjs';
 
 const API='https://api.github.com';
 const VERSION='2026-03-10';
+/** Stop only after a complete GitHub page, including an exact 500-item bound. */
+function lastPage(items,data,page,label){
+  if(items.length<100)return true;
+  if(page<5)return false;
+  if(Number.isSafeInteger(data.total_count) && data.total_count===page*100)return true;
+  throw new Error(`GitHub ${label} list exceeded pagination bound`);
+}
 export async function githubApi(path,token,{method='GET',body}={}) {
   const res=await fetch(API+path,{
     method, headers:{'Authorization':`Bearer ${token}`,'Accept':'application/vnd.github+json',
@@ -48,52 +55,69 @@ export async function installationToken(installationId) {
   const data=await githubApi(`/app/installations/${Number(installationId)}/access_tokens`,githubAppJwt(),{method:'POST'});
   return data.token;
 }
-export async function installationsForUser(db,user) {
-  const token=await githubUserToken(db,user);
+/** Read installations with this user's OAuth token, bounded to five pages. */
+export async function installationsForUser(db,user,{api=githubApi,userToken=githubUserToken}={}) {
+  const token=await userToken(db,user);
   const result=[];
   for(let page=1;page<=5;page++) {
-    const data=await githubApi(`/user/installations?per_page=100&page=${page}`,token);
-    result.push(...(data.installations||[]));
-    if((data.installations||[]).length<100)break;
+    const data=await api(`/user/installations?per_page=100&page=${page}`,token);
+    if(!Array.isArray(data.installations))throw new Error('Invalid GitHub installation list');
+    result.push(...data.installations);
+    if(lastPage(data.installations,data,page,'installation'))return {token,installations:result};
   }
-  return {token,installations:result};
 }
-export async function syncInstallations(db,user) {
-  const {token,installations}=await installationsForUser(db,user);
+/** Match live user grants to the same installed repository and installation. */
+export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=githubUserToken}={}){
+  // PostgreSQL returns BIGINT identifiers as strings; SQLite returns numbers.
+  if(!Number.isSafeInteger(Number(user?.id))||Number(user?.id)<=0||
+     !Number.isSafeInteger(Number(user?.github_id))||Number(user?.github_id)<=0)return new Set();
+  const current=await db.prepare('SELECT * FROM users WHERE id=? AND github_id=?').get(user.id,user.github_id);
+  if(!current)return new Set();
+  const {token,installations}=await installationsForUser(db,current,{api,userToken});
+  const linked=await db.prepare("SELECT p.id,p.installation_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.status='active' AND p.enabled=1").all();
+  const installationByRepo=new Map(linked.map(row=>[Number(row.id),Number(row.installation_id)]));
+  const activeIds=new Set(installationByRepo.values());
+  const ids=new Set();
+  for(const inst of installations){
+    if(!activeIds.has(Number(inst.id)))continue;
+    for(let page=1;page<=5;page++){
+      const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
+      if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
+      for(const repo of data.repositories){
+        if(Number.isSafeInteger(repo.id) && installationByRepo.get(repo.id)===Number(inst.id))ids.add(repo.id);
+      }
+      if(lastPage(data.repositories,data,page,'repository'))break;
+    }
+  }
+  return ids;
+}
+/** Sync app metadata for this user without removing other members' access. */
+export async function syncInstallations(db,user,{api=githubApi,userToken=githubUserToken}={}) {
+  const {token,installations}=await installationsForUser(db,user,{api,userToken});
   let linked=0,repoCount=0;
   for(const inst of installations) {
-    const accessibleIds=[];
-    const current=await db.prepare('SELECT owner_user_id FROM installations WHERE id=?').get(inst.id);
-    if(current && current.owner_user_id!==user.id)continue;
+    // The first linked user remains the billing owner, not the only member.
     await db.prepare(`INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(?,?,?,'active')
       ON CONFLICT(id) DO UPDATE SET account_login=excluded.account_login,status='active'`).run(inst.id,user.id,inst.account?.login||'unknown');
     linked++;
-    // Only show repositories the signed-in user can actually access.
+    // A member's visibility cannot disable repositories for other members.
     for(let page=1;page<=5;page++) {
-      const data=await githubApi(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
-      const repos=data.repositories||[];
+      const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
+      if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
+      const repos=data.repositories;
       for(const repo of repos) {
         await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled)
           VALUES(?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET
-          name=excluded.name,full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private`).run(
+          installation_id=excluded.installation_id,name=excluded.name,full_name=excluded.full_name,
+          html_url=excluded.html_url,private=excluded.private,enabled=1`).run(
           repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
-        accessibleIds.push(repo.id);
         repoCount++;
       }
-      if(repos.length<100)break;
+      if(lastPage(repos,data,page,'repository'))break;
     }
-    if(accessibleIds.length){
-      const placeholders=accessibleIds.map(()=>'?').join(',');
-      await db.prepare(`UPDATE repositories SET enabled=0 WHERE installation_id=? AND id NOT IN (${placeholders})`).run(inst.id,...accessibleIds);
-      await db.prepare(`UPDATE repositories SET enabled=1 WHERE installation_id=? AND id IN (${placeholders})`).run(inst.id,...accessibleIds);
-    } else await db.prepare('UPDATE repositories SET enabled=0 WHERE installation_id=?').run(inst.id);
   }
-  // Revoked access is not allowed to retain active review entitlement.
-  if(installations.length<500){
-    const ids=installations.map(i=>i.id);
-    if(ids.length)await db.prepare(`UPDATE installations SET status='disconnected' WHERE owner_user_id=? AND id NOT IN (${ids.map(()=>'?').join(',')})`).run(user.id,...ids);
-    else await db.prepare(`UPDATE installations SET status='disconnected' WHERE owner_user_id=?`).run(user.id);
-  }
+  // Signed installation webhooks manage app-wide removal. User access is
+  // checked afresh for each read and manual request.
   return {linked,repoCount};
 }
 export async function changedFiles({repoFullName,prNumber,token}) {

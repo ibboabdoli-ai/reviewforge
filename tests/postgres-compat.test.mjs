@@ -5,6 +5,8 @@ import {sqlForPostgres} from '../src/db-postgres.mjs';
 test('Postgres SQL translation uses numbered parameters',()=>{
   assert.equal(sqlForPostgres('SELECT * FROM users WHERE login=? AND github_id=?'),
     'SELECT * FROM users WHERE login=$1 AND github_id=$2');
+  assert.equal(sqlForPostgres("SELECT p.id FROM repositories p WHERE p.id IN (?,?) AND p.enabled=1"),
+    "SELECT p.id FROM repositories p WHERE p.id IN ($1,$2) AND p.enabled=1");
 });
 test('SQLite ignore inserts become conflict-safe Postgres inserts',()=>{
   assert.equal(sqlForPostgres('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)'),
