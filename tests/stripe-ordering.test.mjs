@@ -115,3 +115,11 @@ test('unverifiable replacement order or Stripe outage leaves state and event unm
     assert.equal(await activePlan(f.db,1),'pro');
   }finally{f.dispose();}
 });
+test('incomplete stored billing identity cannot consume a subscription event',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO subscriptions(user_id,stripe_customer_id,status) VALUES(1,'cus_one','pending')").run();
+    await assert.rejects(f.send('evt_incomplete','customer.subscription.created','sub_new'),/Stored Stripe subscription identity/);
+    assert.equal(f.db.prepare("SELECT id FROM stripe_events WHERE id='evt_incomplete'").get(),undefined);
+    assert.equal(await activePlan(f.db,1),'free');
+  }finally{f.dispose();}
+});
