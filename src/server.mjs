@@ -92,19 +92,16 @@ async function webhookGithub(req,res){
         ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,
         full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
-      const allowance=await allowedReviews(db,installed.owner_user_id);
       const shadowUnlimited=isUnlimitedShadowRepository(repo.full_name,{
         allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
         unlimited:config.aiUnlimitedRepositories
       });
-      if(rr&&(allowance.used<allowance.limit||shadowUnlimited)){
-        const row=await db.prepare(`INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status)
-          VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING`).run(inst.id,repo.id,pr.number,pr.title?.slice(0,250)||'',pr.user?.login||'',pr.head?.sha||'');
-        if(row.changes){
-          queued=true;
-          const r=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,pr.number,pr.head.sha);
-          await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(r.id);
-        }
+      if(rr){
+        try{
+          const row=await db.reserveReview({installationId:inst.id,repositoryId:repo.id,prNumber:pr.number,
+            title:pr.title?.slice(0,250)||'',author:pr.user?.login||'',headSha:pr.head?.sha||'',unlimited:shadowUnlimited});
+          queued=row.created;
+        }catch(error){if(error.status!==429)throw error;}
       }
     }
   }
@@ -143,21 +140,15 @@ async function webhookGithub(req,res){
             allPages('pulls/'+prNo+'/reviews'),allPages('pulls/'+prNo+'/comments')
           ]);
           if(!alreadyReviewedExactHead(reviews,inline,head,request.created_at)){
-            const allowance=await allowedReviews(db,installed.owner_user_id);
             const unlimited=isUnlimitedShadowRepository(fullName,{
               allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
               unlimited:config.aiUnlimitedRepositories
             });
-            if(allowance.used<allowance.limit||unlimited){
-              const row=await db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status) VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING")
-                .run(inst.id,repo.id,prNo,String(pull.title||'').slice(0,250),pull.user?.login||'',head);
-              if(row.changes){
-                const inserted=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?')
-                  .get(repo.id,prNo,head);
-                await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(inserted.id);
-                queued=true;
-              }
-            }
+            try{
+              const row=await db.reserveReview({installationId:inst.id,repositoryId:repo.id,prNumber:prNo,
+                title:String(pull.title||'').slice(0,250),author:pull.user?.login||'',headSha:head,unlimited});
+              queued=row.created;
+            }catch(error){if(error.status!==429)throw error;}
           }
         }
       }

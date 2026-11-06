@@ -89,7 +89,7 @@ test('unlimited review count applies only to a permitted, exact shadow repositor
 test('server enforces per-repo monthly and daily limits',async()=>{
  const {readFileSync}=await import('node:fs');
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
- assert.match(source,/allowance\.used<allowance\.limit\|\|shadowUnlimited/);
+ assert.match(source,/db\.reserveReview\(\{installationId:inst\.id,repositoryId:repo\.id,prNumber:pr\.number,/);
  assert.match(source,/if\(shadowUnlimited\)\{modelCallsMayHaveStarted=true;return \{allowed:true\};\}/);
  assert.match(source,/postMode:manual\?'dry-run':effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
 });
