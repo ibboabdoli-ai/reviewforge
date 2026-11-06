@@ -40,6 +40,9 @@ function hasDeletionOnlyHunk(patch){
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
 const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
+// A removed dependency lockfile can change the resolved supply chain. Unlike
+// routine lockfile edits, deletion cannot be silently excluded as generated.
+const REMOVED_LOCK_PATH=/(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i;
 // Deleted executable/configuration files have no added-line anchors. Until
 // removals can be reviewed as first-class patches, fail closed rather than
 // silently approving a PR that removed an auth or safety check.
@@ -53,8 +56,9 @@ const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
 const REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql|toml|mod)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$|(?:^|\/)(?:bin|scripts)\/(?:[^/]+\/)*[^/.]+$)/i;
 function isRemovedSource(file){
   return file?.status==='removed' && typeof file.filename==='string' &&
-    REMOVED_SOURCE_PATH.test(file.filename) && !SKIPPED_PATH.test(file.filename) &&
-    !GENERATED_PATH.test(file.filename);
+    (REMOVED_LOCK_PATH.test(file.filename) ||
+      (REMOVED_SOURCE_PATH.test(file.filename) && !GENERATED_PATH.test(file.filename))) &&
+    !SKIPPED_PATH.test(file.filename);
 }
 const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
 // GitHub omits text patches for image assets. Report them as excluded, never as reviewed code.

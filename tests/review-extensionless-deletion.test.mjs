@@ -101,3 +101,59 @@ test('deleted manifest guards fail closed before any model or review output',asy
     assert.deepEqual(calls,{reservations:0,models:0,posts:0,checkpoints:0});
   }
 });
+
+
+test('removed generated dependency locks cannot silently count as complete coverage',()=>{
+  const locks=[
+    {filename:'package-lock.json',status:'removed',patch:'@@ -1 +0,0 @@\\n-old-lock'},
+    {filename:'pnpm-lock.yaml',status:'removed',patch:'@@ -1 +0,0 @@\\n-old-lock'},
+    {filename:'apps/site/yarn.lock',status:'removed',patch:'@@ -1 +0,0 @@\\n-old-lock'}
+  ];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const result=planner([...locks,modified]);
+    assert.equal(result.coverage.removedCode,3);
+    assert.equal(result.coverage.reviewable,4);
+    assert.equal(result.coverage.reviewed,1);
+    assert.equal(result.coverage.complete,false);
+  }
+});
+
+test('removed lockfiles fail closed before model/quota/post/checkpoints in both pipelines',async()=>{
+  const locks=[
+    {filename:'package-lock.json',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
+    {filename:'pnpm-lock.yaml',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
+    {filename:'yarn.lock',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'}
+  ];
+  for(const run of [analyzePullRequest,analyzePullRequestStep]){
+    const calls={reservations:0,models:0,posts:0,checkpoints:0};
+    const deps={
+      githubApi:async()=>({head:{sha},state:'open',draft:false}),
+      installationToken:async()=> 'offline-synthetic',
+      changedFiles:async()=>[...locks,modified],
+      reserveModelCalls:async()=>{calls.reservations++;return true;},
+      reviewWithAI:async()=>{calls.models++;return {summary:'Clean',findings:[]};},
+      postReview:async()=>{calls.posts++;return 'inline';},
+      loadProgress:async()=>{calls.checkpoints++;return null;},
+      initProgress:async()=>{calls.checkpoints++;return true;},
+      saveProgress:async()=>{calls.checkpoints++;return true}
+    };
+    const result=await run({repository:'sandbox/test',number:1,headSha:sha,
+      installationId:3,reviewId:1,postMode:'live'},deps);
+    assert.equal(result.status,'partial');
+    assert.equal(result.coverage.removedCode,3);
+    assert.deepEqual(calls,{reservations:0,models:0,posts:0,checkpoints:0});
+  }
+});
+
+test('routine generated lockfile edits and deleted notes remain excluded',()=>{
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const result=planner([
+      {filename:'package-lock.json',status:'modified',patch:'@@ -1 +1 @@\\n-old\\n+new'},
+      {filename:'docs/release-notes',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
+      modified
+    ]);
+    assert.equal(result.coverage.excluded,2);
+    assert.equal(result.coverage.removedCode,0);
+    assert.equal(result.coverage.complete,true);
+  }
+});
