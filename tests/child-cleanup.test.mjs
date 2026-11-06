@@ -35,6 +35,17 @@ test('spawn/kill errors still surface when there was no prior test failure',asyn
   child.emit('error',new Error('spawn failed'));
   await assert.rejects(cleanup(),AggregateError);assert.equal(removed,true);
 });
+test('synchronous kill failure is reported after forced close and cleanup',async()=>{
+  const killError=new Error('kill failed');let removed=false;
+  const child=fakeChild(function(signal){
+    if(signal==='SIGTERM')throw killError;
+    this.emit('close');return true;
+  });
+  const cleanup=trackChild(child,()=>{removed=true;},{graceMs:10,forceMs:10});
+  await assert.rejects(cleanup(),error=>
+    error instanceof AggregateError&&error.errors.includes(killError));
+  assert.equal(removed,true);
+});
 test('real child closes before cleanup on the host platform',async()=>{
   const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
   let removed=false;
