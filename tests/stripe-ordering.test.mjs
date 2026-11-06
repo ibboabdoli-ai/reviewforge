@@ -122,7 +122,9 @@ test('separate SQLite connections process webhooks without blocking the event lo
     const next=processStripeEvent(second,...signed('evt_conn_two','customer.subscription.deleted','sub_new'),{
       retrieveSubscription:async()=>({...f.objects.get('sub_new'),status:'canceled'})
     });
+    const timerStarted=Date.now();
     await new Promise(resolve=>setTimeout(resolve,75));
+    assert.ok(Date.now()-timerStarted<1000,'another webhook must not block the event loop');
     release();
     await Promise.all([first,next]);
     assert.equal(await activePlan(f.db,1),'free');
