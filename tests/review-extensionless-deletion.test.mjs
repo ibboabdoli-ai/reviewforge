@@ -1,0 +1,61 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {selectFilesForReview,planReviewBatches} from '../src/reviewer.mjs';
+import {analyzePullRequest} from '../src/pipeline.mjs';
+import {analyzePullRequestStep} from '../src/incremental-review.mjs';
+
+// Synthetic extensionless executables: deleted authorization/receipt programs
+// have no added-line anchors, so a clean review is not supportable.
+const deleted=[
+  {filename:'bin/authorize-tenant',status:'removed',patch:'@@ -1 +0,0 @@\n-requireTenantAccess();'},
+  {filename:'scripts/verify-receipt',status:'removed',patch:'@@ -1 +0,0 @@\n-rejectForgedEvidence();'},
+  {filename:'tools/bin/validate-approval',status:'removed',patch:'@@ -1 +0,0 @@\n-checkApproval();'}
+];
+const modified={filename:'src/health.ts',status:'modified',patch:'@@ -1 +1 @@\n-oldStatus();\n+newStatus();'};
+const sha='a'.repeat(40);
+
+test('extensionless deleted executable files never count as fully reviewed',()=>{
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const result=planner([...deleted,modified]);
+    const selected=result.files||result.batches.flat();
+    assert.deepEqual(selected.map(f=>f.filename),['src/health.ts']);
+    assert.equal(result.coverage.removedCode,3);
+    assert.equal(result.coverage.reviewable,4);
+    assert.equal(result.coverage.reviewed,1);
+    assert.equal(result.coverage.complete,false);
+  }
+});
+
+test('removed executable extensionless files fail closed in both review pipelines',async()=>{
+  for(const run of [analyzePullRequest,analyzePullRequestStep]){
+    const calls={reservations:0,models:0,posts:0,checkpoints:0};
+    const deps={
+      githubApi:async()=>({head:{sha},state:'open',draft:false}),
+      installationToken:async()=> 'offline-synthetic',
+      changedFiles:async()=>[...deleted,modified],
+      reserveModelCalls:async()=>{calls.reservations++;return true;},
+      reviewWithAI:async()=>{calls.models++;return {summary:'Clean',findings:[]};},
+      postReview:async()=>{calls.posts++;return 'inline';},
+      loadProgress:async()=>{calls.checkpoints++;return null;},
+      initProgress:async()=>{calls.checkpoints++;return true;},
+      saveProgress:async()=>{calls.checkpoints++;return true;}
+    };
+    const result=await run({repository:'sandbox/test',number:1,headSha:sha,
+      installationId:3,reviewId:1,postMode:'live'},deps);
+    assert.equal(result.status,'partial');
+    assert.equal(result.coverage.removedCode,3);
+    assert.deepEqual(calls,{reservations:0,models:0,posts:0,checkpoints:0});
+  }
+});
+
+test('ordinary deleted notes remain excluded without blocking valid code',()=>{
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const result=planner([
+      {filename:'docs/release-notes',status:'removed',patch:'@@ -1 +0,0 @@\n-old note'},
+      modified
+    ]);
+    assert.equal(result.coverage.removedCode,0);
+    assert.equal(result.coverage.excluded,1);
+    assert.equal(result.coverage.complete,true);
+  }
+});
