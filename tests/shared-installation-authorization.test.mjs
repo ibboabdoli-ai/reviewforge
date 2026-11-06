@@ -137,9 +137,9 @@ test('exactly 500 user-accessible repositories remain available; more than 500 f
     throw new Error('Unexpected page');
   };
   try{
+    assert.deepEqual(await syncInstallations(f.db,bob,{api,userToken:async()=> 'bob-token'}),{linked:1,repoCount:500});
     const ids=await authorizedRepositoryIds(f.db,bob,{api,userToken:async()=> 'bob-token'});
     assert.equal(ids.size,500);
-    assert.deepEqual(await syncInstallations(f.db,bob,{api,userToken:async()=> 'bob-token'}),{linked:1,repoCount:500});
     const over=async path=>{
       const result=await api(path);
       return result.repositories?{...result,total_count:501}:result;

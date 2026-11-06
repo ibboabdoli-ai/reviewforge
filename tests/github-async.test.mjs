@@ -4,7 +4,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {openDatabase} from '../src/db.mjs';
-import {syncInstallations} from '../src/github.mjs';
+import {syncInstallations,authorizedRepositoryIds} from '../src/github.mjs';
 import {reviewsPage,reviewDetail,reposPage} from '../src/ui.mjs';
 
 test('shared installation sync keeps billing owner and other members repositories',async()=>{
@@ -44,16 +44,21 @@ test('repository transfer repairs installation association and hides old-tenant 
       ]};
       throw new Error('Unexpected GitHub API request');
     };
-    await syncInstallations(db,{id:2},{api,userToken:async()=> 'bob-token'});
+    const bob={id:2,github_id:202,login:'bob'};
+    const repositoryAccess=(db,user)=>authorizedRepositoryIds(db,user,{api,userToken:async()=> 'bob-token'});
+    assert.deepEqual([...await repositoryAccess(db,bob)],[]);
+    assert.doesNotMatch(await reposPage(db,bob,'csrf',{repositoryAccess}),/old-org\/repo/);
+    assert.equal(await reviewDetail(db,bob,'csrf',41,{repositoryAccess}),null);
+    await syncInstallations(db,bob,{api,userToken:async()=> 'bob-token'});
     assert.equal(db.prepare('SELECT installation_id FROM repositories WHERE id=12').get().installation_id,8);
     db.prepare("INSERT INTO reviews(id,installation_id,repository_id,pr_number,pr_title,head_sha,status,summary) VALUES(42,8,12,2,'New PR',?,'completed','New summary')").run('b'.repeat(40));
-    const options={repositoryAccess:async()=>new Set([12])};
-    const pages=[await reposPage(db,{id:2,login:'bob'},'csrf',options),
-      await reviewsPage(db,{id:2,login:'bob'},'csrf',options)];
+    const options={repositoryAccess};
+    const pages=[await reposPage(db,bob,'csrf',options),
+      await reviewsPage(db,bob,'csrf',options)];
     assert.match(pages[0],/new-org\/repo/);
     assert.match(pages[1],/New summary|New PR/);
     for(const html of pages)assert.doesNotMatch(html,/Old private PR|Old secret finding|old-org\/repo/);
-    assert.equal(await reviewDetail(db,{id:2,login:'bob'},'csrf',41,options),null);
-    assert.match(await reviewDetail(db,{id:2,login:'bob'},'csrf',42,options),/New summary/);
+    assert.equal(await reviewDetail(db,bob,'csrf',41,options),null);
+    assert.match(await reviewDetail(db,bob,'csrf',42,options),/New summary/);
   }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });

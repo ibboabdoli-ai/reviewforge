@@ -66,7 +66,7 @@ export async function installationsForUser(db,user,{api=githubApi,userToken=gith
     if(lastPage(data.installations,data,page,'installation'))return {token,installations:result};
   }
 }
-/** Enumerate live per-user repository grants; installation ownership grants none. */
+/** Match live user grants to the same installed repository and installation. */
 export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=githubUserToken}={}){
   // PostgreSQL returns BIGINT identifiers as strings; SQLite returns numbers.
   if(!Number.isSafeInteger(Number(user?.id))||Number(user?.id)<=0||
@@ -74,15 +74,18 @@ export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=g
   const current=await db.prepare('SELECT * FROM users WHERE id=? AND github_id=?').get(user.id,user.github_id);
   if(!current)return new Set();
   const {token,installations}=await installationsForUser(db,current,{api,userToken});
-  const active=await db.prepare("SELECT id FROM installations WHERE status='active'").all();
-  const activeIds=new Set(active.map(row=>Number(row.id)));
+  const linked=await db.prepare("SELECT p.id,p.installation_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.status='active' AND p.enabled=1").all();
+  const installationByRepo=new Map(linked.map(row=>[Number(row.id),Number(row.installation_id)]));
+  const activeIds=new Set(installationByRepo.values());
   const ids=new Set();
   for(const inst of installations){
     if(!activeIds.has(Number(inst.id)))continue;
     for(let page=1;page<=5;page++){
       const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
       if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
-      for(const repo of data.repositories)if(Number.isSafeInteger(repo.id))ids.add(repo.id);
+      for(const repo of data.repositories){
+        if(Number.isSafeInteger(repo.id) && installationByRepo.get(repo.id)===Number(inst.id))ids.add(repo.id);
+      }
       if(lastPage(data.repositories,data,page,'repository'))break;
     }
   }
