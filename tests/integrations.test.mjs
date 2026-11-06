@@ -23,11 +23,14 @@ test('Signed Stripe events activate and cancel entitlements; duplicate deliverie
     config.stripe.webhookSecret='whsec_integrations';
     const event=(id,type,status)=>({id,type,data:{object:{id:'sub_abc',customer:'cus_abc',status,metadata:{reviewforge_user_id:'123'}}}});
     const a=signedEvent(event('evt_new','customer.subscription.created','active'));
-    assert.equal(await processStripeEvent(db,a.raw,a.signature), 'customer.subscription.created');
+    const subscription={id:'sub_abc',customer:'cus_abc',created:100,status:'active',metadata:{reviewforge_user_id:'123'}};
+    const options={retrieveSubscription:async()=>subscription};
+    assert.equal(await processStripeEvent(db,a.raw,a.signature,options), 'customer.subscription.created');
     assert.equal(await activePlan(db,123),'pro');
-    assert.equal(await processStripeEvent(db,a.raw,a.signature),'duplicate');
+    assert.equal(await processStripeEvent(db,a.raw,a.signature,options),'duplicate');
     const b=signedEvent(event('evt_del','customer.subscription.deleted','canceled'));
-    await processStripeEvent(db,b.raw,b.signature);assert.equal(await activePlan(db,123),'free');db.close();
+    subscription.status='canceled';
+    await processStripeEvent(db,b.raw,b.signature,options);assert.equal(await activePlan(db,123),'free');db.close();
   }finally{config.stripe.webhookSecret=before;rmSync(dir,{recursive:true,force:true});}
 });
 test('GitHub App JWT signs with generated RSA private key',()=>{

@@ -103,6 +103,29 @@ export function openDatabase(file) {
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
+  let stripeQueue=Promise.resolve();
+  db.withSubscriptionLock=async(userId,work)=>{
+    const previous=stripeQueue;
+    let release;
+    stripeQueue=new Promise(resolve=>{release=resolve;});
+    await previous;
+    // A separate connection keeps unrelated queries off this transaction.
+    let locked;
+    let started=false;
+    try{
+      locked=new DatabaseSync(file);
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
+      locked.exec('BEGIN IMMEDIATE');
+      started=true;
+      if(!locked.prepare('SELECT id FROM users WHERE id=?').get(userId))
+        throw new Error('Stripe billing owner does not exist');
+      const result=await work(locked);
+      locked.exec('COMMIT');
+      started=false;
+      return result;
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked?.close();release();}
+  };
   return db;
 }
 export async function createSession(db,userId) {
