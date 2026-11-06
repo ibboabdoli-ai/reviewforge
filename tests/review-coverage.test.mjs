@@ -240,9 +240,9 @@ test('a failed batch never publishes a partial or clean review',async()=>{
 test('deleted workflow security gate must not get a clean review',async()=>{
   const input=[
     {filename:'.github/workflows/proffera-final-gate-wakeup.yml',status:'removed',
-      patch:'@@ -1,2 +0,0 @@\\n-if: authorization\\n-run: verify'},
+      patch:'@@ -1,2 +0,0 @@\n-if: authorization\n-run: verify'},
     {filename:'tests/receipt-gate.test.ts',status:'modified',
-      patch:'@@ -1 +1 @@\\n-old check\\n+new check'}
+      patch:'@@ -1 +1 @@\n-old check\n+new check'}
   ];
   for(const planner of [selectFilesForReview,planReviewBatches]){
     const {coverage}=planner(input);
@@ -258,8 +258,8 @@ test('deleted workflow security gate must not get a clean review',async()=>{
 });
 
 test('ordinary deleted documentation stays excluded without blocking full review',()=>{
-  const files=[{filename:'docs/obsolete.md',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
-    {filename:'src/main.ts',status:'modified',patch:'@@ -1 +1 @@\\n-old\\n+new'}];
+  const files=[{filename:'docs/obsolete.md',status:'removed',patch:'@@ -1 +0,0 @@\n-old'},
+    {filename:'src/main.ts',status:'modified',patch:'@@ -1 +1 @@\n-old\n+new'}];
   for(const planner of [selectFilesForReview,planReviewBatches]){
     const {coverage}=planner(files);
     assert.equal(coverage.removedWorkflows,0);
