@@ -22,6 +22,7 @@ export function redactKnownTokens(patch){
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
+const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
 const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
 // GitHub omits text patches for image assets. Report them as excluded, never as reviewed code.
 const UNREVIEWABLE_IMAGE_PATH=/\.(?:jpe?g|png)$/i;
@@ -33,9 +34,12 @@ function priority(path){
 }
 export function selectFilesForReview(changedFiles){
   if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
-  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,complete:true};
+  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,removedWorkflows:0,complete:true};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
+    if(file?.status==='removed' && typeof file.filename==='string' && REMOVED_WORKFLOW.test(file.filename)){
+      coverage.reviewable++;coverage.removedWorkflows++;continue;
+    }
     if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || (GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
@@ -53,14 +57,14 @@ export function selectFilesForReview(changedFiles){
     files.push({filename:f.filename,patch:f.patch});used+=f.patch.length;
   }
   coverage.reviewed=files.length;
-  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0;
+  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0 && coverage.removedWorkflows===0;
   return {files,coverage};
 }
 // Compatibility for callers that only require the bounded payload.
 export function safeFiles(files){return selectFilesForReview(files).files;}
 export function coverageSummary(c){
   if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed, image or sensitive path(s) ignored.`;
-  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. Unchecked changes may contain bugs.`;
+  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. ${c.removedWorkflows||0} removed workflow file(s) not reviewed. Unchecked changes may contain bugs.`;
 }
 /**
  * Plan a PR review as bounded, deterministic batches. This is separate from
@@ -114,9 +118,12 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   if(!Number.isSafeInteger(maxBatchCharacters)||maxBatchCharacters<MAX_FILE_PATCH||maxBatchCharacters>MAX_TOTAL_PATCH)
     throw new RangeError('Invalid model batch character budget');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
-    missingPatch:0,oversized:0,limited:0,limitedSegments:0,complete:true,batches:0,segments:0,reviewedSegments:0};
+    missingPatch:0,oversized:0,limited:0,limitedSegments:0,removedWorkflows:0,complete:true,batches:0,segments:0,reviewedSegments:0};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
+    if(file?.status==='removed' && typeof file.filename==='string' && REMOVED_WORKFLOW.test(file.filename)){
+      coverage.reviewable++;coverage.removedWorkflows++;continue;
+    }
     if(!file||file.status==='removed'||typeof file.filename!=='string'
        ||SKIPPED_PATH.test(file.filename)||(GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
@@ -146,7 +153,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   flush();
   coverage.reviewed=seen.size;
   coverage.batches=batches.length;
-  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited;
+  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited&&!coverage.removedWorkflows;
   return {batches,coverage};
 }
 
