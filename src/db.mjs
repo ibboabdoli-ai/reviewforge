@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomToken, sha256 } from './security.mjs';
+const subscriptionQueues=new Map();
 
 export function openDatabase(file) {
   mkdirSync(dirname(file),{recursive:true});
@@ -93,6 +94,12 @@ export function openDatabase(file) {
       next_attempt_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY,received_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS stripe_checkout_proofs (
+      stripe_subscription_id TEXT PRIMARY KEY,
+      stripe_customer_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      session_id TEXT NOT NULL UNIQUE
+    );
     CREATE TABLE IF NOT EXISTS subscriptions (
       user_id INTEGER PRIMARY KEY REFERENCES users(id),
       stripe_customer_id TEXT UNIQUE,
@@ -103,6 +110,30 @@ export function openDatabase(file) {
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
+  db.withSubscriptionLock=async(userId,work)=>{
+    const previous=subscriptionQueues.get(file)||Promise.resolve();
+    let release;
+    const current=new Promise(resolve=>{release=resolve;});
+    subscriptionQueues.set(file,current);
+    await previous;
+    // A separate connection keeps unrelated queries off this transaction.
+    let locked;
+    let started=false;
+    try{
+      locked=new DatabaseSync(file);
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+      // A read snapshot allows unrelated writes during Stripe retrieval.
+      // If it becomes stale, SQLite refuses the later write and Stripe retries.
+      locked.exec('BEGIN');started=true;
+      if(!locked.prepare('SELECT id FROM users WHERE id=?').get(userId))
+        throw new Error('Stripe billing owner does not exist');
+      const result=await work(locked);
+      locked.exec('COMMIT');
+      started=false;
+      return result;
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked?.close();release();if(subscriptionQueues.get(file)===current)subscriptionQueues.delete(file);}
+  };
   return db;
 }
 export async function createSession(db,userId) {
