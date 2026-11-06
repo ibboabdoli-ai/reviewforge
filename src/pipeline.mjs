@@ -65,6 +65,14 @@ export async function analyzePullRequest({ repository, number, headSha, installa
           : 'AI daily request allowance exhausted; review deferred until next UTC day. No model calls made.'};
     }
   }
+  // Daily quota reservation is awaited storage I/O; a PR may move while
+  // reserving. Reconfirm exact HEAD before dispatching any paid model batches.
+  const afterReservation=await api(pullPath,token);
+  if(afterReservation.head?.sha!==headSha || afterReservation.state!=='open' ||
+     (afterReservation.draft && !allowDraft)) return {
+    status:'superseded',summary:'PR changed during quota reservation; no model calls made.',
+    findings:[],posted:0,coverage
+  };
   // A Vercel invocation has a 120-second budget. Up to four independent model
   // batches must not each consume their 85-second deadline sequentially.
   // allSettled waits for every already-started call before failing closed.
