@@ -4,6 +4,13 @@ import { decrypt, encrypt } from './security.mjs';
 
 const API='https://api.github.com';
 const VERSION='2026-03-10';
+/** Stop only after a complete GitHub page, including an exact 500-item bound. */
+function lastPage(items,data,page,label){
+  if(items.length<100)return true;
+  if(page<5)return false;
+  if(Number.isSafeInteger(data.total_count) && data.total_count===page*100)return true;
+  throw new Error(`GitHub ${label} list exceeded pagination bound`);
+}
 export async function githubApi(path,token,{method='GET',body}={}) {
   const res=await fetch(API+path,{
     method, headers:{'Authorization':`Bearer ${token}`,'Accept':'application/vnd.github+json',
@@ -48,6 +55,7 @@ export async function installationToken(installationId) {
   const data=await githubApi(`/app/installations/${Number(installationId)}/access_tokens`,githubAppJwt(),{method:'POST'});
   return data.token;
 }
+/** Read installations with this user's OAuth token, bounded to five pages. */
 export async function installationsForUser(db,user,{api=githubApi,userToken=githubUserToken}={}) {
   const token=await userToken(db,user);
   const result=[];
@@ -55,11 +63,10 @@ export async function installationsForUser(db,user,{api=githubApi,userToken=gith
     const data=await api(`/user/installations?per_page=100&page=${page}`,token);
     if(!Array.isArray(data.installations))throw new Error('Invalid GitHub installation list');
     result.push(...data.installations);
-    if(data.installations.length<100)return {token,installations:result};
+    if(lastPage(data.installations,data,page,'installation'))return {token,installations:result};
   }
-  throw new Error('GitHub installation list exceeded pagination bound');
 }
-/** Live user-to-server GitHub access, never installation ownership, gates reads. */
+/** Enumerate live per-user repository grants; installation ownership grants none. */
 export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=githubUserToken}={}){
   // PostgreSQL returns BIGINT identifiers as strings; SQLite returns numbers.
   if(!Number.isSafeInteger(Number(user?.id))||Number(user?.id)<=0||
@@ -76,12 +83,12 @@ export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=g
       const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
       if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
       for(const repo of data.repositories)if(Number.isSafeInteger(repo.id))ids.add(repo.id);
-      if(data.repositories.length<100)break;
-      if(page===5)throw new Error('GitHub repository list exceeded pagination bound');
+      if(lastPage(data.repositories,data,page,'repository'))break;
     }
   }
   return ids;
 }
+/** Sync app metadata for this user without removing other members' access. */
 export async function syncInstallations(db,user,{api=githubApi,userToken=githubUserToken}={}) {
   const {token,installations}=await installationsForUser(db,user,{api,userToken});
   let linked=0,repoCount=0;
@@ -98,12 +105,12 @@ export async function syncInstallations(db,user,{api=githubApi,userToken=githubU
       for(const repo of repos) {
         await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled)
           VALUES(?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET
-          name=excluded.name,full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(
+          installation_id=excluded.installation_id,name=excluded.name,full_name=excluded.full_name,
+          html_url=excluded.html_url,private=excluded.private,enabled=1`).run(
           repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
         repoCount++;
       }
-      if(repos.length<100)break;
-      if(page===5)throw new Error('GitHub repository list exceeded pagination bound');
+      if(lastPage(repos,data,page,'repository'))break;
     }
   }
   // Signed installation webhooks manage app-wide removal. User access is

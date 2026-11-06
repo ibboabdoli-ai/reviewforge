@@ -35,15 +35,18 @@ export function home(){
 }
 function header(title,desc,aside=''){return `<div class="page-header"><div><div class="page-eyebrow">OVERVIEW / ${s(title).toUpperCase()}</div><h1>${s(title)}</h1><p>${s(desc)}</p></div><div class="page-actions">${aside}</div></div>`;}
 function statusItems(demo){ const ints=integrations();return [{name:'GitHub App',ready:ints.github},{name:'AI analysis',ready:ints.ai},{name:'Stripe billing',ready:ints.billing}].map(c=>`<div class="config-row"><span><i class="status-dot ${c.ready?'ok':'off'}"></i>${c.name}</span><strong>${c.ready?'Configured':'Needs setup'}</strong></div>`).join('');}
+/** Convert a live GitHub grant set into safe SQL parameters. */
 async function visibleIds(db,user,repositoryAccess){
   return [...await repositoryAccess(db,user)].filter(Number.isSafeInteger);
 }
+/** Empty grant sets produce an always-false SQL condition. */
 const inRepos=(ids,column)=>ids.length?`${column} IN (${ids.map(()=>'?').join(',')})`:'1=0';
+/** Show metrics only for repositories currently accessible to this user. */
 export async function dashboard(db,user,token,{demo=false,notice='',repositoryAccess=authorizedRepositoryIds}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 6`).all(...ids);
+  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 6`).all(...ids);
   const repoCount=demo?3:Number((await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...ids))?.n ?? 0);
-  const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...ids))?.n ?? 0);
+  const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...ids))?.n ?? 0);
   const issues=reviews.reduce((sum,r)=>sum+JSON.parse(r.findings_json||'[]').length,0);
   const clean=reviews.filter(r=>r.status==='completed'&&JSON.parse(r.findings_json||'[]').length===0).length;
   const plan=demo?{plan:'demo',limit:10,used:0}:await allowedReviews(db,user.id);
@@ -72,12 +75,14 @@ function reviewRow(r){
     r.status==='completed'?'✓ Clean':'Queued';
   return `<a class="review-row" href="/reviews/${r.id}"><span class="pr-ico">⌘</span><span class="pr-title"><strong>${s(r.pr_title)}</strong><small>${s(r.full_name||'demo / sample-repository')} <b>·</b> #${s(r.pr_number)} <b>·</b> ${s(r.author)}</small></span><span class="review-issues ${n?'':'none'}">${s(message)}</span>${badge(r.status)}<span class="row-arrow">›</span></a>`;
 }
+/** Show only reviews from current user-visible installation repositories. */
 export async function reviewsPage(db,user,token,{demo=false,repositoryAccess=authorizedRepositoryIds}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 100`).all(...ids);
+  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 100`).all(...ids);
   const body=header('Code reviews','A searchable history of reviewed pull requests.',demo?'<a href="/demo/analyze" class="btn btn-primary">+ New demo review</a>':'<a href="/reviews/manual" class="btn btn-primary">+ Manual shadow review</a>')+`<section class="panel full-panel"><div class="panel-header"><div><h3>Review activity</h3><p>${reviews.length} most recent records</p></div><div class="filter-label">Newest first</div></div><div class="review-list">${reviews.length?reviews.map(reviewRow).join(''):'<div class="empty-state">No reviews to display.</div>'}</div></section>`;
   return base({title:'Code reviews',body,user,active:'/reviews',demo,csrfToken:token});
 }
+/** Offer manual review only for currently authorized, explicitly allowlisted repos. */
 export async function manualReviewPage(db,user,token,query=new URLSearchParams(),{repositoryAccess=authorizedRepositoryIds}={}){
   const ids=await visibleIds(db,user,repositoryAccess);
   const repos=await db.prepare(`SELECT p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY p.full_name`).all(...ids);
@@ -99,9 +104,10 @@ export async function manualReviewPage(db,user,token,query=new URLSearchParams()
     '</div>';
   return base({title:'Manual review',body,user,active:'/reviews',csrfToken:token});
 }
+/** Deny direct review IDs unless the user still has access to its repository. */
 export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess=authorizedRepositoryIds}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1`).get(id,...ids);
+  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1`).get(id,...ids);
   if(!r)return null; const findings=JSON.parse(r.findings_json||'[]');
   const progressInfo=r.total_batches!=null?'<p class="meta-note">Batch progress: '+Number(r.completed_batches)+'/'+Number(r.total_batches)+'. Incomplete progress is not a review verdict.</p>':'';
   const emptyText=r.status==='failed'
@@ -114,6 +120,7 @@ export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess
   <div class="section-title"><h3>Findings <span class="count-badge">${findings.length}</span></h3></div>${findings.length?findings.map(f=>`<article class="finding"><div class="finding-head"><span class="severity severity-${s(f.severity)}">${s(f.severity)}</span><span class="finding-path">${s(f.path)}:${s(f.line)}</span><span class="confidence">${Math.round(Number(f.confidence||0)*100)}% confidence</span></div><h4>${s(f.title)}</h4><p>${s(f.body)}</p></article>`).join(''):('<div class="empty-state small-empty">'+s(emptyText)+'</div>')}</div>`;
   return base({title:'Review details',body,user,active:'/reviews',demo,csrfToken:token});
 }
+/** List only repositories backed by the signed-in user's live GitHub grants. */
 export async function reposPage(db,user,token,{demo=false,notice="",repositoryAccess=authorizedRepositoryIds}={}) {
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
   const repos=demo?[{name:'saas-platform',full_name:'demo/saas-platform',private:1},{name:'payment-service',full_name:'demo/payment-service',private:1},{name:'landing-page',full_name:'demo/landing-page',private:0}]:await db.prepare(`SELECT p.* FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY p.full_name`).all(...ids);

@@ -49,7 +49,7 @@ export async function openPostgres(url){
       const sql=`WITH candidate AS (
         SELECT j.id FROM jobs j
         JOIN reviews r ON r.id=j.review_id
-        JOIN repositories p ON p.id=r.repository_id
+        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
         JOIN installations i ON i.id=r.installation_id
         WHERE j.status='queued' AND j.next_attempt_at<=$1
           AND ($3::bigint IS NULL OR j.review_id=$3)
@@ -62,7 +62,7 @@ export async function openPostgres(url){
       const {rows}=await sharedPool.query(sql,[Date.now(),Date.now()+5*60*1000,reviewId]);
       if(!rows.length)return null;
       const job=await query(`SELECT r.*,p.full_name FROM reviews r
-        JOIN repositories p ON p.id=r.repository_id WHERE r.id=$1`,[rows[0].review_id]);
+        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=$1`,[rows[0].review_id]);
       return {...job.rows[0],job_id:rows[0].job_id,attempts:rows[0].attempts};
     },
     prepare(sql){return {

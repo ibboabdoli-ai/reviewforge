@@ -40,7 +40,7 @@ export async function getWorkerReviewStatus(db,params,policy){
   if(!workerReviewAllowed(repository,policy))
     throw Object.assign(new Error('Repository not approved for worker shadow reviews.'),{status:403});
   await db.reconcileExpiredJobs?.();
-  const row=await db.prepare('SELECT r.id,r.status,r.summary,r.error,r.findings_json,r.posted,r.head_sha,j.status AS job_status,j.next_attempt_at,prog.total_batches,prog.completed_batches FROM reviews r JOIN manual_review_requests m ON m.review_id=r.id JOIN jobs j ON j.review_id=r.id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id WHERE lower(p.full_name)=? AND r.pr_number=? AND lower(r.head_sha)=? AND i.status=\'active\' AND p.enabled=1 AND lower(i.account_login)=?')
+  const row=await db.prepare('SELECT r.id,r.status,r.summary,r.error,r.findings_json,r.posted,r.head_sha,j.status AS job_status,j.next_attempt_at,prog.total_batches,prog.completed_batches FROM reviews r JOIN manual_review_requests m ON m.review_id=r.id JOIN jobs j ON j.review_id=r.id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id WHERE lower(p.full_name)=? AND r.pr_number=? AND lower(r.head_sha)=? AND i.status=\'active\' AND p.enabled=1 AND lower(i.account_login)=?')
     .get(repository.toLowerCase(),pr,head,repository.split('/')[0].toLowerCase());
   if(!row)return null;
   let findings;
