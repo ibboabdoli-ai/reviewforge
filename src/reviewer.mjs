@@ -26,7 +26,7 @@ const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
 // Deleted executable/configuration files have no added-line anchors. Until
 // removals can be reviewed as first-class patches, fail closed rather than
 // silently approving a PR that removed an auth or safety check.
-const REMOVED_SOURCE_PATH=/\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json)$/i;
+// Trust/ownership and container build files often have no extension; SQL\n// migration removals can delete access controls. Count these as unreviewed\n// instead of silently allowing a clean verdict.\nconst REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$)/i;
 function isRemovedSource(file){
   return file?.status==='removed' && typeof file.filename==='string' &&
     REMOVED_SOURCE_PATH.test(file.filename) && !SKIPPED_PATH.test(file.filename) &&
