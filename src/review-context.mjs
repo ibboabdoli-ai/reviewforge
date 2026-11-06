@@ -4,12 +4,17 @@ import { redactKnownTokens } from './reviewer.mjs';
 // Deliberately small, read-only context sampler. No checkout, tool execution,
 // arbitrary URLs, secret files, or user-supplied file paths.
 export const MAX_CONTEXT_CHARS=12000;
-const SOURCE_LIMIT=2, IMPORT_LIMIT=3;
-const SAFE_SOURCE=/^(?:src|app|lib|tests)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
+const SOURCE_LIMIT=2, WORKFLOW_SOURCE_LIMIT=3, IMPORT_LIMIT=3;
+const SAFE_SOURCE=/^(?:src|app|lib|tests|scripts)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs)$/;
+// Workflow YAML is allowed only in this fixed repository-owned directory.
+// Do not permit dots in workflow basenames, hidden files or path traversal.
+const SAFE_WORKFLOW=/^\.github\/workflows\/[a-zA-Z0-9_/-]+\.ya?ml$/;
 const DENIED=/(^|\/)(?:\.|node_modules\/|__secrets__\/)|(?:^|\/)(?:secrets?|credentials|private-key|id_rsa)(?:[./-]|$)/i;
 export function safeContextPath(path){
-  return typeof path==='string' && path.length<180 && SAFE_SOURCE.test(path)
-    && !path.split('/').includes('..') && !DENIED.test(path);
+  if(typeof path!=='string'||path.length>=180||path.split('/').includes('..'))return false;
+  // .github is a fixed, vetted prefix; the remainder still must pass DENIED.
+  if(SAFE_WORKFLOW.test(path))return !DENIED.test(path.slice('.github/'.length));
+  return SAFE_SOURCE.test(path)&&!DENIED.test(path);
 }
 export function importedPaths(sourcePath,sourceText){
   const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)];
@@ -26,21 +31,48 @@ export function importedPaths(sourcePath,sourceText){
 }
 export function sourceExcerpt(source,patch,maxChars=2700){
   if(typeof source!=='string'||!source.trim())return '';
-  const lines=source.split('\n'), wanted=new Set();
-  // Include beginning of each module for imports and major declarations.
-  for(let i=0;i<Math.min(14,lines.length);i++)wanted.add(i);
-  for(const m of String(patch).matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/gm)){
-    const i=Math.max(0,Number(m[1])-1);
-    for(let n=Math.max(0,i-10);n<Math.min(lines.length,i+23);n++)wanted.add(n);
+  const lines=source.split('\n'), changed=[],hunks=[],nearHunks=new Set();
+  let newLine=-1;
+  // Select actual added/modified target lines before surrounding context.
+  // A long header or ten unchanged lines preceding a hunk must never crowd
+  // out the changed review-gate predicate from a bounded excerpt.
+  for(const row of String(patch).split('\n')){
+    const hunk=row.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if(hunk){
+      newLine=Math.max(0,Number(hunk[1])-1);
+      hunks.push(newLine);
+      for(let n=Math.max(0,newLine-10);n<Math.min(lines.length,newLine+23);n++)
+        nearHunks.add(n);
+      continue;
+    }
+    if(newLine<0)continue;
+    // +++ inside a hunk is a valid added source line starting with ++.
+    if(row.startsWith('+')){
+      changed.push(newLine);newLine++;continue;
+    }
+    if(row.startsWith(' ')){newLine++;continue;}
+    // Removed lines do not advance the new-file line number.
   }
-  const sorted=[...wanted].sort((a,b)=>a-b);
-  const result=[];let used=0,previous=-2;
-  for(const i of sorted){
+  const selected=new Set();let reserved=0;
+  const take=i=>{
+    if(i<0||i>=lines.length||selected.has(i))return;
+    const row='L'+(i+1)+': '+lines[i]+'\n';
+    // Reserve the maximum five-character separator, even for adjacent rows.
+    if(reserved+row.length+5>maxChars)return;
+    selected.add(i);reserved+=row.length+5;
+  };
+  for(const i of changed)take(i);
+  for(const i of changed)for(let n=i-2;n<=i+3;n++)take(n);
+  for(const i of hunks)take(i);
+  for(let i=0;i<Math.min(14,lines.length);i++)take(i);
+  for(const i of [...nearHunks].sort((a,b)=>a-b))take(i);
+  let text='',previous=-2;
+  for(const i of [...selected].sort((a,b)=>a-b)){
     const row=(previous!==i-1?'\n...\n':'')+'L'+(i+1)+': '+lines[i]+'\n';
-    if(used+row.length>maxChars)break;
-    result.push(row);used+=row.length;previous=i;
+    if(text.length+row.length>maxChars)continue;
+    text+=row;previous=i;
   }
-  return redactKnownTokens(result.join(''));
+  return redactKnownTokens(text);
 }
 export function projectRuleExcerpts(yaml,paths){
   // Only accept the supported, narrowly scoped subset of CodeRabbit's path
@@ -60,11 +92,14 @@ export function projectRuleExcerpts(yaml,paths){
   const matches=(glob,path)=>{
     // Known GitHub project families only. No wildcard parser capable of
     // interpreting regex or arbitrary paths from a repository.
+    // Workflow guidance was silently skipped: YAML does not match JS/TS types.
+    // Admit only the exact vetted workflow glob and the existing safe paths.
     const types=/\.(?:ts|tsx|js|jsx)$/i.test(path);
-    return types && ((glob.startsWith('src/**')&&path.startsWith('src/'))||
+    const workflow=SAFE_WORKFLOW.test(path)&&!DENIED.test(path.slice('.github/'.length));
+    return (types && ((glob.startsWith('src/**')&&path.startsWith('src/'))||
       (glob.startsWith('tests/**')&&path.startsWith('tests/'))||
-      (glob.startsWith('.github/workflows/**')&&path.startsWith('.github/workflows/'))||
-      (glob.startsWith('**/migrations/**')&&path.includes('/migrations/')));
+      (glob.startsWith('**/migrations/**')&&path.includes('/migrations/'))))||
+      (workflow && glob==='.github/workflows/**');
   };
   const text=sections.filter(s=>paths.some(p=>matches(s.glob,p)))
     .slice(0,3).map(s=>s.body.join(' ').slice(0,1100)).filter(Boolean).join('\n');
@@ -156,7 +191,18 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const changed=files.filter(f=>safeContextPath(f.filename)&&typeof f.patch==='string');
   const runtimeFiles=changed.filter(f=>!isTestPath(f.filename));
   const tests=prioritizeBehaviorTests(changed.filter(f=>isTestPath(f.filename)),runtimeFiles).slice(0,3);
-  const sources=runtimeFiles.slice(0,2);
+  // A review gate can have multiple independent CI paths. The PR962-shaped
+  // fixture proves that keeping just the first workflow hides the wakeup and
+  // automerge validators from SHA-pinned supplemental source context.
+  // Retain the usual two-file budget outside this narrowly scoped pattern.
+  const workflows=runtimeFiles.filter(f=>f.filename.startsWith('.github/workflows/'))
+    .slice(0,WORKFLOW_SOURCE_LIMIT);
+  const adapter=runtimeFiles.find(f=>f.filename.startsWith('scripts/'));
+  // Multiple independent workflow gates must remain visible even when there
+  // is no JS adapter in the PR; retain the two-source limit for ordinary PRs.
+  const sources=(workflows.length>=2 || (workflows.length===1 && adapter))
+    ? [...workflows,...(adapter?[adapter]:[])]
+    : runtimeFiles.slice(0,SOURCE_LIMIT);
   const fetcher=path=>fetchFile({repository,sha,path,api,token});
   const [rule,...bodies]=await Promise.all([
     fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
@@ -168,7 +214,7 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     if(!sourceBodies[i])continue;
     included.add(sources[i].filename);
     candidates.push({path:sources[i].filename,kind:'changed-file-excerpt',
-      text:sourceExcerpt(sourceBodies[i],sources[i].patch,1800)});
+      text:sourceExcerpt(sourceBodies[i],sources[i].patch,sources.length>2?1500:1800)});
   }
   for(let i=0;i<tests.length;i++){
     if(!testBodies[i])continue;

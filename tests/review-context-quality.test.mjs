@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { collectReviewContext, importedPaths, projectRuleExcerpts, safeContextPath, sourceExcerpt } from '../src/review-context.mjs';
+import { addedLines, validateFindings } from '../src/reviewer.mjs';
 import { selectReviewModel } from '../src/model-router.mjs';
 import { selectedReviewSkills } from '../src/review-skills.mjs';
 import { analyzePullRequestStep } from '../src/incremental-review.mjs';
@@ -85,6 +86,23 @@ test('project guidance is only a scoped, untrusted excerpt',()=>{
  assert.doesNotMatch(rules,/auto_reply/);
  assert.equal(projectRuleExcerpts(configFile,['public/other.html']),'');
 });
+test('vetted workflow YAML guidance is selected for security-sensitive diffs',()=>{
+ const rules=[
+  'reviews:',
+  '  path_instructions:',
+  '    - path: ".github/workflows/**"',
+  '      instructions: |',
+  '        Treat workflow changes as security-sensitive.',
+  '        Reject privileged execution of untrusted PR code.'
+ ].join('\n');
+ const selected=projectRuleExcerpts(rules,['.github/workflows/ci.yml']);
+ assert.match(selected,/security-sensitive/);
+ assert.match(selected,/untrusted PR code/);
+ assert.equal(projectRuleExcerpts(rules,['src/lib/company-directory-public-search.ts']),'');
+ assert.equal(projectRuleExcerpts(rules,['.github/workflows/.env']),'');
+ assert.equal(projectRuleExcerpts(rules,['.github/workflows/../ci.yml']),'');
+});
+
 test('source excerpts include changed hunks with source line labels',()=>{
  const excerpt=sourceExcerpt(sourceB,files[1].patch);
  assert.match(excerpt,/L521:|L522:/);
@@ -141,4 +159,126 @@ test('opted-in incremental flow passes context to model without GitHub posting',
   assert.ok(modelInputs.every(o=>o.model===config.openai.modelDeep));
   assert.ok(modelInputs.every(o=>o.reviewContext.sourceFiles.includes('src/lib/company-directory-official-facts-errors.ts')));
  }finally{config.aiAutoModelRepositories=previousModels;config.aiContextRepositories=previousContext;}
+});
+
+test('final-gate context pins a workflow and its live adapter, not just test snippets',async()=>{
+  // Synthetic version of the PR962 source-selection problem: two adjacent
+  // workflow patches would previously crowd the live adapter out entirely.
+  const targetSha='b'.repeat(40), files=[
+    {filename:'.github/workflows/ci.yml',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+const receiptCount = parseReceipt(body);'},
+    {filename:'.github/workflows/proffera-automerge.yml',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+const canMerge = receiptCount === 1;'},
+    {filename:'.github/workflows/proffera-final-gate-wakeup.yml',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+const wakeupReceipt = parseReceipt(body);'},
+    {filename:'scripts/supervisor-final-gate-live.mjs',status:'modified',
+      patch:'@@ -1,1 +1,2 @@\n original\n+function cleanCodexComment(body) { return firstReceipt(body); }'},
+    {filename:'tests/codex-review-receipt-gate.test.ts',status:'added',
+      patch:'@@ -0,0 +1,1 @@\n+expect(checkReceipt("Reviewed commit: abc1234")).toBe(true);'}
+  ];
+  const sources={
+    '.github/workflows/ci.yml':'original\nconst receiptCount = parseReceipt(body);\nif (receiptCount !== 1) throw Error("reject");',
+    '.github/workflows/proffera-automerge.yml':'original\nconst canMerge = receiptCount === 1;',
+    '.github/workflows/proffera-final-gate-wakeup.yml':'original\nconst wakeupReceipt = parseReceipt(body);',
+    'scripts/supervisor-final-gate-live.mjs':'original\nfunction cleanCodexComment(body) { return body.match(/Reviewed commit:/g)?.[0]; }',
+    'tests/codex-review-receipt-gate.test.ts':'expect(checkReceipt("Reviewed commit: abc1234")).toBe(true);'
+  };
+  const requests=[];
+  const api=async(path,token)=>{
+    requests.push(path);
+    assert.equal(token,'fixture-token');
+    const match=path.match(/^\/repos\/sample\/review-demo\/contents\/(.+)\?ref=([a-f0-9]{40})$/);
+    assert.ok(match);
+    assert.equal(match[2],targetSha);
+    const filename=decodeURIComponent(match[1]);
+    if(!Object.hasOwn(sources,filename))throw new Error('GitHub 404: Not Found');
+    const content=sources[filename];
+    return {type:'file',encoding:'base64',size:Buffer.byteLength(content),
+      content:Buffer.from(content).toString('base64')};
+  };
+  const context=await collectReviewContext({repository:repo,sha:targetSha,files,token:'fixture-token',api});
+  assert.deepEqual(context.sourceFiles.filter(f=>f.startsWith('.github/')||f.startsWith('scripts/')),
+    ['.github/workflows/ci.yml','.github/workflows/proffera-automerge.yml',
+     '.github/workflows/proffera-final-gate-wakeup.yml','scripts/supervisor-final-gate-live.mjs']);
+  assert.match(context.snippets.map(s=>s.text).join('\n'),/receiptCount/);
+  assert.match(context.snippets.map(s=>s.text).join('\n'),/cleanCodexComment/);
+  assert.match(context.snippets.map(s=>s.text).join('\n'),/wakeupReceipt/);
+  assert.ok(context.totalChars<=12000);
+  assert.ok(requests.every(req=>req.includes('?ref='+targetSha)));
+  assert.ok(requests.some(req=>req.includes('proffera-automerge.yml')));
+  assert.ok(requests.some(req=>req.includes('proffera-final-gate-wakeup.yml')));
+});
+test('workflow and adapter context paths remain tightly constrained',()=>{
+  for(const path of ['.github/workflows/ci.yml','.github/workflows/proffera-final-gate-wakeup.yaml',
+    'scripts/supervisor-final-gate-live.mjs'])assert.equal(safeContextPath(path),true,path);
+  for(const path of ['.github/workflows/../secrets.yml','.github/workflows/.env',
+    '.github/other.yml','.github/workflows/secrets.yml','.github/workflows/ci.yml/other',
+    'scripts/.env','scripts/credentials.mjs','scripts/../.env','scripts/id_rsa',
+    'scripts/vendor/private-key.ts'])assert.equal(safeContextPath(path),false,path);
+});
+
+test('PR962-shaped long workflow adapter excerpt prioritizes changed SHA predicates',()=>{
+  // Synthetic 320-line adapter: before the fix, a long unchanged region before
+  // the hunk consumed the entire 1,500-character gate-context budget.
+  const lines=Array.from({length:332},(_,i)=>i<14
+    ? '// safe header '+i
+    : 'const surrounding_'+i+" = '"+'x'.repeat(115)+"';");
+  const first='const receiptMatches = parseTrustedReviewedCommits(source.body);';
+  const second='if (receiptMatches.length !== 1) throw new Error("ambiguous receipt");';
+  lines[317]=first;
+  lines[318]=second;
+  const patch='@@ -315,5 +315,5 @@\n context1\n context2\n context3\n+'+first+'\n+'+second;
+  const excerpt=sourceExcerpt(lines.join('\n'),patch,1500);
+  assert.match(excerpt,/L318: const receiptMatches = parseTrustedReviewedCommits/);
+  assert.match(excerpt,/L319: if \(receiptMatches.length !== 1\)/);
+  assert.ok(excerpt.length<=1500);
+});
+
+test('review patches preserve source lines starting with ++ and later findings',()=>{
+  // A changed source line "++count" is encoded as "+++count" in unified diff.
+  // Earlier parsers treated it as a file header, shifting all following anchors.
+  const patch=[
+    '--- a/src/check.ts',
+    '+++ b/src/check.ts',
+    '@@ -1,1 +1,3 @@',
+    ' const count = 0;',
+    '+++count;',
+    '+dangerousThing();'
+  ].join('\n');
+  assert.deepEqual([...addedLines(patch)],[2,3]);
+  const finding={path:'src/check.ts',line:3,severity:'medium',
+    category:'correctness',title:'Detect changed behavior',
+    body:'The changed behavior introduces a reproducible correctness issue.',
+    confidence:0.93};
+  assert.equal(validateFindings([finding],[{filename:'src/check.ts',patch}]).length,1);
+
+  // With many ++ statements, an incorrectly shifted hunk index misses the
+  // final changed predicate even when there is ample excerpt budget.
+  const lines=[
+    ...Array.from({length:25},(_,i)=>'// HEAD '+i),
+    ...Array.from({length:25},(_,i)=>'++count'+i+';'),
+    'dangerousThing();'
+  ];
+  const longPatch='@@ -25,1 +25,27 @@\n '+lines[24]+'\n'
+    +lines.slice(25).map(row=>'+'+row).join('\n');
+  const excerpt=sourceExcerpt(lines.join('\n'),longPatch,1500);
+  assert.match(excerpt,/L51: dangerousThing\(\);/);
+  assert.ok(excerpt.length<=1500);
+});
+
+test('split file segments preserve all valid changed-line finding anchors',()=>{
+  // Synthetic two-segment output of the bounded unified-diff splitter.
+  // Each patch is independently anchored to the same NEW-file path.
+  const path='src/review-gate.ts';
+  const segments=[
+    {filename:path,patch:'@@ -1,2 +1,3 @@\n const before=true;\n+rejectConflictingReceipt();\n const after=true;'},
+    {filename:path,patch:'@@ -800,2 +801,3 @@\n const before=true;\n+rejectEditedReceipt();\n const after=true;'}
+  ];
+  const findings=[2,802].map(line=>({path,line,severity:'medium',
+    category:'correctness',title:'Reject unsafe review evidence',
+    body:'A synthetic test finding anchored on a changed line in this segment.',
+    confidence:0.95}));
+  // Before the fix, a Map keyed by filename replaced the first segment's
+  // changed-line set with the second segment's set (1/2 accepted).
+  assert.deepEqual(validateFindings(findings,segments).map(f=>f.line),[2,802]);
 });

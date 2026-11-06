@@ -46,6 +46,23 @@ export async function analyzePullRequestStep({
   // Keep individual LLM calls modest enough for Vercel's 120s maximum.
   // The legacy all-at-once pipeline retains its previous batch size.
   const {batches,coverage}=planReviewBatches(files,{maxBatchCharacters:24000});
+  // Fail closed on incomplete diffs before optional SHA-pinned file reads.
+  // Avoid unnecessary GitHub API calls; never reserve or spend paid AI work.
+  if(!coverage.complete || !batches.length) {
+    // Changed-file data is not SHA-pinned by GitHub's PR/files endpoint.
+    // Even an unpaid incomplete verdict must not be assigned to an old HEAD.
+    const current=await api(pullPath,token);
+    if(current.head?.sha!==headSha || current.state!=='open' ||
+       (current.draft && !allowDraft)) return {
+      status:'superseded',posted:0,findings:[],
+      summary:'PR HEAD or state changed during incomplete-diff preflight; no AI calls made.'
+    };
+    return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:coverageSummary(coverage)+' Review incomplete; no AI calls made.'
+    };
+  }
+
   const useContext=repositoryAllowed(repository,config.aiContextRepositories);
   // For staged reviews, compute every input before the first paid attempt.
   const reviewContext=useContext
@@ -53,17 +70,20 @@ export async function analyzePullRequestStep({
         repository,sha:headSha,files,token,api
       })
     : null;
+  // The PR may advance while its changed-file list and optional SHA-pinned
+  // context are being fetched. Never reserve quota or call a paid model for
+  // a HEAD already superseded before the next batch starts.
+  const beforePaid=await api(pullPath,token);
+  if(beforePaid.head?.sha!==headSha || beforePaid.state!=='open' ||
+     (beforePaid.draft && !allowDraft)) return {
+    status:'superseded',posted:0,findings:[],coverage,
+    summary:'PR HEAD or state changed before paid review; no AI calls made.'
+  };
   // Model selection must consider the entire PR, not only the current batch.
   const modelChoice=repositoryAllowed(repository,config.aiAutoModelRepositories)
     ?selectReviewModel(batches.flat(),{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep,
       enhancedRisk:useContext})
     :null;
-  // Never pay for a scan that is known to omit required diff hunks.
-  if(!coverage.complete || !batches.length) return {
-    status:'partial',posted:0,findings:[],coverage,
-    summary:coverageSummary(coverage)+' Review incomplete; no AI calls made.'
-  };
-
   const planHash=createHash('sha256').update(JSON.stringify({
     headSha,postMode,allowDraft,batches,coverage,reviewContext,
     modelPolicy:{
@@ -101,6 +121,14 @@ export async function analyzePullRequestStep({
             : 'AI daily allowance exhausted; no calls made. Review deferred until the next UTC day.'};
       }
     }
+    // Quota reservation awaits storage; the pull request can move while
+    // awaiting it. Avoid creating a checkpoint or paying for a stale SHA.
+    const afterReservation=await api(pullPath,token);
+    if(afterReservation.head?.sha!==headSha || afterReservation.state!=='open' ||
+       (afterReservation.draft && !allowDraft)) return {
+      status:'superseded',posted:0,findings:[],coverage,
+      summary:'PR changed during quota reservation; no model calls made.'
+    };
     const inserted=await deps.initProgress({
       reviewId,planHash,totalBatches:batches.length
     });
@@ -111,6 +139,14 @@ export async function analyzePullRequestStep({
   }
 
   if(next<batches.length){
+    // Checkpoint reads/writes also await storage and can outlast a PR HEAD.
+    // A final no-cost state check is needed immediately before each model batch.
+    const beforeModel=await api(pullPath,token);
+    if(beforeModel.head?.sha!==headSha || beforeModel.state!=='open' ||
+       (beforeModel.draft && !allowDraft)) return {
+      status:'superseded',posted:0,findings:[],coverage,
+      summary:'PR changed during checkpoint operations; no model calls made.'
+    };
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,

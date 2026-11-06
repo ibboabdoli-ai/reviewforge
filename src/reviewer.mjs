@@ -3,11 +3,13 @@ import { reviewSkillInstructions } from './review-skills.mjs';
 import { BEHAVIOR_TEST_REVIEW_METHOD } from './review-method.mjs';
 
 export function addedLines(patch='') {
-  const lines=new Set(); let nextLine=0;
+  const lines=new Set(); let nextLine=0,seenHunk=false;
   for(const str of patch.split('\n')) {
     const match=str.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if(match){nextLine=Number(match[1]);continue;}
-    if(str.startsWith('+++')||str.startsWith('---'))continue;
+    if(match){nextLine=Number(match[1]);seenHunk=true;continue;}
+    // A source line beginning with ++ becomes +++ in a hunk. Only skip
+    // file headers before the first hunk, never valid added source lines.
+    if(!seenHunk)continue;
     if(str.startsWith('+')) {lines.add(nextLine);nextLine++;}
     else if(str.startsWith(' '))nextLine++;
   }
@@ -20,7 +22,22 @@ export function redactKnownTokens(patch){
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
+const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
+// Deleted executable/configuration files have no added-line anchors. Until
+// removals can be reviewed as first-class patches, fail closed rather than
+// silently approving a PR that removed an auth or safety check.
+// Trust/ownership and container build files often have no extension; SQL
+// migration removals can delete access controls. Count these as unreviewed
+// instead of silently allowing a clean verdict.
+const REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$)/i;
+function isRemovedSource(file){
+  return file?.status==='removed' && typeof file.filename==='string' &&
+    REMOVED_SOURCE_PATH.test(file.filename) && !SKIPPED_PATH.test(file.filename) &&
+    !GENERATED_PATH.test(file.filename);
+}
 const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
+// GitHub omits text patches for image assets. Report them as excluded, never as reviewed code.
+const UNREVIEWABLE_IMAGE_PATH=/\.(?:jpe?g|png)$/i;
 const MAX_FILES=35, MAX_FILE_PATCH=6500, MAX_TOTAL_PATCH=65000;
 function priority(path){
   if(/(?:^|\/)(?:auth|security|billing|payments?|api|webhooks?|middleware)(?:\/|\.|-)|(?:stripe|permissions|session|checkout)/i.test(path))return 0;
@@ -29,10 +46,21 @@ function priority(path){
 }
 export function selectFilesForReview(changedFiles){
   if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
-  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,complete:true};
+  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,complete:true};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
-    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || GENERATED_PATH.test(file.filename)){
+    // Never send sensitive patches to the model. Their presence also prevents
+    // claiming complete coverage or publishing an unsound clean verdict.
+    if(typeof file?.filename==='string' && SKIPPED_PATH.test(file.filename)){
+      coverage.reviewable++;coverage.sensitiveUnreviewed++;continue;
+    }
+    if(file?.status==='removed' && typeof file.filename==='string' && REMOVED_WORKFLOW.test(file.filename)){
+      coverage.reviewable++;coverage.removedWorkflows++;continue;
+    }
+    if(isRemovedSource(file)){
+      coverage.reviewable++;coverage.removedCode++;continue;
+    }
+    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || (GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
     coverage.reviewable++;
@@ -49,14 +77,14 @@ export function selectFilesForReview(changedFiles){
     files.push({filename:f.filename,patch:f.patch});used+=f.patch.length;
   }
   coverage.reviewed=files.length;
-  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0;
+  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0 && coverage.removedWorkflows===0 && coverage.removedCode===0 && coverage.sensitiveUnreviewed===0;
   return {files,coverage};
 }
 // Compatibility for callers that only require the bounded payload.
 export function safeFiles(files){return selectFilesForReview(files).files;}
 export function coverageSummary(c){
-  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed or sensitive path(s) ignored.`;
-  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity omissions. Unchecked changes may contain bugs.`;
+  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed, image or sensitive path(s) ignored.`;
+  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. ${c.removedWorkflows||0} removed workflow file(s) not reviewed. ${c.removedCode||0} removed source/config file(s) not reviewed. ${c.sensitiveUnreviewed||0} sensitive path(s) withheld from AI review. Unchecked changes may contain bugs.`;
 }
 /**
  * Plan a PR review as bounded, deterministic batches. This is separate from
@@ -110,11 +138,22 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   if(!Number.isSafeInteger(maxBatchCharacters)||maxBatchCharacters<MAX_FILE_PATCH||maxBatchCharacters>MAX_TOTAL_PATCH)
     throw new RangeError('Invalid model batch character budget');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
-    missingPatch:0,oversized:0,limited:0,complete:true,batches:0,segments:0,reviewedSegments:0};
+    missingPatch:0,oversized:0,limited:0,limitedSegments:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,complete:true,batches:0,segments:0,reviewedSegments:0};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
+    // Never send sensitive patches to the model. Their presence also prevents
+    // claiming complete coverage or publishing an unsound clean verdict.
+    if(typeof file?.filename==='string' && SKIPPED_PATH.test(file.filename)){
+      coverage.reviewable++;coverage.sensitiveUnreviewed++;continue;
+    }
+    if(file?.status==='removed' && typeof file.filename==='string' && REMOVED_WORKFLOW.test(file.filename)){
+      coverage.reviewable++;coverage.removedWorkflows++;continue;
+    }
+    if(isRemovedSource(file)){
+      coverage.reviewable++;coverage.removedCode++;continue;
+    }
     if(!file||file.status==='removed'||typeof file.filename!=='string'
-       ||SKIPPED_PATH.test(file.filename)||GENERATED_PATH.test(file.filename)){
+       ||SKIPPED_PATH.test(file.filename)||(GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
     coverage.reviewable++;
@@ -132,33 +171,56 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
     let allIncluded=true;
     for(const patch of file.chunks){
       if(batch.length&&(batch.length>=MAX_FILES||size+patch.length>maxBatchCharacters))flush();
-      if(batches.length>=maxBatches){coverage.limited++;allIncluded=false;continue;}
+      if(batches.length>=maxBatches){coverage.limitedSegments++;allIncluded=false;continue;}
       batch.push({filename:file.filename,patch});size+=patch.length;
       coverage.reviewedSegments++;
     }
     if(allIncluded)seen.add(file.filename);
+    else coverage.limited++;
   }
   flush();
   coverage.reviewed=seen.size;
   coverage.batches=batches.length;
-  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited;
+  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited&&!coverage.removedWorkflows&&!coverage.removedCode&&!coverage.sensitiveUnreviewed;
   return {batches,coverage};
 }
 
 const severity=['critical','high','medium','low'];
 export function validateFindings(raw,files) {
-  const byPath=new Map(files.map(f=>[f.filename,addedLines(f.patch)]));
-  const seen=new Set();const output=[];
-  for(const f of (Array.isArray(raw)?raw:[]).slice(0,12)) {
+  // A bounded review batch can contain multiple patch segments of the same
+  // file. Union their changed-line anchors instead of discarding all but the
+  // final segment; otherwise valid earlier-segment findings are filtered out.
+  const byPath=new Map();
+  for(const f of files){
+    const changed=byPath.get(f.filename)||new Set();
+    for(const line of addedLines(f.patch))changed.add(line);
+    byPath.set(f.filename,changed);
+  }
+  const seen=new Map();const output=[];
+  // Check a bounded candidate window before the existing eight-finding cap.
+  // Invalid/duplicate early suggestions must not starve later valid anchors.
+  for(const f of (Array.isArray(raw)?raw:[]).slice(0,64)) {
     if(!f||!byPath.has(f.path)||!byPath.get(f.path).has(f.line)||!severity.includes(f.severity))continue;
     if(!Number.isFinite(f.confidence)||f.confidence<0.75||f.confidence>1)continue;
     if(typeof f.title!=='string'||typeof f.body!=='string'||f.body.length<8)continue;
     const key=f.path+':'+f.line;
-    if(seen.has(key))continue;seen.add(key);
-    output.push({path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
-      title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence});
+    const normalized={path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
+      title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence};
+    const priorIndex=seen.get(key);
+    if(priorIndex!==undefined){
+      // Keep the most serious validated finding at a shared changed-line anchor.
+      // Identical severity retains the earliest candidate as before.
+      if(severity.indexOf(normalized.severity)<severity.indexOf(output[priorIndex].severity))
+        output[priorIndex]=normalized;
+      continue;
+    }
+    seen.set(key,output.length);
+    output.push(normalized);
   }
-  return output.slice(0,8);
+  // Keep the existing eight-finding limit, but never let numerous low-risk
+  // suggestions push a valid later critical/high finding out of the verdict.
+  // JavaScript's stable sort preserves model order within each severity.
+  return output.sort((a,b)=>severity.indexOf(a.severity)-severity.indexOf(b.severity)).slice(0,8);
 }
 export function localDemoReview(diff) {
   const text=String(diff).slice(0,16000);const findings=[];
