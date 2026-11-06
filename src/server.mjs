@@ -371,8 +371,14 @@ export async function handler(req,res){
     if(path==='/webhooks/stripe'&&req.method==='POST'){
       if(!config.stripe.webhookSecret){send(res,503,'Stripe webhook not configured','text/plain');return;}
       const raw=await readBody(req);try{await processStripeEvent(db,raw,req.headers['stripe-signature']);send(res,200,'ok','text/plain');}
-      catch(err){send(res,err.message==='Invalid Stripe signature'||err instanceof SyntaxError?400:503,
-        'Stripe event could not be processed','text/plain');}return;
+      catch(err){
+        const reason=['Invalid Stripe signature','Invalid Stripe event JSON','Stripe event has no ID',
+          'Stripe subscription identity cannot be verified','Stripe customer does not match verified Checkout owner',
+          'Stripe subscription verification failed','Stripe subscription order cannot be verified']
+          .includes(err.message)?err.message:'Stripe webhook processing failed';
+        console.error('[stripe-webhook]',reason);
+        send(res,err.status===400?400:503,'Stripe event could not be processed','text/plain');
+      }return;
     }
     if(path==='/'&&req.method==='GET'){c.user?redirect(res,'/dashboard'):send(res,200,ui.home());return;}
     if(path==='/demo'&&req.method==='GET'){
