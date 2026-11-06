@@ -12,7 +12,7 @@ test('SQLite ignore inserts become conflict-safe Postgres inserts',()=>{
 });
 test('monthly limits and cleanup use native Postgres time expressions',()=>{
   assert.equal(sqlForPostgres("SELECT * FROM reviews WHERE created_at>=datetime('now','start of month')"),
-    "SELECT * FROM reviews WHERE created_at>=date_trunc('month',now())");
+    "SELECT * FROM reviews WHERE created_at>=(date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')");
   assert.equal(sqlForPostgres("DELETE FROM deliveries WHERE received_at<datetime('now','-30 days')"),
     "DELETE FROM deliveries WHERE received_at<now() - interval '30 days'");
 });
