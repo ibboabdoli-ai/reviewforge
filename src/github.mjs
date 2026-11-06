@@ -131,7 +131,20 @@ export async function postReview({repoFullName,prNumber,headSha,token,summary,fi
       stale.nonRetryable=true;
       throw stale;
     }
-    await githubApi(`/repos/${owner}/${repo}/issues/${prNumber}/comments`,token,{method:'POST',body:{body:body.body+`\n\nInline annotations could not be attached. Please check the ReviewForge dashboard.`}});
+    // A 422 can reject valid inline anchors. Never silently omit the actual
+    // findings from the non-inline fallback; otherwise the PR displays only
+    // a count and the reviewer cannot act on the detected defects.
+    const fallbackFindings=findings.slice(0,8).map(f=>{
+      const path=String(f.path||'').replace(/[\x60\\r\\n]/g,'_').slice(0,220);
+      const line=Number.isSafeInteger(f.line)?f.line:'?';
+      const level=String(f.severity||'').replace(/[^a-z]/gi,'').slice(0,12).toUpperCase();
+      const title=String(f.title||'').replace(/[\\r\\n]/g,' ').slice(0,110);
+      const detail=String(f.body||'').slice(0,900).replace(/\\r\\n?/g,'\\n').replace(/\\n/g,'\\n> ');
+      return `- **${level}** \\`${path}:${line}\\` — ${title}\\n> ${detail}`;
+    }).join('\\n');
+    const fallbackBody=body.body+`\\n\\nInline annotations could not be attached. Please check the ReviewForge dashboard.`+
+      (fallbackFindings?`\\n\\nUnattached findings for reviewed commit \\`${headSha}\\`:\\n${fallbackFindings}`:'');
+    await githubApi(`/repos/${owner}/${repo}/issues/${prNumber}/comments`,token,{method:'POST',body:{body:fallbackBody}});
     return 'summary';
   }
 }
