@@ -66,6 +66,14 @@ test('worker submits exact-head request once and status exposes only manual revi
   assert.equal(done.findings.length,1);assert.equal(done.findings[0].line,2);
  }finally{f.dispose();}
 });
+test('worker request cannot bypass an exhausted owner monthly quota',async()=>{
+ const f=fixture();try{
+  for(let n=1;n<=10;n++)f.db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,head_sha) VALUES(42,100,?,'Previous',?)").run(n,String(n).padStart(40,'b'));
+  await assert.rejects(requestWorkerReview(f.db,f.body,f.deps),/Monthly review limit/);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,0);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM reviews').get().n,10);
+ }finally{f.dispose();}
+});
 test('wrong head is refused before the database write',async()=>{
  const f=fixture();
  try{
