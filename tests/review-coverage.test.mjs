@@ -234,3 +234,23 @@ test('a failed batch never publishes a partial or clean review',async()=>{
  );
  assert.equal(m.calls().posts,0);
 });
+
+test('split large unified patch with no-newline marker without dropping reviewable lines',()=>{
+ // Git's final "\ No newline at end of file" metadata is not a changed source line.
+ // The pre-fix splitter treated it as an invalid hunk line and marked the
+ // entire >6500-character patch oversized, suppressing a complete review.
+ const lines=Array.from({length:800},(_,i)=>'+const row'+i+'='+i+';').join('\n');
+ const patch='@@ -0,0 +1,800 @@\n'+lines+'\n\\ No newline at end of file';
+ const {batches,coverage}=planReviewBatches([{
+   filename:'src/api/gate.ts',status:'modified',patch
+ }]);
+ assert.equal(coverage.oversized,0,'valid Git EOF metadata must not invalidate the patch');
+ assert.equal(coverage.complete,true,'all 800 changed lines fit bounded batches');
+ const parts=batches.flat().filter(x=>x.filename==='src/api/gate.ts');
+ assert.ok(parts.length>1);
+ assert.ok(parts.every(x=>x.patch.length<=6500));
+ assert.ok(parts.some(x=>x.patch.includes('\\ No newline at end of file')));
+ const changed=new Set(parts.flatMap(x=>[...addedLines(x.patch)]));
+ assert.equal(changed.size,800);
+ assert.ok(changed.has(1)&&changed.has(800));
+});
