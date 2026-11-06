@@ -25,7 +25,7 @@ function fixture(){
  db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(100,42,'Proffera',?,'https://github.com/ibboabdoli-ai/Proffera',0,1)").run(repo);
  let called=0;
  const input={userId:1,repoFullName:repo,prNumber:'943',policy,
-  repositoryAccess:async (_db,user)=>new Set(user.id===1?[100]:[]),
+  repositoryAccess:async (_db,user)=>new Map(user.id===1?[[100,42]]:[]),
   installationToken:async id=>{assert.equal(id,42);return 'test-installation-token';},
   fetchPull:async(path,token)=>{called++;assert.equal(path,'/repos/'+repo+'/pulls/943');assert.equal(token,'test-installation-token');return {
    state:'open',draft:true,base:{ref:'main'},head:{sha,repo:{full_name:repo}},title:'Maria preview',user:{login:'ibbo'}

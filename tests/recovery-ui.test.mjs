@@ -17,7 +17,7 @@ test('dashboard list distinguishes failed reviews from pending and shows increme
   db.prepare("INSERT INTO reviews(id,installation_id,repository_id,pr_number,pr_title,head_sha,status,summary) VALUES(1,42,123,943,'Maria',?,'failed','The worker timed out')").run(sha);
   db.prepare("INSERT INTO reviews(id,installation_id,repository_id,pr_number,pr_title,head_sha,status,summary) VALUES(2,42,123,953,'Directory',?,'queued','Batch 1/2 saved')").run('b'.repeat(40));
   db.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches) VALUES(2,?,2,1)").run('c'.repeat(64));
-  const options={repositoryAccess:async()=>new Set([123])};
+  const options={repositoryAccess:async()=>new Map([[123,42]])};
   const html=await reviewsPage(db,{id:9,login:'owner'},'test-csrf',options);
   assert.match(html,/Review failed/);
   assert.match(html,/Batch 1\/2/);

@@ -1,5 +1,5 @@
 import { repositoryAllowed,isUnlimitedShadowRepository } from './review-policy.mjs';
-import { authorizedRepositoryIds } from './github.mjs';
+import { authorizedRepositoryGrants } from './github.mjs';
 
 /**
  * Manual requests are never GitHub approvals. A durable DB marker identifies
@@ -17,15 +17,16 @@ export function validPrNumber(value) {
   return Number.isSafeInteger(number)?number:null;
 }
 /** Enqueue only after the requesting user's current GitHub access is verified. */
-export async function enqueueManualReview(db,{userId,repoFullName,prNumber,expectedHeadSha=null,policy,fetchPull,installationToken,repositoryAccess=authorizedRepositoryIds}){
+export async function enqueueManualReview(db,{userId,repoFullName,prNumber,expectedHeadSha=null,policy,fetchPull,installationToken,repositoryAccess=authorizedRepositoryGrants}){
   if(!manualReviewAllowed(repoFullName,policy))throw Object.assign(new Error('Manual review is not enabled for this repository.'),{status:403});
   const number=validPrNumber(prNumber);
   if(!number)throw Object.assign(new Error('Invalid PR number.'),{status:400});
   // Installation ownership is for billing, not individual GitHub access.
   const user=await db.prepare('SELECT * FROM users WHERE id=?').get(userId);
-  const repo=await db.prepare("SELECT p.id,p.installation_id,p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.full_name=? AND i.status='active' AND p.enabled=1").get(repoFullName);
-  if(!repo)throw Object.assign(new Error('Repository not accessible for manual review.'),{status:403});
-  if(!user || !(await repositoryAccess(db,user)).has(Number(repo.id)))
+  const repos=await db.prepare("SELECT p.id,p.installation_id,p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.full_name=? AND i.status='active' AND p.enabled=1").all(repoFullName);
+  const grants=user?await repositoryAccess(db,user):new Map();
+  const repo=grants instanceof Map?repos.find(row=>grants.get(Number(row.id))===Number(row.installation_id)):null;
+  if(!repo)
     throw Object.assign(new Error('Repository not accessible for manual review.'),{status:403});
   const token=await installationToken(repo.installation_id);
   const pull=await fetchPull('/repos/'+repo.full_name+'/pulls/'+number,token);

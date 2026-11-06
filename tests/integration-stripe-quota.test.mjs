@@ -11,7 +11,8 @@ import {processStripeEvent} from '../src/stripe.mjs';
 test('combined SQLite Stripe and monthly reservations remain responsive',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'rf-combined-'));
   const db=openDatabase(join(dir,'db.sqlite'));
-  const old=config.stripe.webhookSecret;config.stripe.webhookSecret='whsec_combined';
+  const old=[config.stripe.webhookSecret,config.stripe.pricePro];
+  config.stripe.webhookSecret='whsec_combined';config.stripe.pricePro='price_pro_test';
   try{
     db.prepare("INSERT INTO users(id,login,name) VALUES(1,'owner','Owner')").run();
     db.prepare("INSERT INTO installations(id,owner_user_id,account_login) VALUES(10,1,'example')").run();
@@ -22,7 +23,7 @@ test('combined SQLite Stripe and monthly reservations remain responsive',async()
     const entered=new Promise(resolve=>{started=resolve;});
     const hold=new Promise(resolve=>{release=resolve;});
     const stripe=processStripeEvent(db,raw,signature,{retrieveSubscription:async()=>{
-      started();await hold;return {id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'}};
+      started();await hold;return {id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'},items:{data:[{price:{id:'price_pro_test'}}]}};
     }});
     await entered;
     let reserved;
@@ -31,8 +32,8 @@ test('combined SQLite Stripe and monthly reservations remain responsive',async()
     await assert.rejects(stripe,/locked|snapshot/i);
     assert.equal(reserved.created,true);
     assert.equal(db.prepare("SELECT id FROM stripe_events WHERE id='evt_combined'").get(),undefined);
-    await processStripeEvent(db,raw,signature,{retrieveSubscription:async()=>({id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'}})});
+    await processStripeEvent(db,raw,signature,{retrieveSubscription:async()=>({id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'},items:{data:[{price:{id:'price_pro_test'}}]}})});
     assert.equal(await activePlan(db,1),'pro');
     assert.equal(db.prepare('SELECT count(*) n FROM jobs').get().n,1);
-  }finally{config.stripe.webhookSecret=old;db.close();rmSync(dir,{recursive:true,force:true});}
+  }finally{[config.stripe.webhookSecret,config.stripe.pricePro]=old;db.close();rmSync(dir,{recursive:true,force:true});}
 });

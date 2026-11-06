@@ -6,14 +6,14 @@ import {tmpdir} from 'node:os';
 import {openDatabase} from '../src/db.mjs';
 import {dashboard,reviewsPage,reviewDetail,reposPage,manualReviewPage} from '../src/ui.mjs';
 import {enqueueManualReview} from '../src/manual-review.mjs';
-import {authorizedRepositoryIds,syncInstallations} from '../src/github.mjs';
+import {authorizedRepositoryIds,authorizedRepositoryGrants,syncInstallations} from '../src/github.mjs';
 import {config} from '../src/config.mjs';
 import {encrypt} from '../src/security.mjs';
 
 const alice={id:1,github_id:101,login:'alice'};
 const bob={id:2,github_id:202,login:'bob'};
 const publicRepo='org/alice-code',privateRepo='org/bob-secret';
-const access=async (_db,user)=>new Set(user.id===alice.id?[11]:[12]);
+const access=async (_db,user)=>new Map([[user.id===alice.id?11:12,7]]);
 const sha='a'.repeat(40);
 
 function fixture(){
@@ -43,6 +43,45 @@ test('asymmetric users see only their own repository and review history',async()
     assert.doesNotMatch(await reviewsPage(f.db,alice,'csrf',{repositoryAccess:access}),/Bob private PR/);
   }finally{f.dispose();}
 });
+test('a shared member sees the installation billing owner quota',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO subscriptions(user_id,stripe_customer_id,stripe_subscription_id,status) VALUES(1,'cus_test','sub_test','active')").run();
+    const html=await dashboard(f.db,bob,'csrf',{repositoryAccess:access});
+    assert.match(html,/Current plan: PRO/);
+    assert.match(html,/2 <span>\/ 500 reviews/);
+  }finally{f.dispose();}
+});
+test('dashboard separates quotas when a user can access different billing owners',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO subscriptions(user_id,stripe_customer_id,stripe_subscription_id,status) VALUES(1,'cus_test','sub_test','active')").run();
+    f.db.prepare("INSERT INTO installations(id,owner_user_id,account_login) VALUES(8,2,'second')").run();
+    f.db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url) VALUES(13,8,'repo','second/repo','https://example.invalid/second')").run();
+    const grants=async()=>new Map([[12,7],[13,8]]);
+    const html=await dashboard(f.db,bob,'csrf',{repositoryAccess:grants});
+    assert.match(html,/org: PRO · 2 \/ 500 reviews/);
+    assert.match(html,/second: FREE · 0 \/ 10 reviews/);
+  }finally{f.dispose();}
+});
+
+test('a repository transfer after the live grant cannot disclose destination findings',async()=>{
+  const f=fixture();
+  try{
+    f.db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(8,2,'other','active')").run();
+    f.db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,head_sha,status,summary,findings_json) VALUES(8,12,8,'Other tenant secret',?,'completed','Other tenant summary',?)")
+      .run('c'.repeat(40),JSON.stringify([{path:'private.js',line:1,title:'Other tenant finding'}]));
+    const api=async path=>path.startsWith('/user/installations?')?{installations:[{id:7}]}:{repositories:[{id:12}]};
+    const access=async(db,user)=>{
+      const grants=await authorizedRepositoryGrants(db,user,{api,userToken:async()=> 'user-token'});
+      db.prepare('UPDATE repositories SET installation_id=8 WHERE id=12').run();
+      return grants;
+    };
+    const pages=[await reviewsPage(f.db,bob,'csrf',{repositoryAccess:access}),
+      await dashboard(f.db,bob,'csrf',{repositoryAccess:access}),
+      await reposPage(f.db,bob,'csrf',{repositoryAccess:access})];
+    for(const html of pages)assert.doesNotMatch(html,/Other tenant secret|Other tenant summary|org\/bob-secret/);
+    assert.equal(await reviewDetail(f.db,bob,'csrf',3,{repositoryAccess:access}),null);
+  }finally{f.dispose();}
+});
 
 test('manual review is denied to installation owner without repo access and allowed to shared user',async()=>{
   const f=fixture();
@@ -58,6 +97,20 @@ test('manual review is denied to installation owner without repo access and allo
     const created=await enqueueManualReview(f.db,{...input,userId:bob.id});
     assert.equal(created.created,true);
     assert.equal(tokenCalls,1);
+  }finally{f.dispose();}
+});
+test('manual review selects the active association granted to the user',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(8,2,'org','active')").run();
+    f.db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,enabled) VALUES(13,8,'bob-secret',?,'https://example.invalid/new',1)").run(privateRepo);
+    const access=async()=>new Map([[13,8]]);
+    const installations=[];
+    const created=await enqueueManualReview(f.db,{userId:bob.id,repoFullName:privateRepo,prNumber:'4',repositoryAccess:access,
+      policy:{aiManualReviewRepositories:[privateRepo],aiShadowRepositories:[privateRepo],aiAllowedRepositories:[privateRepo]},
+      installationToken:async id=>{installations.push(id);return 'token';},
+      fetchPull:async()=>({state:'open',base:{ref:'main'},head:{sha:'d'.repeat(40),repo:{full_name:privateRepo}},title:'New repo',user:{login:'bob'}})});
+    assert.equal(created.created,true);
+    assert.deepEqual(installations,[8]);
   }finally{f.dispose();}
 });
 
@@ -88,9 +141,9 @@ test('live GitHub user permissions are rechecked after revocation and fail close
       (token==='user-1'?[11]:bobRepos).map(id=>({id}))};
     throw new Error('Unexpected GitHub API request');
   };
-  const repositoryAccess=(db,user)=>authorizedRepositoryIds(db,user,{api,userToken:async()=> 'user-'+user.id});
+  const repositoryAccess=(db,user)=>authorizedRepositoryGrants(db,user,{api,userToken:async()=> 'user-'+user.id});
   try{
-    assert.deepEqual([...await repositoryAccess(f.db,bob)],[12]);
+    assert.deepEqual([...await repositoryAccess(f.db,bob)],[[12,7]]);
     assert.match(await reviewDetail(f.db,bob,'csrf',2,{repositoryAccess}),/Bob private finding/);
     bobRepos=[11];
     assert.equal(await reviewDetail(f.db,bob,'csrf',2,{repositoryAccess}),null);
@@ -124,6 +177,17 @@ test('PostgreSQL string identifiers and unlinked installations are handled witho
     assert.deepEqual([...await authorizedRepositoryIds(f.db,{id:'1',github_id:null},{api,userToken:async()=> 'alice'})],[]);
   }finally{f.dispose();}
 });
+test('authorization normalizes PostgreSQL string-valued repository rows',async()=>{
+  const user={id:'1',github_id:'101'};
+  const db={prepare:sql=>({
+    get:async()=>user,
+    all:async()=>{assert.match(sql,/i\.id IN/);return [{id:'11',installation_id:'7'}];}
+  })};
+  const api=async path=>path.startsWith('/user/installations?')
+    ?{installations:[{id:7}]}:{repositories:[{id:11}]};
+  const grants=await authorizedRepositoryGrants(db,user,{api,userToken:async()=> 'token'});
+  assert.deepEqual([...grants],[[11,7]]);
+});
 
 test('exactly 500 user-accessible repositories remain available; more than 500 fail closed',async()=>{
   const f=fixture();
@@ -156,7 +220,7 @@ test('a failed second GitHub page never exposes findings from a partial first pa
     if(page===1)return {repositories:Array.from({length:100},(_,i)=>({id:i+1}))};
     throw new Error('GitHub page two unavailable');
   };
-  const repositoryAccess=(db,user)=>authorizedRepositoryIds(db,user,{api,userToken:async()=> 'bob-token'});
+  const repositoryAccess=(db,user)=>authorizedRepositoryGrants(db,user,{api,userToken:async()=> 'bob-token'});
   try{
     await assert.rejects(reviewDetail(f.db,bob,'csrf',2,{repositoryAccess}),/page two unavailable/);
   }finally{f.dispose();}

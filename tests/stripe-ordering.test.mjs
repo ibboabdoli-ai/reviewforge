@@ -6,8 +6,8 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {config} from '../src/config.mjs';
 import {openDatabase,activePlan} from '../src/db.mjs';
-import {processStripeEvent} from '../src/stripe.mjs';
-import {withStripePoolSlot} from '../src/db-postgres.mjs';
+import {processStripeEvent,stripeFailureCategory} from '../src/stripe.mjs';
+import {withStripePoolSlot,withOwnerReservationSlot} from '../src/db-postgres.mjs';
 
 const secret='whsec_ordering_test';
 function sign(event){
@@ -25,15 +25,89 @@ function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'rf-stripe-order-'));
   const db=openDatabase(join(dir,'db.sqlite'));
   db.prepare("INSERT INTO users(id,login,name) VALUES(1,'alice','Alice')").run();
-  const old=config.stripe.webhookSecret;config.stripe.webhookSecret=secret;
+  const old=[config.stripe.webhookSecret,config.stripe.pricePro];
+  config.stripe.webhookSecret=secret;config.stripe.pricePro='price_pro_test';
+  const items={data:[{price:{id:'price_pro_test'}}]};
   const objects=new Map([
-    ['sub_old',{id:'sub_old',customer:'cus_one',created:100,status:'canceled',metadata:{reviewforge_user_id:'1'}}],
-    ['sub_new',{id:'sub_new',customer:'cus_one',created:200,status:'active',metadata:{reviewforge_user_id:'1'}}]
+    ['sub_old',{id:'sub_old',customer:'cus_one',created:100,status:'canceled',metadata:{reviewforge_user_id:'1'},items}],
+    ['sub_new',{id:'sub_new',customer:'cus_one',created:200,status:'active',metadata:{reviewforge_user_id:'1'},items}]
   ]);
   const retrieveSubscription=async id=>objects.get(id);
   const send=(id,type,sub)=>processStripeEvent(db,...signed(id,type,sub),{retrieveSubscription});
-  return {db,path:join(dir,'db.sqlite'),objects,send,dispose(){config.stripe.webhookSecret=old;db.close();rmSync(dir,{recursive:true,force:true});}};
+  return {db,path:join(dir,'db.sqlite'),objects,send,dispose(){[config.stripe.webhookSecret,config.stripe.pricePro]=old;db.close();rmSync(dir,{recursive:true,force:true});}};
 }
+test('a subscription at another price cannot grant Pro',async()=>{
+  const f=fixture();try{
+    f.objects.set('sub_new',{...f.objects.get('sub_new'),items:{data:[{price:{id:'price_other'}}]}});
+    await f.send('evt_wrong_price','customer.subscription.created','sub_new');
+    assert.equal(await activePlan(f.db,1),'free');
+    assert.equal(f.db.prepare('SELECT status FROM subscriptions WHERE user_id=1').get().status,'free');
+  }finally{f.dispose();}
+});
+test('an older event revokes Pro when the stored subscription changed to another price',async()=>{
+  const f=fixture();try{
+    await f.send('evt_current_price','customer.subscription.created','sub_new');
+    f.objects.set('sub_new',{...f.objects.get('sub_new'),items:{data:[{price:{id:'price_other'}}]}});
+    await f.send('evt_old_price_check','customer.subscription.deleted','sub_old');
+    assert.equal(await activePlan(f.db,1),'free');
+  }finally{f.dispose();}
+});
+test('Checkout completion repairs a proven pending billing row',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO subscriptions(user_id,stripe_customer_id,status) VALUES(1,'cus_one','pending')").run();
+    await processStripeEvent(f.db,...checkout('evt_pending_proof','sub_new','cus_one'),{retrieveSubscription:async id=>f.objects.get(id)});
+    assert.equal(await activePlan(f.db,1),'pro');
+    assert.equal(f.db.prepare('SELECT stripe_subscription_id FROM subscriptions WHERE user_id=1').get().stripe_subscription_id,'sub_new');
+  }finally{f.dispose();}
+});
+test('Checkout proof repairs a pending row before a customer ID was recorded',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO subscriptions(user_id,status) VALUES(1,'pending')").run();
+    await processStripeEvent(f.db,...checkout('evt_empty_pending','sub_new','cus_one'),{retrieveSubscription:async id=>f.objects.get(id)});
+    assert.equal(await activePlan(f.db,1),'pro');
+  }finally{f.dispose();}
+});
+test('a Checkout proof cannot be assigned to a different metadata owner',async()=>{
+  const f=fixture();try{
+    f.db.prepare("INSERT INTO users(id,login) VALUES(2,'other')").run();
+    await processStripeEvent(f.db,...checkout('evt_proof','sub_new','cus_one'));
+    f.objects.set('sub_new',{...f.objects.get('sub_new'),metadata:{reviewforge_user_id:'2'}});
+    const foreign=sign({id:'evt_foreign_owner',type:'customer.subscription.created',data:{object:{id:'sub_new',customer:'cus_one',metadata:{reviewforge_user_id:'2'}}}});
+    await assert.rejects(processStripeEvent(f.db,...foreign,{retrieveSubscription:async id=>f.objects.get(id)}),/Checkout|owner|proof/i);
+    assert.equal(await activePlan(f.db,2),'free');
+  }finally{f.dispose();}
+});
+test('a canceled predecessor can be replaced at the same creation second with Checkout proof',async()=>{
+  const f=fixture();try{
+    await f.send('evt_first','customer.subscription.created','sub_old');
+    f.objects.set('sub_new',{...f.objects.get('sub_new'),created:100});
+    await processStripeEvent(f.db,...checkout('evt_tie_proof','sub_new','cus_one'));
+    await f.send('evt_tie_replacement','customer.subscription.created','sub_new');
+    assert.equal(await activePlan(f.db,1),'pro');
+    assert.equal(f.db.prepare('SELECT stripe_subscription_id FROM subscriptions WHERE user_id=1').get().stripe_subscription_id,'sub_new');
+  }finally{f.dispose();}
+});
+test('incomplete expired predecessor can be replaced under a new proven customer',async()=>{
+  const f=fixture();try{
+    f.objects.set('sub_old',{...f.objects.get('sub_old'),status:'incomplete_expired'});
+    await f.send('evt_first','customer.subscription.created','sub_old');
+    f.objects.set('sub_new',{...f.objects.get('sub_new'),customer:'cus_two'});
+    await processStripeEvent(f.db,...checkout('evt_expired_proof','sub_new','cus_two'));
+    const event=sign({id:'evt_expired_replacement',type:'customer.subscription.created',data:{object:{id:'sub_new',customer:'cus_two',metadata:{reviewforge_user_id:'1'}}}});
+    await processStripeEvent(f.db,...event,{retrieveSubscription:async id=>f.objects.get(id)});
+    assert.equal(await activePlan(f.db,1),'pro');
+  }finally{f.dispose();}
+});
+test('newer inactive subscription cannot downgrade an active Pro entitlement',async()=>{
+  const f=fixture();try{
+    f.objects.set('sub_old',{...f.objects.get('sub_old'),status:'active'});
+    await f.send('evt_active','customer.subscription.created','sub_old');
+    f.objects.set('sub_new',{...f.objects.get('sub_new'),status:'incomplete'});
+    await f.send('evt_incomplete_new','customer.subscription.created','sub_new');
+    assert.equal(await activePlan(f.db,1),'pro');
+    assert.equal(f.db.prepare('SELECT stripe_subscription_id FROM subscriptions WHERE user_id=1').get().stripe_subscription_id,'sub_old');
+  }finally{f.dispose();}
+});
 test('old subscription deletion cannot replace a newer active subscription',async()=>{
   const f=fixture();try{
     await f.send('evt_new','customer.subscription.created','sub_new');
@@ -241,6 +315,18 @@ test('PostgreSQL webhook gate reserves pool capacity for other requests',async()
   assert.equal(await first,'first');
   assert.equal(await withStripePoolSlot(async()=> 'third'),'third');
 });
+test('quota reservations for one billing owner wait outside the PostgreSQL pool',async()=>{
+  let entered,release,secondEntered=false;
+  const started=new Promise(resolve=>{entered=resolve;});
+  const hold=new Promise(resolve=>{release=resolve;});
+  const first=withOwnerReservationSlot(1,async()=>{entered();await hold;return 'first';});
+  await started;
+  const second=withOwnerReservationSlot(1,async()=>{secondEntered=true;return 'second';});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(secondEntered,false);
+  release();
+  assert.deepEqual(await Promise.all([first,second]),['first','second']);
+});
 test('malformed webhook JSON is a client error; upstream parse failures remain retryable',async()=>{
   const f=fixture();try{
     const raw='{bad',t=Math.floor(Date.now()/1000);
@@ -250,4 +336,10 @@ test('malformed webhook JSON is a client error; upstream parse failures remain r
       {retrieveSubscription:async()=>{throw new SyntaxError('upstream JSON');}}),error=>error.status!==400);
     assert.equal(f.db.prepare("SELECT id FROM stripe_events WHERE id='evt_upstream'").get(),undefined);
   }finally{f.dispose();}
+});
+test('Stripe failure categories distinguish retryable locks from integrity failures without raw data',()=>{
+  assert.equal(stripeFailureCategory(Object.assign(new Error('secret data'),{code:'SQLITE_BUSY_SNAPSHOT'})),'database_contention');
+  assert.equal(stripeFailureCategory(Object.assign(new Error('secret data'),{code:'42P01'})),'schema_missing');
+  assert.equal(stripeFailureCategory(new Error('Stripe subscription conflicts with Checkout owner')),'billing_integrity');
+  assert.equal(stripeFailureCategory(new Error('secret data')),'internal_error');
 });

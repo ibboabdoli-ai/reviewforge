@@ -4,7 +4,31 @@ import { dirname } from 'node:path';
 import { randomToken, sha256 } from './security.mjs';
 const subscriptionQueues=new Map();
 
+function migrateReviewIdentity(db){
+  const schema=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='reviews'").get()?.sql;
+  if(!/UNIQUE\s*\(\s*repository_id\s*,\s*pr_number\s*,\s*head_sha\s*\)/i.test(schema||''))return;
+  const next=schema.replace(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?reviews["`]?/i,'CREATE TABLE reviews_next')
+    .replace(/UNIQUE\s*\(\s*repository_id\s*,\s*pr_number\s*,\s*head_sha\s*\)/i,
+      'UNIQUE(installation_id,repository_id,pr_number,head_sha)');
+  if(next===schema || !next.startsWith('CREATE TABLE reviews_next'))throw new Error('Cannot migrate review identity constraint');
+  db.exec('PRAGMA foreign_keys=OFF');
+  let started=false;
+  try{
+    db.exec('BEGIN IMMEDIATE');started=true;
+    db.exec(next);
+    db.exec('INSERT INTO reviews_next SELECT * FROM reviews');
+    db.exec('DROP TABLE reviews');
+    db.exec('ALTER TABLE reviews_next RENAME TO reviews');
+    db.exec('CREATE INDEX idx_reviews_installation ON reviews(installation_id,created_at DESC)');
+    db.exec('COMMIT');started=false;
+  }catch(error){if(started)db.exec('ROLLBACK');throw error;}
+  finally{db.exec('PRAGMA foreign_keys=ON');}
+  if(db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Review identity migration broke foreign keys');
+}
+
 export function openDatabase(file) {
+  if(file===':memory:' || /^file::memory:/i.test(file))
+    throw new Error('ReviewForge requires a file-backed SQLite database for transactional helpers');
   mkdirSync(dirname(file),{recursive:true});
   const db=new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
@@ -56,7 +80,7 @@ export function openDatabase(file) {
       error TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       finished_at TEXT,
-      UNIQUE(repository_id,pr_number,head_sha)
+      UNIQUE(installation_id,repository_id,pr_number,head_sha)
     );
     CREATE TABLE IF NOT EXISTS deliveries (
       id TEXT PRIMARY KEY,
@@ -110,6 +134,7 @@ export function openDatabase(file) {
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
+  migrateReviewIdentity(db);
   db.withSubscriptionLock=async(userId,work)=>{
     const previous=subscriptionQueues.get(file)||Promise.resolve();
     let release;
@@ -152,7 +177,7 @@ export function openDatabase(file) {
       }
       const repo=locked.prepare("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=? AND p.installation_id=? AND p.enabled=1 AND i.status='active'").get(repositoryId,installationId);
       if(!repo)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
-      const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(repositoryId,prNumber,headSha);
+      const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=? AND r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(installationId,repositoryId,prNumber,headSha);
       let result;
       if(existing)result={id:existing.id,created:false,manual:!!existing.manual_id};
       else{

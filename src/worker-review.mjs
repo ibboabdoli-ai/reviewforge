@@ -2,6 +2,7 @@ import { manualReviewAllowed, enqueueManualReview, validPrNumber } from './manua
 import { repositoryAllowed } from './review-policy.mjs';
 
 const shaPattern=/^[0-9a-f]{40}$/i;
+export const workerErrorStatus=error=>[400,403,409,413,429].includes(error?.status)?error.status:500;
 export function workerReviewAllowed(repo,policy){
   return manualReviewAllowed(repo,policy)
     && repositoryAllowed(repo,policy.aiWorkerRequestRepositories);

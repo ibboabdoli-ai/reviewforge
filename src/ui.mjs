@@ -1,7 +1,7 @@
 import { htmlEscape as e } from './security.mjs';
 import { integrations,config } from './config.mjs';
 import { activePlan, allowedReviews } from './db.mjs';
-import { authorizedRepositoryIds } from './github.mjs';
+import { authorizedRepositoryGrants } from './github.mjs';
 
 const fmt=(v)=>new Intl.DateTimeFormat('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format((v instanceof Date ? v : new Date((v||'').replace(' ','T')+'Z')));
 const s=(x)=>e(x??'');
@@ -37,19 +37,32 @@ function header(title,desc,aside=''){return `<div class="page-header"><div><div 
 function statusItems(demo){ const ints=integrations();return [{name:'GitHub App',ready:ints.github},{name:'AI analysis',ready:ints.ai},{name:'Stripe billing',ready:ints.billing}].map(c=>`<div class="config-row"><span><i class="status-dot ${c.ready?'ok':'off'}"></i>${c.name}</span><strong>${c.ready?'Configured':'Needs setup'}</strong></div>`).join('');}
 /** Convert a live GitHub grant set into safe SQL parameters. */
 async function visibleIds(db,user,repositoryAccess){
-  return [...await repositoryAccess(db,user)].filter(Number.isSafeInteger);
+  const grants=await repositoryAccess(db,user);
+  if(!(grants instanceof Map))throw new Error('Repository authorization lacks installation identity');
+  return [...grants].filter(([repo,installation])=>Number.isSafeInteger(repo)&&Number.isSafeInteger(installation));
 }
 /** Empty grant sets produce an always-false SQL condition. */
-const inRepos=(ids,column)=>ids.length?`${column} IN (${ids.map(()=>'?').join(',')})`:'1=0';
+const inRepos=(ids,column)=>ids.length?`(${column},p.installation_id) IN (${ids.map(()=>'(?,?)').join(',')})`:'1=0';
+const grantParams=ids=>ids.flat();
 /** Show metrics only for repositories currently accessible to this user. */
-export async function dashboard(db,user,token,{demo=false,notice='',repositoryAccess=authorizedRepositoryIds}={}){
+export async function dashboard(db,user,token,{demo=false,notice='',repositoryAccess=authorizedRepositoryGrants}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 6`).all(...ids);
-  const repoCount=demo?3:Number((await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...ids))?.n ?? 0);
-  const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...ids))?.n ?? 0);
+  const reviews=demo?await db.prepare(`SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 6`).all(user.id):await db.prepare(`SELECT r.* ,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 6`).all(...grantParams(ids));
+  const repoCount=demo?3:Number((await db.prepare(`SELECT COUNT(*) n FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...grantParams(ids)))?.n ?? 0);
+  const total=demo?reviews.length:Number((await db.prepare(`SELECT COUNT(*) n FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND p.enabled=1 AND i.status='active'`).get(...grantParams(ids)))?.n ?? 0);
   const issues=reviews.reduce((sum,r)=>sum+JSON.parse(r.findings_json||'[]').length,0);
   const clean=reviews.filter(r=>r.status==='completed'&&JSON.parse(r.findings_json||'[]').length===0).length;
-  const plan=demo?{plan:'demo',limit:10,used:0}:await allowedReviews(db,user.id);
+  const owners=demo?[]:await db.prepare(`SELECT i.owner_user_id,MIN(i.account_login) AS account_login FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 GROUP BY i.owner_user_id`).all(...grantParams(ids));
+  const plans=demo?[{owner:user.id,label:'Demo',plan:'demo',limit:10,used:0}]:owners.length
+    ?await Promise.all(owners.map(async row=>({owner:row.owner_user_id,label:row.account_login,...await allowedReviews(db,row.owner_user_id)})))
+    :[{owner:user.id,label:'Your account',...await allowedReviews(db,user.id)}];
+  const usage=plans.length===1?(()=>{
+    const plan=plans[0];
+    return `<div class="panel-header"><div><h3>Usage this month</h3><p>Current plan: ${s(plan.plan.toUpperCase())}</p></div><span class="plan-chip">${s(plan.plan)}</span></div><div class="meter-label"><strong>${plan.used} <span>/ ${plan.limit} reviews</span></strong><small>${Math.round(plan.used/plan.limit*100)}%</small></div><div class="progress"><span style="width:${Math.min(100,plan.used/plan.limit*100)}%"></span></div>`;
+  })():`<div class="panel-header"><div><h3>Usage this month</h3><p>By installation billing owner</p></div></div>${plans.map(plan=>`<p class="meta-note">${s(plan.label)}: ${s(plan.plan.toUpperCase())} · ${plan.used} / ${plan.limit} reviews</p>`).join('')}`;
+  const billingLink=plans.length===1 && Number(plans[0].owner)===Number(user.id)
+    ?'<a href="/billing" class="btn btn-outline btn-full">View plans →</a>'
+    :'<p class="meta-note">Subscription changes belong to the installation billing owner.</p>';
   let body=header('Dashboard','Monitor your pull requests and catch issues before they ship.',demo?'<a class="btn btn-primary" href="/demo/analyze">✦ Try a demo review</a>':action('/settings/sync','↻ Sync GitHub',token,'primary'));
   body+=`<div class="welcome"><div><div class="tagline">✦ SMARTER CODE REVIEWS</div><h2>Good ${new Date().getHours()<12?'morning':new Date().getHours()<18?'afternoon':'evening'}, ${s(user.login)} <span class="waving">✳</span></h2><p>Your code deserves a second set of eyes. See what ReviewForge has found.</p></div><div class="welcome-orb">✧</div></div>`;
   body+=`<div class="stats-grid"><div class="stat-card"><div class="stat-header"><span>Pull requests reviewed</span><span class="stat-icon purple">⌘</span></div><div class="stat-value">${total}</div><div class="stat-foot">All tracked reviews</div></div>
@@ -57,7 +70,7 @@ export async function dashboard(db,user,token,{demo=false,notice='',repositoryAc
   <div class="stat-card"><div class="stat-header"><span>Clean reviews</span><span class="stat-icon green">✓</span></div><div class="stat-value">${clean}</div><div class="stat-foot">No findings in latest reviews</div></div>
   <div class="stat-card"><div class="stat-header"><span>Connected repositories</span><span class="stat-icon blue">▧</span></div><div class="stat-value">${repoCount}</div><div class="stat-foot">Across your workspace</div></div></div>`;
   body+=`<div class="dash-grid"><div class="panel"><div class="panel-header"><div><h3>Recent code reviews</h3><p>Your latest pull request activity</p></div><a href="/reviews" class="text-link">View all →</a></div><div class="review-list">${reviews.length?reviews.map(r=>reviewRow(r)).join(''):'<div class="empty-state">No reviews yet. Connect a GitHub repository to start.</div>'}</div></div>
-  <div class="right-panels"><div class="panel plan-panel"><div class="panel-header"><div><h3>Usage this month</h3><p>Current plan: ${s(plan.plan.toUpperCase())}</p></div><span class="plan-chip">${s(plan.plan)}</span></div><div class="meter-label"><strong>${plan.used} <span>/ ${plan.limit} reviews</span></strong><small>${Math.round(plan.used/plan.limit*100)}%</small></div><div class="progress"><span style="width:${Math.min(100,plan.used/plan.limit*100)}%"></span></div><p class="meta-note">Limits reset at the beginning of each calendar month.</p><a href="/billing" class="btn btn-outline btn-full">View plans →</a></div>
+  <div class="right-panels"><div class="panel plan-panel">${usage}<p class="meta-note">Limits reset at the beginning of each calendar month.</p>${billingLink}</div>
   <div class="panel setup-panel"><div class="panel-header"><div><h3>Integration status</h3><p>Required for live automation</p></div></div>${statusItems(demo)}<a class="text-link" href="/settings">Setup instructions →</a></div></div></div>`;
   return base({title:'Dashboard',body,user,active:'/dashboard',demo,info:notice,csrfToken:token});
 }
@@ -76,16 +89,16 @@ function reviewRow(r){
   return `<a class="review-row" href="/reviews/${r.id}"><span class="pr-ico">⌘</span><span class="pr-title"><strong>${s(r.pr_title)}</strong><small>${s(r.full_name||'demo / sample-repository')} <b>·</b> #${s(r.pr_number)} <b>·</b> ${s(r.author)}</small></span><span class="review-issues ${n?'':'none'}">${s(message)}</span>${badge(r.status)}<span class="row-arrow">›</span></a>`;
 }
 /** Show only reviews from current user-visible installation repositories. */
-export async function reviewsPage(db,user,token,{demo=false,repositoryAccess=authorizedRepositoryIds}={}){
+export async function reviewsPage(db,user,token,{demo=false,repositoryAccess=authorizedRepositoryGrants}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 100`).all(...ids);
+  const reviews=demo?await db.prepare('SELECT * FROM reviews WHERE demo_user_id IN (-1,?) ORDER BY id DESC LIMIT 100').all(user.id):await db.prepare(`SELECT r.*,p.full_name,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY r.id DESC LIMIT 100`).all(...grantParams(ids));
   const body=header('Code reviews','A searchable history of reviewed pull requests.',demo?'<a href="/demo/analyze" class="btn btn-primary">+ New demo review</a>':'<a href="/reviews/manual" class="btn btn-primary">+ Manual shadow review</a>')+`<section class="panel full-panel"><div class="panel-header"><div><h3>Review activity</h3><p>${reviews.length} most recent records</p></div><div class="filter-label">Newest first</div></div><div class="review-list">${reviews.length?reviews.map(reviewRow).join(''):'<div class="empty-state">No reviews to display.</div>'}</div></section>`;
   return base({title:'Code reviews',body,user,active:'/reviews',demo,csrfToken:token});
 }
 /** Offer manual review only for currently authorized, explicitly allowlisted repos. */
-export async function manualReviewPage(db,user,token,query=new URLSearchParams(),{repositoryAccess=authorizedRepositoryIds}={}){
+export async function manualReviewPage(db,user,token,query=new URLSearchParams(),{repositoryAccess=authorizedRepositoryGrants}={}){
   const ids=await visibleIds(db,user,repositoryAccess);
-  const repos=await db.prepare(`SELECT p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY p.full_name`).all(...ids);
+  const repos=await db.prepare(`SELECT p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY p.full_name`).all(...grantParams(ids));
   const allowed=repos.filter(r=>config.aiManualReviewRepositories.includes(String(r.full_name).toLowerCase()) &&
     config.aiShadowRepositories.includes(String(r.full_name).toLowerCase()) &&
     config.aiAllowedRepositories.includes(String(r.full_name).toLowerCase()));
@@ -105,9 +118,9 @@ export async function manualReviewPage(db,user,token,query=new URLSearchParams()
   return base({title:'Manual review',body,user,active:'/reviews',csrfToken:token});
 }
 /** Deny direct review IDs unless the user still has access to its repository. */
-export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess=authorizedRepositoryIds}={}){
+export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess=authorizedRepositoryGrants}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1`).get(id,...ids);
+  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1`).get(id,...grantParams(ids));
   if(!r)return null; const findings=JSON.parse(r.findings_json||'[]');
   const progressInfo=r.total_batches!=null?'<p class="meta-note">Batch progress: '+Number(r.completed_batches)+'/'+Number(r.total_batches)+'. Incomplete progress is not a review verdict.</p>':'';
   const emptyText=r.status==='failed'
@@ -121,9 +134,9 @@ export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess
   return base({title:'Review details',body,user,active:'/reviews',demo,csrfToken:token});
 }
 /** List only repositories backed by the signed-in user's live GitHub grants. */
-export async function reposPage(db,user,token,{demo=false,notice="",repositoryAccess=authorizedRepositoryIds}={}) {
+export async function reposPage(db,user,token,{demo=false,notice="",repositoryAccess=authorizedRepositoryGrants}={}) {
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const repos=demo?[{name:'saas-platform',full_name:'demo/saas-platform',private:1},{name:'payment-service',full_name:'demo/payment-service',private:1},{name:'landing-page',full_name:'demo/landing-page',private:0}]:await db.prepare(`SELECT p.* FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY p.full_name`).all(...ids);
+  const repos=demo?[{name:'saas-platform',full_name:'demo/saas-platform',private:1},{name:'payment-service',full_name:'demo/payment-service',private:1},{name:'landing-page',full_name:'demo/landing-page',private:0}]:await db.prepare(`SELECT p.* FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1 ORDER BY p.full_name`).all(...grantParams(ids));
   const body=header('Repositories','Manage the codebases ReviewForge can review.',demo?'<a href="/auth/github" class="btn btn-primary">Connect real GitHub</a>':`<a href="/connect/github" class="btn btn-primary">+ Install GitHub App</a>`)+`<div class="panel full-panel"><div class="panel-header"><div><h3>Connected repositories</h3><p>${repos.length} repositories in this workspace</p></div>${!demo?action('/settings/sync','↻ Sync',token):''}</div>${repos.length?repos.map(r=>`<div class="repo-row"><span class="repo-icon">▧</span><span class="repo-main"><strong>${s(r.full_name)}</strong><small>${r.private?'Private repository':'Public repository'} · ${demo?'Demo only':'Managed by GitHub App'}</small></span><span class="repo-tag">${demo?'Sample':r.enabled?'Auto review on':'Disabled'}</span>${!demo?`<a class="text-link" href="${s(r.html_url)}" target="_blank" rel="noreferrer noopener">Open ↗</a>`:''}</div>`).join(''):'<div class="empty-state">Nothing connected yet. Install the GitHub App, then sync repositories.</div>'}</div>`;
   return base({title:'Repositories',body,user,active:'/repositories',demo,csrfToken:token,info:notice});
 }

@@ -3,11 +3,28 @@
 // A pooled connection URL (DATABASE_URL) is expected for serverless traffic.
 let sharedPool;
 let activeStripeTransactions=0;
+const ownerReservationQueues=new Map();
 export async function withStripePoolSlot(work){
   // Keep at least two of the three pooled connections available to the app.
   if(activeStripeTransactions>=1)throw new Error('Stripe webhook busy; retry event');
   activeStripeTransactions++;
   try{return await work();}finally{activeStripeTransactions--;}
+}
+/** Wait for one owner's quota lock before taking a pooled connection. */
+export async function withOwnerReservationSlot(ownerId,work){
+  const key=String(ownerId),queue=ownerReservationQueues.get(key)||{tail:Promise.resolve(),waiting:0};
+  if(queue.waiting>=20)throw Object.assign(new Error('Billing owner reservation queue is full; retry'),{status:503});
+  const previous=queue.tail;
+  let release;
+  queue.tail=new Promise(resolve=>{release=resolve;});
+  queue.waiting++;
+  ownerReservationQueues.set(key,queue);
+  await previous;
+  try{return await work();}
+  finally{
+    queue.waiting--;release();
+    if(queue.waiting===0)ownerReservationQueues.delete(key);
+  }
 }
 function normalize(sql) {
   let i=0;
@@ -63,14 +80,19 @@ export async function openPostgres(url){
       });
     },
     async reserveReview({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false}){
+      const candidate=await sharedPool.query("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=$1 AND p.installation_id=$2 AND p.enabled=1 AND i.status='active'",[repositoryId,installationId]);
+      if(!candidate.rows.length)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
+      return withOwnerReservationSlot(candidate.rows[0].owner_user_id,async()=>{
       const client=await sharedPool.connect();
       try{
         await client.query('BEGIN');
         const owner=await client.query("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=$1 AND p.installation_id=$2 AND p.enabled=1 AND i.status='active' FOR SHARE OF p,i",[repositoryId,installationId]);
         if(!owner.rows.length)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
+        if(String(owner.rows[0].owner_user_id)!==String(candidate.rows[0].owner_user_id))
+          throw Object.assign(new Error('Billing owner changed; retry review request.'),{status:409});
         // Lock the billing owner, shared by all installations, before counting.
         await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[owner.rows[0].owner_user_id]);
-        const existing=await client.query('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.repository_id=$1 AND r.pr_number=$2 AND r.head_sha=$3',[repositoryId,prNumber,headSha]);
+        const existing=await client.query('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=$1 AND r.repository_id=$2 AND r.pr_number=$3 AND r.head_sha=$4',[installationId,repositoryId,prNumber,headSha]);
         let result;
         if(existing.rows.length)result={id:Number(existing.rows[0].id),created:false,manual:!!existing.rows[0].manual_id};
         else{
@@ -88,6 +110,7 @@ export async function openPostgres(url){
         return result;
       }catch(error){await client.query('ROLLBACK');throw error;}
       finally{client.release();}
+      });
     },
     async reconcileExpiredJobs(){
       const result=await reconcileExpiredJobs();

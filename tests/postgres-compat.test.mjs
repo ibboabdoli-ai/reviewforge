@@ -11,6 +11,8 @@ test('Postgres SQL translation uses numbered parameters',()=>{
 test('SQLite ignore inserts become conflict-safe Postgres inserts',()=>{
   assert.equal(sqlForPostgres('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)'),
     'INSERT INTO jobs(review_id) VALUES($1) ON CONFLICT DO NOTHING');
+  assert.equal(sqlForPostgres("INSERT OR IGNORE INTO subscriptions(user_id,status) VALUES(?,'pending')"),
+    "INSERT INTO subscriptions(user_id,status) VALUES($1,'pending') ON CONFLICT DO NOTHING");
 });
 test('monthly limits and cleanup use native Postgres time expressions',()=>{
   assert.equal(sqlForPostgres("SELECT * FROM reviews WHERE created_at>=datetime('now','start of month')"),

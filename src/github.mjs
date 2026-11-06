@@ -38,8 +38,22 @@ export async function githubUserToken(db,user) {
   if(!user.refresh_cipher) throw new Error('GitHub token expired; please sign in again.');
   const form=new URLSearchParams({client_id:config.github.clientId,client_secret:config.github.clientSecret,
     grant_type:'refresh_token',refresh_token:decrypt(user.refresh_cipher,config.sessionSecret)});
-  const res=await fetch('https://github.com/login/oauth/access_token',{method:'POST',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded'},body:form,signal:AbortSignal.timeout(15000)});
-  const data=await res.json(); if(!res.ok||!data.access_token) throw new Error('GitHub authorization expired; please sign in again.');
+  let res,data;
+  try{
+    res=await fetch('https://github.com/login/oauth/access_token',{method:'POST',headers:{Accept:'application/json','Content-Type':'application/x-www-form-urlencoded'},body:form,signal:AbortSignal.timeout(15000)});
+    data=await res.json();
+  }catch{res=null;}
+  if(!res?.ok||!data?.access_token){
+    // Another request may have consumed the single-use refresh token first.
+    for(let attempt=0;attempt<3;attempt++){
+      const latest=await db.prepare('SELECT token_cipher,refresh_cipher,token_expires_at FROM users WHERE id=?').get(user.id);
+      if(latest?.refresh_cipher!==user.refresh_cipher && latest?.token_cipher &&
+         Number(latest.token_expires_at)>Date.now()+60000)
+        return decrypt(latest.token_cipher,config.sessionSecret);
+      if(attempt<2)await new Promise(resolve=>setTimeout(resolve,25));
+    }
+    throw new Error('GitHub authorization expired; please sign in again.');
+  }
   await persistUserToken(db,user.id,data); return data.access_token;
 }
 export function githubAppJwt() {
@@ -67,32 +81,62 @@ export async function installationsForUser(db,user,{api=githubApi,userToken=gith
   }
 }
 /** Match live user grants to the same installed repository and installation. */
-export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=githubUserToken}={}){
+export async function authorizedRepositoryGrants(db,user,{api=githubApi,userToken=githubUserToken}={}){
   // PostgreSQL returns BIGINT identifiers as strings; SQLite returns numbers.
   if(!Number.isSafeInteger(Number(user?.id))||Number(user?.id)<=0||
-     !Number.isSafeInteger(Number(user?.github_id))||Number(user?.github_id)<=0)return new Set();
+     !Number.isSafeInteger(Number(user?.github_id))||Number(user?.github_id)<=0)return new Map();
   const current=await db.prepare('SELECT * FROM users WHERE id=? AND github_id=?').get(user.id,user.github_id);
-  if(!current)return new Set();
+  if(!current)return new Map();
   const {token,installations}=await installationsForUser(db,current,{api,userToken});
-  const linked=await db.prepare("SELECT p.id,p.installation_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.status='active' AND p.enabled=1").all();
+  const installationIds=[...new Set(installations.map(inst=>Number(inst.id)).filter(id=>Number.isSafeInteger(id)&&id>0))];
+  if(!installationIds.length)return new Map();
+  const linked=await db.prepare(`SELECT p.id,p.installation_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE i.status='active' AND p.enabled=1 AND i.id IN (${installationIds.map(()=>'?').join(',')})`).all(...installationIds);
   const installationByRepo=new Map(linked.map(row=>[Number(row.id),Number(row.installation_id)]));
   const activeIds=new Set(installationByRepo.values());
-  const ids=new Set();
+  const grants=new Map();
   for(const inst of installations){
     if(!activeIds.has(Number(inst.id)))continue;
     for(let page=1;page<=5;page++){
       const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
       if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
       for(const repo of data.repositories){
-        if(Number.isSafeInteger(repo.id) && installationByRepo.get(repo.id)===Number(inst.id))ids.add(repo.id);
+        if(Number.isSafeInteger(repo.id) && installationByRepo.get(repo.id)===Number(inst.id))grants.set(repo.id,Number(inst.id));
       }
       if(lastPage(data.repositories,data,page,'repository'))break;
     }
   }
-  return ids;
+  return grants;
+}
+/** Repository IDs are sufficient for enqueue checks, which recheck the installation. */
+export async function authorizedRepositoryIds(db,user,options){
+  return new Set((await authorizedRepositoryGrants(db,user,options)).keys());
+}
+/** Verify a changed installation association with a current App token. */
+export async function upsertInstalledRepository(db,installationId,repo,{api=githubApi,installToken=installationToken}={}){
+  const existing=await db.prepare('SELECT installation_id FROM repositories WHERE id=?').get(repo.id);
+  if(existing && Number(existing.installation_id)!==Number(installationId)){
+    const token=await installToken(installationId);
+    let matched=false;
+    for(let page=1;page<=5;page++){
+      let data;
+      try{data=await api(`/installation/repositories?per_page=100&page=${page}`,token);}
+      catch(error){if(String(error.message).startsWith('GitHub 404:'))return false;throw error;}
+      if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub installation repository list');
+      if(data.repositories.some(current=>Number(current.id)===Number(repo.id) &&
+        String(current.full_name).toLowerCase()===String(repo.full_name).toLowerCase()))matched=true;
+      if(lastPage(data.repositories,data,page,'installation repository'))break;
+    }
+    if(!matched)return false;
+  }
+  await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled)
+    VALUES(?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET
+    installation_id=excluded.installation_id,name=excluded.name,full_name=excluded.full_name,
+    html_url=excluded.html_url,private=excluded.private,enabled=1`).run(
+    repo.id,installationId,repo.name,repo.full_name,repo.html_url||`https://github.com/${repo.full_name}`,repo.private?1:0);
+  return true;
 }
 /** Sync app metadata for this user without removing other members' access. */
-export async function syncInstallations(db,user,{api=githubApi,userToken=githubUserToken}={}) {
+export async function syncInstallations(db,user,{api=githubApi,userToken=githubUserToken,installToken=installationToken}={}) {
   const {token,installations}=await installationsForUser(db,user,{api,userToken});
   let linked=0,repoCount=0;
   for(const inst of installations) {
@@ -106,12 +150,7 @@ export async function syncInstallations(db,user,{api=githubApi,userToken=githubU
       if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
       const repos=data.repositories;
       for(const repo of repos) {
-        await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled)
-          VALUES(?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET
-          installation_id=excluded.installation_id,name=excluded.name,full_name=excluded.full_name,
-          html_url=excluded.html_url,private=excluded.private,enabled=1`).run(
-          repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
-        repoCount++;
+        if(await upsertInstalledRepository(db,inst.id,repo,{api,installToken}))repoCount++;
       }
       if(lastPage(repos,data,page,'repository'))break;
     }

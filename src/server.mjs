@@ -5,13 +5,13 @@ import { resolve } from 'node:path';
 import { config,assertConfig,integrations,production } from './config.mjs';
 import { openConfiguredDatabase, seedDemo,createSession,getUserBySession, allowedReviews } from './db.mjs';
 import { randomToken, cookies,cookie, csrfFor, safeCompare, validOrigin, verifyGithub, sha256 } from './security.mjs';
-import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken } from './github.mjs';
+import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken, upsertInstalledRepository } from './github.mjs';
 import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
 import { enqueueManualReview } from './manual-review.mjs';
-import { requestWorkerReview, getWorkerReviewStatus } from './worker-review.mjs';
+import { requestWorkerReview, getWorkerReviewStatus, workerErrorStatus } from './worker-review.mjs';
 import { analyzePullRequestStep } from './incremental-review.mjs';
-import { checkout,portal,processStripeEvent } from './stripe.mjs';
+import { startCheckout,portal,processStripeEvent,stripeFailureCategory } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
 import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
@@ -88,9 +88,7 @@ async function webhookGithub(req,res){
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
     if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
-      await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,
-        full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
+      await upsertInstalledRepository(db,inst.id,repo);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
       const shadowUnlimited=isUnlimitedShadowRepository(repo.full_name,{
         allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
@@ -162,9 +160,7 @@ async function webhookGithub(req,res){
     for(const r of payload.repositories_removed||[])await db.prepare('UPDATE repositories SET enabled=0 WHERE id=? AND installation_id=?').run(r.id,payload.installation.id);
     for(const r of payload.repositories_added||[]) {
       const inst=await db.prepare("SELECT id FROM installations WHERE id=? AND status='active'").get(payload.installation.id);
-      if(inst)await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(?,?,?,?,?,?,1)
-        ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,
-        full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(r.id,inst.id,r.name,r.full_name,r.html_url||`https://github.com/${r.full_name}`,r.private?1:0);
+      if(inst)await upsertInstalledRepository(db,inst.id,r);
     }
   }
   await db.prepare('INSERT INTO deliveries(id) VALUES(?)').run(delivery);
@@ -339,7 +335,7 @@ export async function handler(req,res){
         if(!result){send(res,404,JSON.stringify({error:'Manual review not found for exact PR SHA'}),'application/json');return;}
         send(res,200,JSON.stringify(result),'application/json');return;
       }catch(error){
-        const code=[400,403,409,413].includes(error.status)?error.status:500;
+        const code=workerErrorStatus(error);
         if(code===500)console.error('[worker api]',String(error.message).slice(0,180));
         send(res,code,JSON.stringify({error:code===500?'Worker review request failed':String(error.message).slice(0,180)}),'application/json');
         return;
@@ -363,11 +359,7 @@ export async function handler(req,res){
       if(!config.stripe.webhookSecret){send(res,503,'Stripe webhook not configured','text/plain');return;}
       const raw=await readBody(req);try{await processStripeEvent(db,raw,req.headers['stripe-signature']);send(res,200,'ok','text/plain');}
       catch(err){
-        const reason=['Invalid Stripe signature','Invalid Stripe event JSON','Stripe event has no ID',
-          'Stripe subscription identity cannot be verified','Stripe customer does not match verified Checkout owner',
-          'Stripe subscription verification failed','Stripe subscription order cannot be verified']
-          .includes(err.message)?err.message:'Stripe webhook processing failed';
-        console.error('[stripe-webhook]',reason);
+        console.error('[stripe-webhook]',stripeFailureCategory(err));
         send(res,err.status===400?400:503,'Stripe event could not be processed','text/plain');
       }return;
     }
@@ -466,9 +458,7 @@ export async function handler(req,res){
       if(!guard(req,res,c,{real:true}))return;await formPost(req,c);
       if(!integrations().billing){fail(res,503,'Stripe not configured');return;}
       if(limited(req,'checkout',10)){fail(res,429,'Checkout limit reached');return;}
-      const current=await db.prepare('SELECT stripe_customer_id,status FROM subscriptions WHERE user_id=?').get(c.user.id);
-      if(current?.stripe_customer_id){fail(res,409,'A billing customer already exists. Use Manage subscription.');return;}
-      const session=await checkout(c.user);redirect(res,session.url);return;
+      const session=await startCheckout(db,c.user);redirect(res,session.url);return;
     }
     if(req.method==='POST'&&path==='/billing/portal'){
       if(!guard(req,res,c,{real:true}))return;await formPost(req,c);

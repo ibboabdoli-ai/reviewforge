@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {readFileSync} from 'node:fs';
 import {openDatabase} from '../src/db.mjs';
 import {allowedRepositories} from '../src/review-policy.mjs';
-import {requestWorkerReview,getWorkerReviewStatus,validateWorkerReviewInput,workerReviewAllowed} from '../src/worker-review.mjs';
+import {requestWorkerReview,getWorkerReviewStatus,validateWorkerReviewInput,workerReviewAllowed,workerErrorStatus} from '../src/worker-review.mjs';
 import {retryState} from '../src/queue-policy.mjs';
 const repo='ibboabdoli-ai/Proffera',sha='a'.repeat(40);
 const policy={
@@ -26,7 +26,7 @@ function fixture(){
  const deps={policy,repositoryAccess:async(_db,user)=>{
   checkedUsers.push(Number(user.id));
   if(accessMode==='error')throw new Error('GitHub authorization unavailable');
-  return new Set(accessMode==='allow'&&Number(user.id)===7?[100]:[]);
+  return new Map(accessMode==='allow'&&Number(user.id)===7?[[100,42]]:[]);
  },installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
   fetchPull:async(path,token)=>{calls++;assert.equal(token,'fake-token');
    assert.equal(path,'/repos/'+repo+'/pulls/943');
@@ -94,6 +94,11 @@ test('worker request cannot bypass an exhausted owner monthly quota',async()=>{
   assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,0);
   assert.equal(f.db.prepare('SELECT count(*) n FROM reviews').get().n,10);
  }finally{f.dispose();}
+});
+test('worker route preserves the monthly quota HTTP status',()=>{
+ assert.equal(workerErrorStatus({status:429}),429);
+ assert.equal(workerErrorStatus({status:403}),403);
+ assert.equal(workerErrorStatus(new Error('unexpected')),500);
 });
 test('wrong head is refused before the database write',async()=>{
  const f=fixture();
