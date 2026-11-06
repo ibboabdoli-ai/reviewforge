@@ -22,7 +22,7 @@ function fixture(){
  db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(42,7,'ibboabdoli-ai','active')").run();
  db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(100,42,'Proffera',?,'https://github.com/ibboabdoli-ai/Proffera',0,1)").run(repo);
  let calls=0;
- const deps={policy,installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
+ const deps={policy,repositoryAccess:async()=>new Set([100]),installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
   fetchPull:async(path,token)=>{calls++;assert.equal(token,'fake-token');
    assert.equal(path,'/repos/'+repo+'/pulls/943');
    return {head:{sha,repo:{full_name:repo}},base:{ref:'main'},state:'open',draft:false,

@@ -436,12 +436,12 @@ export async function handler(req,res){
         fetchPull:githubApi,
         installationToken
       });
-      // An already-queued exact-HEAD manual review can be kicked by its
-      // authenticated owner. Never replay completed/failed/running reviews.
+      // An already-queued exact-HEAD manual review can be kicked after
+      // enqueueManualReview rechecks this user's live repository access.
       // The existing manual marker guarantees dry-run even if policy changes.
       const prior=created.created?null:await db.prepare(
-        'SELECT j.status job_status,j.next_attempt_at,r.status review_status,r.posted FROM jobs j JOIN reviews r ON r.id=j.review_id JOIN manual_review_requests m ON m.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND i.owner_user_id=?'
-      ).get(created.id,c.user.id);
+        'SELECT j.status job_status,j.next_attempt_at,r.status review_status,r.posted FROM jobs j JOIN reviews r ON r.id=j.review_id JOIN manual_review_requests m ON m.review_id=r.id WHERE r.id=?'
+      ).get(created.id);
       const queued=prior?.job_status==='queued' && prior?.review_status==='queued'
         && Number(prior.posted)===0 && Number(prior.next_attempt_at)<=Date.now();
       if((created.created || queued) && process.env.VERCEL){

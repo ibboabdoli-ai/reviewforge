@@ -20,9 +20,9 @@ export function validateWorkerReviewInput(body){
 /**
  * Service-to-service request: worker never supplies an arbitrary owner user ID
  * or GitHub token. The app resolves its installed, active repository owner
- * and reuses the existing exact-HEAD, owner-scoped, no-post manual flow.
+ * and reuses the exact-HEAD, live-user-authorized, no-post manual flow.
  */
-export async function requestWorkerReview(db,body,{policy,fetchPull,installationToken}){
+export async function requestWorkerReview(db,body,{policy,fetchPull,installationToken,repositoryAccess}){
   const {repository,pr,head}=validateWorkerReviewInput(body);
   if(!workerReviewAllowed(repository,policy))
     throw Object.assign(new Error('Repository not approved for worker shadow reviews.'),{status:403});
@@ -31,7 +31,8 @@ export async function requestWorkerReview(db,body,{policy,fetchPull,installation
   if(!row)throw Object.assign(new Error('Active owner installation not found.'),{status:403});
   return enqueueManualReview(db,{
     userId:row.owner_user_id,repoFullName:row.full_name,prNumber:String(pr),
-    expectedHeadSha:head,policy,fetchPull,installationToken
+    expectedHeadSha:head,policy,fetchPull,installationToken,
+    ...(repositoryAccess?{repositoryAccess}:{})
   });
 }
 export async function getWorkerReviewStatus(db,params,policy){
