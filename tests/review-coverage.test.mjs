@@ -234,3 +234,36 @@ test('a failed batch never publishes a partial or clean review',async()=>{
  );
  assert.equal(m.calls().posts,0);
 });
+
+// A removed workflow still changes merge/review governance even if a changed
+// test file has a valid patch. Do not silently mark it fully AI-reviewed.
+test('deleted workflow security gate must not get a clean review',async()=>{
+  const input=[
+    {filename:'.github/workflows/proffera-final-gate-wakeup.yml',status:'removed',
+      patch:'@@ -1,2 +0,0 @@\\n-if: authorization\\n-run: verify'},
+    {filename:'tests/receipt-gate.test.ts',status:'modified',
+      patch:'@@ -1 +1 @@\\n-old check\\n+new check'}
+  ];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const {coverage}=planner(input);
+    assert.equal(coverage.removedWorkflows,1,'deleted workflow must be accounted for');
+    assert.equal(coverage.reviewable,2);
+    assert.equal(coverage.complete,false,'coverage must not be clean after a workflow removal');
+  }
+  const m=mock(input);
+  const result=await analyzePullRequest({...target,postMode:'live'},m.dependencies);
+  assert.equal(result.status,'partial');
+  assert.match(result.summary,/removed workflow/i);
+  assert.deepEqual(m.calls(),{posts:0,models:0});
+});
+
+test('ordinary deleted documentation stays excluded without blocking full review',()=>{
+  const files=[{filename:'docs/obsolete.md',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
+    {filename:'src/main.ts',status:'modified',patch:'@@ -1 +1 @@\\n-old\\n+new'}];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const {coverage}=planner(files);
+    assert.equal(coverage.removedWorkflows,0);
+    assert.equal(coverage.complete,true);
+    assert.equal(coverage.excluded,1);
+  }
+});
