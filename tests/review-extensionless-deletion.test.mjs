@@ -59,3 +59,45 @@ test('ordinary deleted notes remain excluded without blocking valid code',()=>{
     assert.equal(result.coverage.complete,true);
   }
 });
+
+test('deleted dependency manifests are unreviewed, not silently excluded',()=>{
+  const manifests=[
+    {filename:'pyproject.toml',status:'removed',patch:'@@ -1 +0,0 @@\n-[tool.pytest.ini_options]'},
+    {filename:'Cargo.toml',status:'removed',patch:'@@ -1 +0,0 @@\n-[dependencies]'},
+    {filename:'services/worker/go.mod',status:'removed',patch:'@@ -1 +0,0 @@\n-module example/worker'}
+  ];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const result=planner([...manifests,modified]);
+    assert.equal(result.coverage.removedCode,3);
+    assert.equal(result.coverage.reviewable,4);
+    assert.equal(result.coverage.reviewed,1);
+    assert.equal(result.coverage.complete,false);
+  }
+});
+
+test('deleted manifest guards fail closed before any model or review output',async()=>{
+  const manifests=[
+    {filename:'pyproject.toml',status:'removed',patch:'@@ -1 +0,0 @@\n-[tool.pytest.ini_options]'},
+    {filename:'Cargo.toml',status:'removed',patch:'@@ -1 +0,0 @@\n-[dependencies]'},
+    {filename:'services/worker/go.mod',status:'removed',patch:'@@ -1 +0,0 @@\n-module example/worker'}
+  ];
+  for(const run of [analyzePullRequest,analyzePullRequestStep]){
+    const calls={reservations:0,models:0,posts:0,checkpoints:0};
+    const deps={
+      githubApi:async()=>({head:{sha},state:'open',draft:false}),
+      installationToken:async()=> 'offline-synthetic',
+      changedFiles:async()=>[...manifests,modified],
+      reserveModelCalls:async()=>{calls.reservations++;return true;},
+      reviewWithAI:async()=>{calls.models++;return {summary:'Clean',findings:[]};},
+      postReview:async()=>{calls.posts++;return 'inline';},
+      loadProgress:async()=>{calls.checkpoints++;return null;},
+      initProgress:async()=>{calls.checkpoints++;return true;},
+      saveProgress:async()=>{calls.checkpoints++;return true;}
+    };
+    const result=await run({repository:'sandbox/test',number:1,headSha:sha,
+      installationId:3,reviewId:1,postMode:'live'},deps);
+    assert.equal(result.status,'partial');
+    assert.equal(result.coverage.removedCode,3);
+    assert.deepEqual(calls,{reservations:0,models:0,posts:0,checkpoints:0});
+  }
+});
