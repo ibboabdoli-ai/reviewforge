@@ -16,6 +16,7 @@ export function validPrNumber(value) {
   const number=Number(str);
   return Number.isSafeInteger(number)?number:null;
 }
+/** Enqueue only after the requesting user's current GitHub access is verified. */
 export async function enqueueManualReview(db,{userId,repoFullName,prNumber,expectedHeadSha=null,policy,fetchPull,installationToken,repositoryAccess=authorizedRepositoryIds}){
   if(!manualReviewAllowed(repoFullName,policy))throw Object.assign(new Error('Manual review is not enabled for this repository.'),{status:403});
   const number=validPrNumber(prNumber);

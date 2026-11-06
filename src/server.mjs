@@ -89,7 +89,8 @@ async function webhookGithub(req,res){
     if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
       await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(id) DO NOTHING`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
+        ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,
+        full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
       const allowance=await allowedReviews(db,installed.owner_user_id);
       const shadowUnlimited=isUnlimitedShadowRepository(repo.full_name,{
@@ -171,7 +172,8 @@ async function webhookGithub(req,res){
     for(const r of payload.repositories_added||[]) {
       const inst=await db.prepare("SELECT id FROM installations WHERE id=? AND status='active'").get(payload.installation.id);
       if(inst)await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(?,?,?,?,?,?,1)
-        ON CONFLICT(id) DO UPDATE SET enabled=1`).run(r.id,inst.id,r.name,r.full_name,r.html_url||`https://github.com/${r.full_name}`,r.private?1:0);
+        ON CONFLICT(id) DO UPDATE SET installation_id=excluded.installation_id,name=excluded.name,
+        full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(r.id,inst.id,r.name,r.full_name,r.html_url||`https://github.com/${r.full_name}`,r.private?1:0);
     }
   }
   await db.prepare('INSERT INTO deliveries(id) VALUES(?)').run(delivery);
@@ -199,7 +201,7 @@ export async function processQueue(reviewId=null){
   const job=db.claimJob
     ? await db.claimJob(reviewId)
     : await db.prepare(`SELECT j.id job_id,j.attempts,r.*,p.full_name FROM jobs j JOIN reviews r ON r.id=j.review_id
-      JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id
+      JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id
       WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
         AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now(),reviewId,reviewId);
   if(!job)return 'idle';busy=true;

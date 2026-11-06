@@ -6,8 +6,9 @@ import {tmpdir} from 'node:os';
 import {openDatabase} from '../src/db.mjs';
 import {dashboard,reviewsPage,reviewDetail,reposPage,manualReviewPage} from '../src/ui.mjs';
 import {enqueueManualReview} from '../src/manual-review.mjs';
-import {authorizedRepositoryIds} from '../src/github.mjs';
+import {authorizedRepositoryIds,syncInstallations} from '../src/github.mjs';
 import {config} from '../src/config.mjs';
+import {encrypt} from '../src/security.mjs';
 
 const alice={id:1,github_id:101,login:'alice'};
 const bob={id:2,github_id:202,login:'bob'};
@@ -121,5 +122,62 @@ test('PostgreSQL string identifiers and unlinked installations are handled witho
     const ids=await authorizedRepositoryIds(f.db,{id:'1',github_id:'101'},{api,userToken:async()=> 'alice'});
     assert.deepEqual([...ids],[11]);
     assert.deepEqual([...await authorizedRepositoryIds(f.db,{id:'1',github_id:null},{api,userToken:async()=> 'alice'})],[]);
+  }finally{f.dispose();}
+});
+
+test('exactly 500 user-accessible repositories remain available; more than 500 fail closed',async()=>{
+  const f=fixture();
+  const api=async path=>{
+    if(path.startsWith('/user/installations?'))return {installations:[{id:7}]};
+    const page=Number(new URL(path,'https://example.invalid').searchParams.get('page'));
+    if(page>=1&&page<=5)return {total_count:500,repositories:Array.from({length:100},(_,i)=>{
+      const id=(page-1)*100+i+1;
+      return {id,name:'repo-'+id,full_name:'org/repo-'+id,html_url:'https://example.invalid/'+id,private:false};
+    })};
+    throw new Error('Unexpected page');
+  };
+  try{
+    const ids=await authorizedRepositoryIds(f.db,bob,{api,userToken:async()=> 'bob-token'});
+    assert.equal(ids.size,500);
+    assert.deepEqual(await syncInstallations(f.db,bob,{api,userToken:async()=> 'bob-token'}),{linked:1,repoCount:500});
+    const over=async path=>{
+      const result=await api(path);
+      return result.repositories?{...result,total_count:501}:result;
+    };
+    await assert.rejects(authorizedRepositoryIds(f.db,bob,{api:over,userToken:async()=> 'bob-token'}),/pagination bound/);
+  }finally{f.dispose();}
+});
+
+test('a failed second GitHub page never exposes findings from a partial first page',async()=>{
+  const f=fixture();
+  const api=async path=>{
+    if(path.startsWith('/user/installations?'))return {installations:[{id:7}]};
+    const page=Number(new URL(path,'https://example.invalid').searchParams.get('page'));
+    if(page===1)return {repositories:Array.from({length:100},(_,i)=>({id:i+1}))};
+    throw new Error('GitHub page two unavailable');
+  };
+  const repositoryAccess=(db,user)=>authorizedRepositoryIds(db,user,{api,userToken:async()=> 'bob-token'});
+  try{
+    await assert.rejects(reviewDetail(f.db,bob,'csrf',2,{repositoryAccess}),/page two unavailable/);
+  }finally{f.dispose();}
+});
+
+test('expired user token denies reads, while a current user token preserves access',async()=>{
+  const f=fixture();
+  let calls=0;
+  const api=async(path,token)=>{
+    calls++;assert.equal(token,'fresh-user-token');
+    if(path.startsWith('/user/installations?'))return {installations:[{id:7}]};
+    return {repositories:[{id:12}]};
+  };
+  try{
+    f.db.prepare('UPDATE users SET token_cipher=?,token_expires_at=? WHERE id=?')
+      .run(encrypt('expired-user-token',config.sessionSecret),Date.now()-1000,bob.id);
+    await assert.rejects(authorizedRepositoryIds(f.db,bob,{api}),/token expired/);
+    assert.equal(calls,0);
+    f.db.prepare('UPDATE users SET token_cipher=?,token_expires_at=? WHERE id=?')
+      .run(encrypt('fresh-user-token',config.sessionSecret),Date.now()+3600000,bob.id);
+    assert.deepEqual([...await authorizedRepositoryIds(f.db,bob,{api})],[12]);
+    assert.equal(calls,2);
   }finally{f.dispose();}
 });

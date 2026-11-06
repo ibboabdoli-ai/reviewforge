@@ -19,16 +19,22 @@ function fixture(){
  const dir=mkdtempSync(join(tmpdir(),'rf-worker-review-'));
  const db=openDatabase(join(dir,'db.sqlite'));
  db.prepare("INSERT INTO users(id,login,name) VALUES(7,'ibbo','Owner')").run();
+ db.prepare("INSERT INTO users(id,login,name) VALUES(8,'member','Other member')").run();
  db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(42,7,'ibboabdoli-ai','active')").run();
  db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(100,42,'Proffera',?,'https://github.com/ibboabdoli-ai/Proffera',0,1)").run(repo);
- let calls=0;
- const deps={policy,repositoryAccess:async()=>new Set([100]),installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
+ let calls=0,accessMode='allow';const checkedUsers=[];
+ const deps={policy,repositoryAccess:async(_db,user)=>{
+  checkedUsers.push(Number(user.id));
+  if(accessMode==='error')throw new Error('GitHub authorization unavailable');
+  return new Set(accessMode==='allow'&&Number(user.id)===7?[100]:[]);
+ },installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
   fetchPull:async(path,token)=>{calls++;assert.equal(token,'fake-token');
    assert.equal(path,'/repos/'+repo+'/pulls/943');
    return {head:{sha,repo:{full_name:repo}},base:{ref:'main'},state:'open',draft:false,
     title:'Maria',user:{login:'ibboabdoli-ai'}};}};
  const body={repository:repo,pr_number:943,head_sha:sha};
- return {db,deps,body,calls:()=>calls,dispose:()=>{db.close();rmSync(dir,{recursive:true,force:true});}};
+ return {db,deps,body,calls:()=>calls,checkedUsers,setAccessMode:value=>{accessMode=value;},
+  dispose:()=>{db.close();rmSync(dir,{recursive:true,force:true});}};
 }
 test('worker request is denied without fourth exact repository allowlist',()=>{
  assert.equal(workerReviewAllowed(repo,policy),true);
@@ -44,6 +50,21 @@ test('worker accepts only three exact, type-safe parameters',()=>{
   {repository:repo,pr_number:943,head_sha:sha,installation_id:1},
   {repository:'https://other/Proffera',pr_number:943,head_sha:sha}])
   assert.throws(()=>validateWorkerReviewInput(bad),/Invalid|Only/);
+});
+test('worker checks the installation owner, never borrows another member access, and fails closed',async()=>{
+ const f=fixture();
+ try{
+  f.setAccessMode('deny');
+  await assert.rejects(requestWorkerReview(f.db,f.body,f.deps),/not accessible/);
+  f.setAccessMode('error');
+  await assert.rejects(requestWorkerReview(f.db,f.body,f.deps),/GitHub authorization unavailable/);
+  assert.deepEqual(f.checkedUsers,[7,7]);
+  assert.equal(f.calls(),0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM jobs').get().n,0);
+  f.setAccessMode('allow');
+  assert.equal((await requestWorkerReview(f.db,f.body,f.deps)).created,true);
+  assert.deepEqual(f.checkedUsers,[7,7,7]);
+ }finally{f.dispose();}
 });
 test('worker submits exact-head request once and status exposes only manual review',async()=>{
  const f=fixture();

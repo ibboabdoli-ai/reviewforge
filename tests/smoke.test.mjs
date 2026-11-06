@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
+import {once} from 'node:events';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
@@ -36,5 +37,12 @@ test('HTTP landing, isolated demo, CSRF, diff review, and security headers',asyn
     assert.equal(checked.status,303);
     const review=await fetch(origin+checked.headers.get('location'),{headers:{Cookie:session}});assert.equal(review.status,200);
     assert.match(await review.text(),/Use of eval detected/);
-  }finally{child.kill('SIGTERM');rmSync(dir,{force:true,recursive:true});}
+  }finally{
+    // Windows keeps the SQLite file locked until the child has closed.
+    const closed=child.exitCode!==null||child.signalCode!==null;
+    const close=closed?Promise.resolve():once(child,'close',{signal:AbortSignal.timeout(5000)});
+    if(!closed)child.kill('SIGTERM');
+    await close;
+    rmSync(dir,{force:true,recursive:true});
+  }
 });
