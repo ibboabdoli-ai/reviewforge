@@ -10,14 +10,12 @@ import {scoreReviewQuality,scoreReviewQualitySameHead} from '../benchmarks/score
 const gold=JSON.parse(readFileSync(new URL('../benchmarks/proffera-pr962-gold.json',import.meta.url),'utf8'));
 const sha='a83c202335eb602d6b1c5858a984eaa105f5d169';
 const observed={repository:'ibboabdoli-ai/Proffera',pr:962,headSha:sha,
- status:'completed',coverage:{complete:true},findings:[]};
+ status:'completed',findings:[]};
+// Synthetic eligibility metadata exercises the scorer, not historical recall.
+const synthetic={...observed,coverage:{complete:true,eligible:2,analyzed:2,excluded:[]}};
 
-test('PR962 same-HEAD historical recall is honestly 0/2, not validated as improved',()=>{
- const scored=scoreReviewQualitySameHead(gold,observed);
- assert.equal(scored.referenceCount,2);
- assert.equal(scored.detected,0);
- assert.equal(scored.recall,0);
- assert.deepEqual(scored.missed,['duplicate-reviewed-commit-wakeup','missing-negative-duplicate-receipt-test']);
+test('PR962 historical result is ineligible without recorded coverage evidence',()=>{
+ assert.throws(()=>scoreReviewQualitySameHead(gold,observed),/coverage/);
  assert.equal(gold.baseline.reviewId,10);
  assert.equal(gold.baseline.headSha,sha);
 });
@@ -29,7 +27,7 @@ test('a wrong PR, repository or HEAD cannot inflate the strict benchmark score',
   {path:'tests/codex-review-receipt-gate.test.ts',line:94,
    title:'Missing negative test',body:'The fixture lacks a malformed second marker.'}
  ];
- const clean={...observed,findings};
+ const clean={...synthetic,findings};
  assert.equal(scoreReviewQualitySameHead(gold,clean).detected,2);
  // The legacy raw-array API cannot check identity; the strict API must.
  assert.equal(scoreReviewQuality(gold,findings).detected,2);
@@ -80,7 +78,10 @@ test('strict PR962 CLI scores matching SHA and rejects stale snapshots without A
   return spawnSync(process.execPath,[executable,'--pr','962',path],{encoding:'utf8'});
  };
  try{
-  const valid=run('matching',{...observed,findings});
+  const historical=run('historical',observed);
+  assert.equal(historical.status,2);
+  assert.match(historical.stderr,/coverage/);
+  const valid=run('matching',{...synthetic,findings});
   assert.equal(valid.status,0,valid.stderr);
   assert.equal(JSON.parse(valid.stdout).detected,2);
   const stale=run('other-head',{...observed,headSha:'b'.repeat(40),findings});
