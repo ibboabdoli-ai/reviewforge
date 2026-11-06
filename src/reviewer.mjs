@@ -22,6 +22,7 @@ export function redactKnownTokens(patch){
 // Inline findings currently require an added line in the affected hunk.
 // An addition in another hunk cannot anchor a removed guard here. Until
 // deleted-line findings are supported, keep these changes explicitly partial.
+/** Detect a deleted-only hunk with no added-line anchor; ignore file headers. */
 function hasDeletionOnlyHunk(patch){
   let inHunk=false,removed=false,added=false;
   for(const line of patch.split('\n')){
@@ -64,6 +65,9 @@ function priority(path){
   if(/(?:^|\/)(?:tests?|e2e|__tests__|docs?)(?:\/|\.)|\.(?:md|mdx)$/i.test(path))return 2;
   return 1;
 }
+/** Select bounded, redacted patches and report any unsupported eligible changes.
+ * Selection counts describe preflight capacity, not completed model analysis.
+ */
 export function selectFilesForReview(changedFiles){
   if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,unanchoredDeletions:0,complete:true};
@@ -103,6 +107,7 @@ export function selectFilesForReview(changedFiles){
 }
 // Compatibility for callers that only require the bounded payload.
 export function safeFiles(files){return selectFilesForReview(files).files;}
+/** Explain selected/excluded files and incomplete coverage without claiming AI execution. */
 export function coverageSummary(c){
   if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed, image or sensitive path(s) ignored.`;
   return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. ${c.removedWorkflows||0} removed workflow file(s) not reviewed. ${c.removedCode||0} removed source/config file(s) not reviewed. ${c.sensitiveUnreviewed||0} sensitive path(s) withheld from AI review. ${c.unanchoredDeletions||0} file(s) with deletion-only hunks lack reportable anchors. Unchecked changes may contain bugs.`;
@@ -263,6 +268,10 @@ const schema={type:'object',additionalProperties:false,required:['summary','find
     category:{type:'string'},title:{type:'string'},body:{type:'string'},confidence:{type:'number'}
   }}}
 }};
+/** Request a bounded structured review and validate findings against added lines.
+ * Reject unfinished provider responses and malformed result envelopes; callers
+ * must not publish a verdict or replay paid work after such failures.
+ */
 export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null}={}) {
   if(!config.openai.apiKey)throw new Error('OPENAI_API_KEY is not configured; AI review was not run.');
   if(!files.length)return {summary:'No reviewable text changes found.',findings:[]};

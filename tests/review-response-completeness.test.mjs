@@ -6,6 +6,7 @@ import { analyzePullRequestStep } from '../src/incremental-review.mjs';
 
 const files=[{filename:'src/auth.mjs',patch:'@@ -1 +1 @@\n-oldCheck();\n+newCheck();'}];
 const clean={summary:'No defects found.',findings:[]};
+/** Run an offline provider-response scenario and restore credentials/fetch even on failure. */
 async function mockResponse(data,run){
   const key=config.openai.apiKey,fetch=globalThis.fetch;
   config.openai.apiKey='synthetic-offline-only';

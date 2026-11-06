@@ -118,8 +118,13 @@ Null means unknown, never zero. Do not put tokens, private source or customer
 records in exported evidence. Preflight-selected files are not analyzed files.
 An aggregate `coverage.complete` cannot substitute for listing exclusions.
 The stricter `scoreReviewQualitySameHead` now requires `status: completed` and
-`coverage.complete: true` in addition to exact identity. Earlier snapshots
+`coverage.complete: true`, equal nonnegative integer `eligible`/`analyzed`
+counts, and an empty `excluded` array in addition to exact identity. This strict
+scorer does not certify selective reviews with exclusions. Earlier snapshots
 without evidence of those fields must be rejected, not upgraded by assumption.
+In particular, the archived PR 962 baseline does not record complete coverage:
+its empty findings are historical observations, not an eligible 0/2 recall score.
+Tests using complete coverage metadata are explicitly synthetic.
 
 - Precision: genuine adjudicated findings / all adjudicated reported findings;
   count duplicates separately. Report runtime and test-gap precision separately.

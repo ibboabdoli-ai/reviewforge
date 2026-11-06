@@ -13,7 +13,9 @@ const repo=resolve(process.argv[2]);
 const names=['audit-cursor','customer-ledger','half-open-range','hmac-verify','retry-backoff'];
 const files=new Map(names.flatMap(name=>['src/lib/'+name+'.mjs','tests/'+name+'.test.mjs'])
   .map(path=>[path,execFileSync('git',['-C',repo,'show',sha+':'+path],{encoding:'utf8'})]));
-const root=mkdtempSync(join(tmpdir(),'reviewforge-precision-'));
+const temporaryBase=resolve(tmpdir());
+const root=mkdtempSync(join(temporaryBase,'reviewforge-precision-'));
+/** Materialize inspected fixture files and optional replacements in an isolated variant. */
 function variant(name,changes={}){
   const dir=join(root,name);
   for(const [path,text] of files){
@@ -22,15 +24,18 @@ function variant(name,changes={}){
   }
   return dir;
 }
+/** Replace exactly one expected source fragment, rejecting fixture drift. */
 function replaceOnce(path,before,after){
   const source=files.get(path);assert.equal(source.split(before).length,2);
   return source.replace(before,after);
 }
+/** Run the fixture's original tests with a deadline; throw on failure or timeout. */
 function existingTests(dir){
   const result=spawnSync(process.execPath,['--test',...names.map(n=>'tests/'+n+'.test.mjs')],
     {cwd:dir,encoding:'utf8',timeout:15000});
   assert.equal(result.status,0,result.error?.message||result.stderr||result.stdout);
 }
+/** Import a variant by file URL so Windows drive paths and spaces remain valid. */
 async function moduleAt(dir,name){return import(pathToFileURL(join(dir,'src/lib/'+name+'.mjs')).href);}
 
 try{
@@ -76,7 +81,7 @@ try{
       'The cursor repair is a local witness, not a model-generated or published fix.']},null,2));
 }finally{
   // Delete only the dedicated temporary directory created by this process.
-  assert.equal(dirname(resolve(root)),resolve(tmpdir()));
-  assert.ok(resolve(root).startsWith(join(resolve(tmpdir()),'reviewforge-precision-')));
+  assert.equal(dirname(resolve(root)),temporaryBase);
+  assert.ok(resolve(root).startsWith(join(temporaryBase,'reviewforge-precision-')));
   rmSync(root,{recursive:true,force:true});
 }
