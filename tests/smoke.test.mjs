@@ -5,6 +5,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {randomBytes} from 'node:crypto';
+import {once} from 'node:events';
 
 const root=resolve(import.meta.dirname,'..');
 test('HTTP landing, isolated demo, CSRF, diff review, and security headers',async()=>{
@@ -36,5 +37,12 @@ test('HTTP landing, isolated demo, CSRF, diff review, and security headers',asyn
     assert.equal(checked.status,303);
     const review=await fetch(origin+checked.headers.get('location'),{headers:{Cookie:session}});assert.equal(review.status,200);
     assert.match(await review.text(),/Use of eval detected/);
-  }finally{child.kill('SIGTERM');rmSync(dir,{force:true,recursive:true});}
+  }finally{
+    // kill() requests termination; Windows can still hold the SQLite files
+    // until the process exits. Wait before removing its temporary database.
+    const closed=child.exitCode===null&&child.signalCode===null?once(child,'close'):null;
+    child.kill('SIGTERM');
+    if(closed)await closed;
+    rmSync(dir,{force:true,recursive:true});
+  }
 });
