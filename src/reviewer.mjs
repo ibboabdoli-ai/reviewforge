@@ -45,7 +45,7 @@ const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
 // Trust/ownership and container build files often have no extension; SQL
 // migration removals can delete access controls. Count these as unreviewed
 // instead of silently allowing a clean verdict.
-const REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$)/i;
+// Some permission and deployment gates are extensionless executables,\n// especially under bin/ and scripts/. Their removal has no reportable added\n// line; do not classify it as an ordinary deleted document.\nconst REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$|(?:^|\/)(?:bin|scripts)\/(?:[^/]+\/)*[^/.]+$)/i;
 function isRemovedSource(file){
   return file?.status==='removed' && typeof file.filename==='string' &&
     REMOVED_SOURCE_PATH.test(file.filename) && !SKIPPED_PATH.test(file.filename) &&
