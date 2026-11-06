@@ -49,7 +49,9 @@ export async function processStripeEvent(db,raw,header,{retrieveSubscription:ret
       const incoming=verifiedSubscription(await retrieve(obj.id),obj.id,userId);
       if(obj.customer!==incoming.customer)throw new Error('Stripe customer cannot be verified');
       const current=await locked.prepare('SELECT stripe_customer_id,stripe_subscription_id FROM subscriptions WHERE user_id=?').get(userId);
-      if(current?.stripe_customer_id && current.stripe_customer_id!==incoming.customer)
+      if(current && (!/^cus_[\w]+$/.test(current.stripe_customer_id)||!/^sub_[\w]+$/.test(current.stripe_subscription_id)))
+        throw new Error('Stored Stripe subscription identity cannot be verified');
+      if(current && current.stripe_customer_id!==incoming.customer)
         throw new Error('Stripe customer does not match billing owner');
       if(current?.stripe_subscription_id && current.stripe_subscription_id!==incoming.id){
         const previous=verifiedSubscription(await retrieve(current.stripe_subscription_id),current.stripe_subscription_id,userId);
@@ -61,9 +63,10 @@ export async function processStripeEvent(db,raw,header,{retrieveSubscription:ret
         }
       }
       if(current){
-        await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,updated_at=CURRENT_TIMESTAMP
+        const changed=await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,updated_at=CURRENT_TIMESTAMP
           WHERE user_id=? AND stripe_subscription_id=? AND stripe_customer_id=?`)
           .run(incoming.customer,incoming.id,incoming.status,userId,current.stripe_subscription_id,current.stripe_customer_id);
+        if(!changed.changes)throw new Error('Stripe subscription changed concurrently; retry event');
       }else{
         await locked.prepare(`INSERT INTO subscriptions(user_id,stripe_customer_id,stripe_subscription_id,status)
           VALUES(?,?,?,?)`).run(userId,incoming.customer,incoming.id,incoming.status);
