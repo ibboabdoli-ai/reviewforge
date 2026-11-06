@@ -103,30 +103,42 @@ export function openDatabase(file) {
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
-  // BEGIN IMMEDIATE serializes the quota count and review/job insertion across
-  // SQLite connections. The callback contains no awaits while the lock is held.
-  db.reserveReview=({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false})=>{
-    db.exec('BEGIN IMMEDIATE');
+  // BEGIN IMMEDIATE serializes the count and inserts across SQLite connections.
+  // Retry without blocking the event loop while another writer holds the lock.
+  db.reserveReview=async({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false})=>{
+    const locked=new DatabaseSync(file);
+    locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+    let started=false;
     try{
-      const repo=db.prepare("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=? AND p.installation_id=? AND p.enabled=1 AND i.status='active'").get(repositoryId,installationId);
+      const deadline=Date.now()+25000;
+      for(;;){
+        try{locked.exec('BEGIN IMMEDIATE');started=true;break;}
+        catch(error){
+          if(!/database (?:table )?is locked/i.test(error.message) || Date.now()>=deadline)
+            throw error;
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+      }
+      const repo=locked.prepare("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=? AND p.installation_id=? AND p.enabled=1 AND i.status='active'").get(repositoryId,installationId);
       if(!repo)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
-      const existing=db.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(repositoryId,prNumber,headSha);
+      const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(repositoryId,prNumber,headSha);
       let result;
       if(existing)result={id:existing.id,created:false,manual:!!existing.manual_id};
       else{
-        const status=db.prepare('SELECT status FROM subscriptions WHERE user_id=?').get(repo.owner_user_id)?.status;
+        const status=locked.prepare('SELECT status FROM subscriptions WHERE user_id=?').get(repo.owner_user_id)?.status;
         const limit=status==='active'||status==='trialing'?500:10;
-        const used=db.prepare("SELECT COUNT(*) AS total FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? AND r.created_at>=datetime('now','start of month')").get(repo.owner_user_id).total;
+        const used=locked.prepare("SELECT COUNT(*) AS total FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? AND r.created_at>=datetime('now','start of month')").get(repo.owner_user_id).total;
         if(!unlimited && Number(used)>=limit)throw Object.assign(new Error('Monthly review limit reached.'),{status:429});
-        const inserted=db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status,summary) VALUES(?,?,?,?,?,?,'queued',?) RETURNING id")
+        const inserted=locked.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status,summary) VALUES(?,?,?,?,?,?,'queued',?) RETURNING id")
           .get(installationId,repositoryId,prNumber,title,author,headSha,manual?'Manual shadow review requested; no GitHub posting.':'');
-        if(manual)db.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(inserted.id);
-        db.prepare('INSERT INTO jobs(review_id) VALUES(?)').run(inserted.id);
+        if(manual)locked.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(inserted.id);
+        locked.prepare('INSERT INTO jobs(review_id) VALUES(?)').run(inserted.id);
         result={id:inserted.id,created:true,manual};
       }
-      db.exec('COMMIT');
+      locked.exec('COMMIT');started=false;
       return result;
-    }catch(error){db.exec('ROLLBACK');throw error;}
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked.close();}
   };
   return db;
 }
