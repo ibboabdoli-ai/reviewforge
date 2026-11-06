@@ -51,7 +51,7 @@ test('the actual structured model request includes the review-evidence rule once
      assert.match(String(url),/\/responses$/);
      requests++;
      sent=JSON.parse(options.body);
-     return {ok:true,json:async()=>({output:[{content:[{
+     return {ok:true,json:async()=>({status:'completed',output:[{content:[{
        type:'output_text',text:JSON.stringify({summary:'Synthetic clean response',findings:[]})
      }]}]})};
    };

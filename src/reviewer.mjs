@@ -263,10 +263,17 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
   });
   const data=await res.json();
   if(!res.ok)throw new Error(`AI request failed (${res.status}): ${(data.error?.message||'unknown').slice(0,150)}`);
+  // HTTP success and parseable JSON do not establish a finished review.
+  // Incomplete/failed provider output must never reach a clean verdict or
+  // fallback approval. The staged caller marks this failure non-retryable.
+  if(data?.status!=='completed' || data.error || data.incomplete_details)
+    throw new Error('AI response did not complete; no review verdict is available.');
   const raw=data.output_text ?? (data.output?.flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('') || '');
   if(!raw)throw new Error('AI response contained no review text');
   const result=JSON.parse(raw);
-  const rawFindings=Array.isArray(result.findings)?result.findings:[];
+  if(!result || Array.isArray(result) || typeof result.summary!=='string' ||
+     !Array.isArray(result.findings))throw new Error('Invalid AI review result; no review verdict is available.');
+  const rawFindings=result.findings;
   const findings=validateFindings(rawFindings,files);
   // Counts only; no raw model response, source code or credentials persisted.
   return {summary:String(result.summary||'Review complete.').slice(0,600),findings,

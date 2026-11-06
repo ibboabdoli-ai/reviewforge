@@ -112,7 +112,7 @@ test('one mocked AI request contains independent behavioral and test-mutation ch
      requests++;
      assert.match(url,/\/responses$/);
      requestBody=JSON.parse(request.body);
-     return {ok:true,json:async()=>({output:[{content:[{
+     return {ok:true,json:async()=>({status:'completed',output:[{content:[{
        type:'output_text',text:JSON.stringify({summary:'No finding from synthetic fixture.',findings:[]})
      }]}]})};
    };

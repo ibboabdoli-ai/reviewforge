@@ -51,7 +51,7 @@ test('OpenAI structured result is validated before findings are accepted',async(
       called=true;assert.match(url,/\/responses$/);
       const body=JSON.parse(request.body);
       assert.equal(body.store,false);assert.equal(body.text.format.type,'json_schema');
-      return {ok:true,json:async()=>({output:[{content:[{type:'output_text',text:JSON.stringify({summary:'One concrete issue',findings:[
+      return {ok:true,json:async()=>({status:'completed',output:[{content:[{type:'output_text',text:JSON.stringify({summary:'One concrete issue',findings:[
         {path:'lib/auth.ts',line:2,severity:'high',category:'security',title:'Secret in log',body:'Credentials may be logged if this executes.',confidence:.91},
         {path:'lib/auth.ts',line:99,severity:'critical',category:'security',title:'Fake finding',body:'Should not survive grounding.',confidence:.99}
       ]})}]}]})};
