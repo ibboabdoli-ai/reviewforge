@@ -53,8 +53,8 @@ test('same-HEAD 422 fallback retains the validated finding instead of silently d
   const fallback=calls.filter(c=>c.endpoint.endsWith('/issues/17/comments')&&c.method==='POST');
   assert.equal(fallback.length,1);
   const posted=fallback[0].body.body;
-  assert.match(posted,/src\\/receipt-gate\\.ts/);
-  assert.match(posted,/line\\s*9|:9\\b/i);
+  assert.match(posted,/src\/receipt-gate\.ts/);
+  assert.match(posted,/line\s*9|:9\b/i);
   assert.match(posted,/Reject stale review receipt/);
   assert.match(posted,/mismatched reviewed commit/);
 });
