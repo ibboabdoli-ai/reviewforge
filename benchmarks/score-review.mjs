@@ -43,6 +43,8 @@ export function scoreReviewQualitySameHead(reference,snapshot){
    reference.repository!==snapshot.repository || reference.pr!==snapshot.pr ||
    String(reference.headSha||'').toLowerCase()!==snapshot.headSha.toLowerCase())
    throw new Error('Benchmark requires same PR and HEAD SHA; refusing cross-commit comparison');
+ if(snapshot.status!=='completed' || snapshot.coverage?.complete!==true)
+   throw new Error('Benchmark requires a completed review with verified complete coverage');
  return scoreReviewQuality(reference,snapshot.findings);
 }
 

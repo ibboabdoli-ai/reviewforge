@@ -9,7 +9,8 @@ import {scoreReviewQuality,scoreReviewQualitySameHead} from '../benchmarks/score
 
 const gold=JSON.parse(readFileSync(new URL('../benchmarks/proffera-pr962-gold.json',import.meta.url),'utf8'));
 const sha='a83c202335eb602d6b1c5858a984eaa105f5d169';
-const observed={repository:'ibboabdoli-ai/Proffera',pr:962,headSha:sha,findings:[]};
+const observed={repository:'ibboabdoli-ai/Proffera',pr:962,headSha:sha,
+ status:'completed',coverage:{complete:true},findings:[]};
 
 test('PR962 same-HEAD historical recall is honestly 0/2, not validated as improved',()=>{
  const scored=scoreReviewQualitySameHead(gold,observed);
