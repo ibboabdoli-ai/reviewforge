@@ -114,9 +114,15 @@ export function openDatabase(file) {
     let started=false;
     try{
       locked=new DatabaseSync(file);
-      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;');
-      locked.exec('BEGIN IMMEDIATE');
-      started=true;
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+      const deadline=Date.now()+25000;
+      for(;;){
+        try{locked.exec('BEGIN IMMEDIATE');started=true;break;}
+        catch(error){
+          if(!/database (?:table )?is locked/i.test(error.message) || Date.now()>=deadline)throw error;
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+      }
       if(!locked.prepare('SELECT id FROM users WHERE id=?').get(userId))
         throw new Error('Stripe billing owner does not exist');
       const result=await work(locked);

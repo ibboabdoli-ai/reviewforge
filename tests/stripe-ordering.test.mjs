@@ -25,7 +25,7 @@ function fixture(){
   ]);
   const retrieveSubscription=async id=>objects.get(id);
   const send=(id,type,sub)=>processStripeEvent(db,...signed(id,type,sub),{retrieveSubscription});
-  return {db,objects,send,dispose(){config.stripe.webhookSecret=old;db.close();rmSync(dir,{recursive:true,force:true});}};
+  return {db,path:join(dir,'db.sqlite'),objects,send,dispose(){config.stripe.webhookSecret=old;db.close();rmSync(dir,{recursive:true,force:true});}};
 }
 test('old subscription deletion cannot replace a newer active subscription',async()=>{
   const f=fixture();try{
@@ -102,6 +102,24 @@ test('concurrent webhooks for one owner serialize current-state reads and writes
     assert.equal(await activePlan(f.db,1),'free');
     assert.equal(calls,2);
   }finally{f.dispose();}
+});
+test('separate SQLite connections process webhooks without blocking the event loop',async()=>{
+  const f=fixture(),second=openDatabase(f.path);try{
+    let started,release;
+    const entered=new Promise(resolve=>{started=resolve;});
+    const hold=new Promise(resolve=>{release=resolve;});
+    const first=processStripeEvent(f.db,...signed('evt_conn_one','customer.subscription.created','sub_new'),{
+      retrieveSubscription:async()=>{started();await hold;return {...f.objects.get('sub_new'),status:'active'};}
+    });
+    await entered;
+    const next=processStripeEvent(second,...signed('evt_conn_two','customer.subscription.deleted','sub_new'),{
+      retrieveSubscription:async()=>({...f.objects.get('sub_new'),status:'canceled'})
+    });
+    await new Promise(resolve=>setTimeout(resolve,75));
+    release();
+    await Promise.all([first,next]);
+    assert.equal(await activePlan(f.db,1),'free');
+  }finally{second.close();f.dispose();}
 });
 test('unverifiable replacement order or Stripe outage leaves state and event unmodified',async()=>{
   const f=fixture();try{
