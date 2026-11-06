@@ -19,6 +19,22 @@ export function redactKnownTokens(patch){
   return patch.replace(/sk-(?:proj-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}/g,'[REDACTED_TOKEN]')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi,'$1[REDACTED_TOKEN]');
 }
+// Inline findings currently require an added line in the affected hunk.
+// An addition in another hunk cannot anchor a removed guard here. Until
+// deleted-line findings are supported, keep these changes explicitly partial.
+function hasDeletionOnlyHunk(patch){
+  let inHunk=false,removed=false,added=false;
+  for(const line of patch.split('\n')){
+    if(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)){
+      if(removed&&!added)return true;
+      inHunk=true;removed=false;added=false;
+    }else if(inHunk){
+      if(line.startsWith('-'))removed=true;
+      if(line.startsWith('+'))added=true;
+    }
+  }
+  return removed&&!added;
+}
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
@@ -46,7 +62,7 @@ function priority(path){
 }
 export function selectFilesForReview(changedFiles){
   if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
-  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,complete:true};
+  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,unanchoredDeletions:0,complete:true};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
     // Never send sensitive patches to the model. Their presence also prevents
@@ -65,6 +81,7 @@ export function selectFilesForReview(changedFiles){
     }
     coverage.reviewable++;
     if(typeof file.patch!=='string' || !file.patch.trim()){coverage.missingPatch++;continue;}
+    if(hasDeletionOnlyHunk(file.patch)){coverage.unanchoredDeletions++;continue;}
     // Do not cut file hunks into invalid patches. Mark the review partial.
     if(file.patch.length>MAX_FILE_PATCH){coverage.oversized++;continue;}
     candidates.push({index,filename:file.filename,patch:redactKnownTokens(file.patch)});
@@ -77,14 +94,14 @@ export function selectFilesForReview(changedFiles){
     files.push({filename:f.filename,patch:f.patch});used+=f.patch.length;
   }
   coverage.reviewed=files.length;
-  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0 && coverage.removedWorkflows===0 && coverage.removedCode===0 && coverage.sensitiveUnreviewed===0;
+  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0 && coverage.removedWorkflows===0 && coverage.removedCode===0 && coverage.sensitiveUnreviewed===0 && coverage.unanchoredDeletions===0;
   return {files,coverage};
 }
 // Compatibility for callers that only require the bounded payload.
 export function safeFiles(files){return selectFilesForReview(files).files;}
 export function coverageSummary(c){
   if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed, image or sensitive path(s) ignored.`;
-  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. ${c.removedWorkflows||0} removed workflow file(s) not reviewed. ${c.removedCode||0} removed source/config file(s) not reviewed. ${c.sensitiveUnreviewed||0} sensitive path(s) withheld from AI review. Unchecked changes may contain bugs.`;
+  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. ${c.removedWorkflows||0} removed workflow file(s) not reviewed. ${c.removedCode||0} removed source/config file(s) not reviewed. ${c.sensitiveUnreviewed||0} sensitive path(s) withheld from AI review. ${c.unanchoredDeletions||0} file(s) with deletion-only hunks lack reportable anchors. Unchecked changes may contain bugs.`;
 }
 /**
  * Plan a PR review as bounded, deterministic batches. This is separate from
@@ -138,7 +155,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   if(!Number.isSafeInteger(maxBatchCharacters)||maxBatchCharacters<MAX_FILE_PATCH||maxBatchCharacters>MAX_TOTAL_PATCH)
     throw new RangeError('Invalid model batch character budget');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
-    missingPatch:0,oversized:0,limited:0,limitedSegments:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,complete:true,batches:0,segments:0,reviewedSegments:0};
+    missingPatch:0,oversized:0,limited:0,limitedSegments:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,unanchoredDeletions:0,complete:true,batches:0,segments:0,reviewedSegments:0};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
     // Never send sensitive patches to the model. Their presence also prevents
@@ -158,6 +175,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
     }
     coverage.reviewable++;
     if(typeof file.patch!=='string'||!file.patch.trim()){coverage.missingPatch++;continue;}
+    if(hasDeletionOnlyHunk(file.patch)){coverage.unanchoredDeletions++;continue;}
     const chunks=splitUnifiedPatch(redactKnownTokens(file.patch));
     if(!chunks){coverage.oversized++;continue;}
     coverage.segments+=chunks.length;
@@ -181,7 +199,7 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   flush();
   coverage.reviewed=seen.size;
   coverage.batches=batches.length;
-  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited&&!coverage.removedWorkflows&&!coverage.removedCode&&!coverage.sensitiveUnreviewed;
+  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited&&!coverage.removedWorkflows&&!coverage.removedCode&&!coverage.sensitiveUnreviewed&&!coverage.unanchoredDeletions;
   return {batches,coverage};
 }
 
