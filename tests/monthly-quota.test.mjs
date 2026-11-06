@@ -78,15 +78,26 @@ test('pro limit and exact shadow exception apply to billing owner',async()=>{
     await assert.rejects(enqueueManualReview(f.db,{...other,prNumber:'104',policy:{...other.policy,aiShadowRepositories:[]}}),/not enabled/);
   }finally{f.dispose();}
 });
-test('automatic reservations share the same owner limit across installations',()=>{
+test('automatic reservations share the same owner limit across installations',async()=>{
   const f=fixture();try{
     f.db.prepare("INSERT INTO installations(id,owner_user_id,account_login) VALUES(11,1,'second')").run();
     f.db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url) VALUES(21,11,'other','second/other','https://github.com/second/other')").run();
     f.used(9);
     const options={installationId:11,repositoryId:21,prNumber:5,title:'Auto',author:'owner',headSha:'e'.repeat(40)};
-    assert.equal(f.db.reserveReview(options).created,true);
-    assert.equal(f.db.reserveReview(options).created,false);
-    assert.throws(()=>f.db.reserveReview({...options,prNumber:6,headSha:'f'.repeat(40)}),/Monthly review limit/);
+    assert.equal((await f.db.reserveReview(options)).created,true);
+    assert.equal((await f.db.reserveReview(options)).created,false);
+    await assert.rejects(f.db.reserveReview({...options,prNumber:6,headSha:'f'.repeat(40)}),/Monthly review limit/);
     assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,1);
   }finally{f.dispose();}
+});
+test('SQLite reservation waits without blocking another writer from completing',async()=>{
+  const f=fixture(),writer=openDatabase(f.path);try{
+    writer.exec('BEGIN IMMEDIATE');
+    const pending=f.db.reserveReview({installationId:10,repositoryId:20,prNumber:110,
+      title:'After writer',author:'owner',headSha:'d'.repeat(40)});
+    await new Promise(resolve=>setTimeout(resolve,75));
+    writer.exec('COMMIT');
+    assert.equal((await pending).created,true);
+    assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,1);
+  }finally{writer.close();f.dispose();}
 });
