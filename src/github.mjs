@@ -122,6 +122,15 @@ export async function postReview({repoFullName,prNumber,headSha,token,summary,fi
     // Fallback is safe only for validation failures, not auth/rate-limit/server errors.
     // Other errors must surface to the bounded retry worker.
     if (approval || !String(e.message).startsWith('GitHub 422:')) throw e;
+    // A rejected inline review may be caused by an obsolete commit. The
+    // generic issue-comment fallback is NOT commit-pinned and would otherwise
+    // publish the stale review after the PR moves or closes. Fail closed.
+    const current=await githubApi(`/repos/${owner}/${repo}/pulls/${prNumber}`,token);
+    if(current.head?.sha!==headSha || current.state!=='open' || current.draft){
+      const stale=new Error('Review summary fallback blocked: PR head or state changed.');
+      stale.nonRetryable=true;
+      throw stale;
+    }
     await githubApi(`/repos/${owner}/${repo}/issues/${prNumber}/comments`,token,{method:'POST',body:{body:body.body+`\n\nInline annotations could not be attached. Please check the ReviewForge dashboard.`}});
     return 'summary';
   }
