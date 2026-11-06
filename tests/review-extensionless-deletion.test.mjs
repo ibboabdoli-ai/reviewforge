@@ -105,9 +105,9 @@ test('deleted manifest guards fail closed before any model or review output',asy
 
 test('removed generated dependency locks cannot silently count as complete coverage',()=>{
   const locks=[
-    {filename:'package-lock.json',status:'removed',patch:'@@ -1 +0,0 @@\\n-old-lock'},
-    {filename:'pnpm-lock.yaml',status:'removed',patch:'@@ -1 +0,0 @@\\n-old-lock'},
-    {filename:'apps/site/yarn.lock',status:'removed',patch:'@@ -1 +0,0 @@\\n-old-lock'}
+    {filename:'package-lock.json',status:'removed',patch:'@@ -1 +0,0 @@\n-old-lock'},
+    {filename:'pnpm-lock.yaml',status:'removed',patch:'@@ -1 +0,0 @@\n-old-lock'},
+    {filename:'apps/site/yarn.lock',status:'removed',patch:'@@ -1 +0,0 @@\n-old-lock'}
   ];
   for(const planner of [selectFilesForReview,planReviewBatches]){
     const result=planner([...locks,modified]);
@@ -120,9 +120,9 @@ test('removed generated dependency locks cannot silently count as complete cover
 
 test('removed lockfiles fail closed before model/quota/post/checkpoints in both pipelines',async()=>{
   const locks=[
-    {filename:'package-lock.json',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
-    {filename:'pnpm-lock.yaml',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
-    {filename:'yarn.lock',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'}
+    {filename:'package-lock.json',status:'removed',patch:'@@ -1 +0,0 @@\n-old'},
+    {filename:'pnpm-lock.yaml',status:'removed',patch:'@@ -1 +0,0 @@\n-old'},
+    {filename:'yarn.lock',status:'removed',patch:'@@ -1 +0,0 @@\n-old'}
   ];
   for(const run of [analyzePullRequest,analyzePullRequestStep]){
     const calls={reservations:0,models:0,posts:0,checkpoints:0};
@@ -148,8 +148,8 @@ test('removed lockfiles fail closed before model/quota/post/checkpoints in both 
 test('routine generated lockfile edits and deleted notes remain excluded',()=>{
   for(const planner of [selectFilesForReview,planReviewBatches]){
     const result=planner([
-      {filename:'package-lock.json',status:'modified',patch:'@@ -1 +1 @@\\n-old\\n+new'},
-      {filename:'docs/release-notes',status:'removed',patch:'@@ -1 +0,0 @@\\n-old'},
+      {filename:'package-lock.json',status:'modified',patch:'@@ -1 +1 @@\n-old\n+new'},
+      {filename:'docs/release-notes',status:'removed',patch:'@@ -1 +0,0 @@\n-old'},
       modified
     ]);
     assert.equal(result.coverage.excluded,2);
