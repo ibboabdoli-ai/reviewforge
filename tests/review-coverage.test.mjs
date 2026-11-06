@@ -267,3 +267,27 @@ test('ordinary deleted documentation stays excluded without blocking full review
     assert.equal(coverage.excluded,1);
   }
 });
+
+// A deleted executable gate is not a benign removed document. The planner
+// cannot assign a clean verdict after discarding its entire removal patch.
+test('deleted executable review gate source must not get a clean verdict',async()=>{
+  const files=[
+    {filename:'src/auth/verify-session.ts',status:'removed',
+      patch:'@@ -1 +0,0 @@\n-export function verifySession() { return false; }'},
+    {filename:'scripts/verify-receipt.sh',status:'removed',
+      patch:'@@ -1 +0,0 @@\n-exit 1'},
+    {filename:'src/api/health.ts',status:'modified',
+      patch:'@@ -1 +1 @@\n-old\n+new'}
+  ];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const {coverage}=planner(files);
+    assert.equal(coverage.removedCode,2,'both removed executable gates must be tracked');
+    assert.equal(coverage.reviewable,3);
+    assert.equal(coverage.complete,false,'deleted executable source cannot be approved as clean');
+  }
+  const m=mock(files);
+  const result=await analyzePullRequest({...target,postMode:'live'},m.dependencies);
+  assert.equal(result.status,'partial');
+  assert.match(result.summary,/removed source\/config file/i);
+  assert.deepEqual(m.calls(),{posts:0,models:0});
+});
