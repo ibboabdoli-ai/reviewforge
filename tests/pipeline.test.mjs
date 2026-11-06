@@ -23,22 +23,24 @@ test('Dry-run performs model analysis but never publishes to GitHub',async()=>{
   assert.equal(result.status,'completed');assert.equal(result.posted,0);
   assert.match(result.summary,/Preview only/);
   assert.equal(result.findings.length,1);
-  assert.deepEqual(d.counts(),{lookups:3,posts:0,analyses:1});
+  assert.deepEqual(d.counts(),{lookups:4,posts:0,analyses:1});
 });
 test('Live mode publishes only after preflight and final HEAD validation',async()=>{
   const d=deps();const result=await analyzePullRequest({...target,postMode:'live'},d.methods);
   assert.equal(result.status,'completed');assert.equal(result.posted,1);
-  assert.deepEqual(d.counts(),{lookups:3,posts:1,analyses:1});
+  assert.deepEqual(d.counts(),{lookups:4,posts:1,analyses:1});
 });
 test('Changed HEAD before paid preflight cannot start model work',async()=>{
   const d=deps([sha,second]);const result=await analyzePullRequest({...target,postMode:'live'},d.methods);
   assert.equal(result.status,'superseded');assert.equal(result.posted,0);
   assert.deepEqual(d.counts(),{lookups:2,posts:0,analyses:0});
 });
+// Four metadata reads now include a new pre-model check after quota reservation.
+// The last read intentionally flips HEAD only after the mocked model returns.
 test('HEAD changing after model still cannot receive stale review comments',async()=>{
-  const d=deps([sha,sha,second]);const result=await analyzePullRequest({...target,postMode:'live'},d.methods);
+  const d=deps([sha,sha,sha,second]);const result=await analyzePullRequest({...target,postMode:'live'},d.methods);
   assert.equal(result.status,'superseded');assert.equal(result.posted,0);
-  assert.deepEqual(d.counts(),{lookups:3,posts:0,analyses:1});
+  assert.deepEqual(d.counts(),{lookups:4,posts:0,analyses:1});
 });
 test('Invalid targets are rejected before any GitHub access',async()=>{
   await assert.rejects(analyzePullRequest({...target,headSha:'not-a-sha',postMode:'live'},deps().methods),/Invalid review target/);
