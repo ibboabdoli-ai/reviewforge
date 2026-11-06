@@ -121,6 +121,14 @@ export async function analyzePullRequestStep({
             : 'AI daily allowance exhausted; no calls made. Review deferred until the next UTC day.'};
       }
     }
+    // Quota reservation awaits storage; the pull request can move while
+    // awaiting it. Avoid creating a checkpoint or paying for a stale SHA.
+    const afterReservation=await api(pullPath,token);
+    if(afterReservation.head?.sha!==headSha || afterReservation.state!=='open' ||
+       (afterReservation.draft && !allowDraft)) return {
+      status:'superseded',posted:0,findings:[],coverage,
+      summary:'PR changed during quota reservation; no model calls made.'
+    };
     const inserted=await deps.initProgress({
       reviewId,planHash,totalBatches:batches.length
     });
@@ -131,6 +139,14 @@ export async function analyzePullRequestStep({
   }
 
   if(next<batches.length){
+    // Checkpoint reads/writes also await storage and can outlast a PR HEAD.
+    // A final no-cost state check is needed immediately before each model batch.
+    const beforeModel=await api(pullPath,token);
+    if(beforeModel.head?.sha!==headSha || beforeModel.state!=='open' ||
+       (beforeModel.draft && !allowDraft)) return {
+      status:'superseded',posted:0,findings:[],coverage,
+      summary:'PR changed during checkpoint operations; no model calls made.'
+    };
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
