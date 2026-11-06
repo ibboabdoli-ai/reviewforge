@@ -15,7 +15,7 @@ function fixture(){
   db.prepare("INSERT INTO installations(id,owner_user_id,account_login) VALUES(10,1,'example')").run();
   db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url) VALUES(20,10,'private',?,'https://github.com/example/private')").run(repo);
   const policy={aiManualReviewRepositories:[repo],aiShadowRepositories:[repo],aiAllowedRepositories:[repo],aiUnlimitedRepositories:[]};
-  const input={userId:1,repoFullName:repo,prNumber:'100',policy,
+  const input={userId:1,repoFullName:repo,prNumber:'100',policy,repositoryAccess:async()=>new Set([20]),
     installationToken:async()=> 'test-token',fetchPull:async()=>({state:'open',base:{ref:'main'},head:{sha,repo:{full_name:repo}},title:'Test',user:{login:'owner'}})};
   const used=n=>{for(let i=1;i<=n;i++)db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,head_sha) VALUES(10,20,?,'Previous',?)").run(i,'b'.repeat(39)+(i%10));};
   return {db,path:join(dir,'db.sqlite'),input,used,dispose(){db.close();rmSync(dir,{recursive:true,force:true});}};
