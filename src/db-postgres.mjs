@@ -37,6 +37,22 @@ export async function openPostgres(url){
       error='Worker timed out; automatic paid replay is prohibited.'
     WHERE id IN (SELECT review_id FROM expired) AND status='running'`,[Date.now()]);
   return {
+    async withSubscriptionLock(userId,work){
+      const client=await sharedPool.connect();
+      try{
+        await client.query('BEGIN');
+        const owner=await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[userId]);
+        if(!owner.rows.length)throw new Error('Stripe billing owner does not exist');
+        const locked={prepare(sql){return {
+          async get(...args){const result=await client.query(sqlForPostgres(sql),args);return result.rows[0];},
+          async run(...args){const result=await client.query(sqlForPostgres(sql),args);return {changes:result.rowCount||0};}
+        };}};
+        const result=await work(locked);
+        await client.query('COMMIT');
+        return result;
+      }catch(error){await client.query('ROLLBACK');throw error;}
+      finally{client.release();}
+    },
     async reconcileExpiredJobs(){
       const result=await reconcileExpiredJobs();
       return result.rowCount||0;
