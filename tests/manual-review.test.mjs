@@ -25,6 +25,7 @@ function fixture(){
  db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(100,42,'Proffera',?,'https://github.com/ibboabdoli-ai/Proffera',0,1)").run(repo);
  let called=0;
  const input={userId:1,repoFullName:repo,prNumber:'943',policy,
+  repositoryAccess:async (_db,user)=>new Set(user.id===1?[100]:[]),
   installationToken:async id=>{assert.equal(id,42);return 'test-installation-token';},
   fetchPull:async(path,token)=>{called++;assert.equal(path,'/repos/'+repo+'/pulls/943');assert.equal(token,'test-installation-token');return {
    state:'open',draft:true,base:{ref:'main'},head:{sha,repo:{full_name:repo}},title:'Maria preview',user:{login:'ibbo'}
@@ -107,7 +108,7 @@ test('authenticated manual handler wakes only an owned, already-queued, non-post
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
  assert.match(source,/created\.created\?null:await db\.prepare\(/);
  assert.match(source,/JOIN manual_review_requests m ON m\.review_id=r\.id/);
- assert.match(source,/JOIN installations i ON i\.id=r\.installation_id WHERE r\.id=\? AND i\.owner_user_id=\?/);
+ assert.match(source,/JOIN manual_review_requests m ON m\.review_id=r\.id WHERE r\.id=\?/);
  assert.match(source,/prior\?\.job_status==='queued'/);
  assert.match(source,/prior\?\.review_status==='queued'/);
  assert.match(source,/Number\(prior\.posted\)===0/);

@@ -1,4 +1,5 @@
 import { repositoryAllowed } from './review-policy.mjs';
+import { authorizedRepositoryIds } from './github.mjs';
 
 /**
  * Manual requests are never GitHub approvals. A durable DB marker identifies
@@ -15,13 +16,16 @@ export function validPrNumber(value) {
   const number=Number(str);
   return Number.isSafeInteger(number)?number:null;
 }
-export async function enqueueManualReview(db,{userId,repoFullName,prNumber,expectedHeadSha=null,policy,fetchPull,installationToken}){
+export async function enqueueManualReview(db,{userId,repoFullName,prNumber,expectedHeadSha=null,policy,fetchPull,installationToken,repositoryAccess=authorizedRepositoryIds}){
   if(!manualReviewAllowed(repoFullName,policy))throw Object.assign(new Error('Manual review is not enabled for this repository.'),{status:403});
   const number=validPrNumber(prNumber);
   if(!number)throw Object.assign(new Error('Invalid PR number.'),{status:400});
-  // Ownership is checked server-side: never trust repository or installation IDs from the form.
-  const repo=await db.prepare("SELECT p.id,p.installation_id,p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.full_name=? AND i.owner_user_id=? AND i.status='active' AND p.enabled=1").get(repoFullName,userId);
+  // Installation ownership is for billing, not individual GitHub access.
+  const user=await db.prepare('SELECT * FROM users WHERE id=?').get(userId);
+  const repo=await db.prepare("SELECT p.id,p.installation_id,p.full_name FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.full_name=? AND i.status='active' AND p.enabled=1").get(repoFullName);
   if(!repo)throw Object.assign(new Error('Repository not accessible for manual review.'),{status:403});
+  if(!user || !(await repositoryAccess(db,user)).has(Number(repo.id)))
+    throw Object.assign(new Error('Repository not accessible for manual review.'),{status:403});
   const token=await installationToken(repo.installation_id);
   const pull=await fetchPull('/repos/'+repo.full_name+'/pulls/'+number,token);
   const head=pull.head?.sha;

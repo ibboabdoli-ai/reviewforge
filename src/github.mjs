@@ -48,52 +48,66 @@ export async function installationToken(installationId) {
   const data=await githubApi(`/app/installations/${Number(installationId)}/access_tokens`,githubAppJwt(),{method:'POST'});
   return data.token;
 }
-export async function installationsForUser(db,user) {
-  const token=await githubUserToken(db,user);
+export async function installationsForUser(db,user,{api=githubApi,userToken=githubUserToken}={}) {
+  const token=await userToken(db,user);
   const result=[];
   for(let page=1;page<=5;page++) {
-    const data=await githubApi(`/user/installations?per_page=100&page=${page}`,token);
-    result.push(...(data.installations||[]));
-    if((data.installations||[]).length<100)break;
+    const data=await api(`/user/installations?per_page=100&page=${page}`,token);
+    if(!Array.isArray(data.installations))throw new Error('Invalid GitHub installation list');
+    result.push(...data.installations);
+    if(data.installations.length<100)return {token,installations:result};
   }
-  return {token,installations:result};
+  throw new Error('GitHub installation list exceeded pagination bound');
 }
-export async function syncInstallations(db,user) {
-  const {token,installations}=await installationsForUser(db,user);
+/** Live user-to-server GitHub access, never installation ownership, gates reads. */
+export async function authorizedRepositoryIds(db,user,{api=githubApi,userToken=githubUserToken}={}){
+  // PostgreSQL returns BIGINT identifiers as strings; SQLite returns numbers.
+  if(!Number.isSafeInteger(Number(user?.id))||Number(user?.id)<=0||
+     !Number.isSafeInteger(Number(user?.github_id))||Number(user?.github_id)<=0)return new Set();
+  const current=await db.prepare('SELECT * FROM users WHERE id=? AND github_id=?').get(user.id,user.github_id);
+  if(!current)return new Set();
+  const {token,installations}=await installationsForUser(db,current,{api,userToken});
+  const active=await db.prepare("SELECT id FROM installations WHERE status='active'").all();
+  const activeIds=new Set(active.map(row=>Number(row.id)));
+  const ids=new Set();
+  for(const inst of installations){
+    if(!activeIds.has(Number(inst.id)))continue;
+    for(let page=1;page<=5;page++){
+      const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
+      if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
+      for(const repo of data.repositories)if(Number.isSafeInteger(repo.id))ids.add(repo.id);
+      if(data.repositories.length<100)break;
+      if(page===5)throw new Error('GitHub repository list exceeded pagination bound');
+    }
+  }
+  return ids;
+}
+export async function syncInstallations(db,user,{api=githubApi,userToken=githubUserToken}={}) {
+  const {token,installations}=await installationsForUser(db,user,{api,userToken});
   let linked=0,repoCount=0;
   for(const inst of installations) {
-    const accessibleIds=[];
-    const current=await db.prepare('SELECT owner_user_id FROM installations WHERE id=?').get(inst.id);
-    if(current && current.owner_user_id!==user.id)continue;
+    // The first linked user remains the billing owner, not the only member.
     await db.prepare(`INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(?,?,?,'active')
       ON CONFLICT(id) DO UPDATE SET account_login=excluded.account_login,status='active'`).run(inst.id,user.id,inst.account?.login||'unknown');
     linked++;
-    // Only show repositories the signed-in user can actually access.
+    // A member's visibility cannot disable repositories for other members.
     for(let page=1;page<=5;page++) {
-      const data=await githubApi(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
-      const repos=data.repositories||[];
+      const data=await api(`/user/installations/${inst.id}/repositories?per_page=100&page=${page}`,token);
+      if(!Array.isArray(data.repositories))throw new Error('Invalid GitHub repository list');
+      const repos=data.repositories;
       for(const repo of repos) {
         await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled)
           VALUES(?,?,?,?,?,?,1) ON CONFLICT(id) DO UPDATE SET
-          name=excluded.name,full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private`).run(
+          name=excluded.name,full_name=excluded.full_name,html_url=excluded.html_url,private=excluded.private,enabled=1`).run(
           repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
-        accessibleIds.push(repo.id);
         repoCount++;
       }
       if(repos.length<100)break;
+      if(page===5)throw new Error('GitHub repository list exceeded pagination bound');
     }
-    if(accessibleIds.length){
-      const placeholders=accessibleIds.map(()=>'?').join(',');
-      await db.prepare(`UPDATE repositories SET enabled=0 WHERE installation_id=? AND id NOT IN (${placeholders})`).run(inst.id,...accessibleIds);
-      await db.prepare(`UPDATE repositories SET enabled=1 WHERE installation_id=? AND id IN (${placeholders})`).run(inst.id,...accessibleIds);
-    } else await db.prepare('UPDATE repositories SET enabled=0 WHERE installation_id=?').run(inst.id);
   }
-  // Revoked access is not allowed to retain active review entitlement.
-  if(installations.length<500){
-    const ids=installations.map(i=>i.id);
-    if(ids.length)await db.prepare(`UPDATE installations SET status='disconnected' WHERE owner_user_id=? AND id NOT IN (${ids.map(()=>'?').join(',')})`).run(user.id,...ids);
-    else await db.prepare(`UPDATE installations SET status='disconnected' WHERE owner_user_id=?`).run(user.id);
-  }
+  // Signed installation webhooks manage app-wide removal. User access is
+  // checked afresh for each read and manual request.
   return {linked,repoCount};
 }
 export async function changedFiles({repoFullName,prNumber,token}) {
