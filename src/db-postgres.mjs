@@ -2,6 +2,13 @@
 // while making every operation explicitly asynchronous.
 // A pooled connection URL (DATABASE_URL) is expected for serverless traffic.
 let sharedPool;
+let activeStripeTransactions=0;
+export async function withStripePoolSlot(work){
+  // Keep at least two of the three pooled connections available to the app.
+  if(activeStripeTransactions>=1)throw new Error('Stripe webhook busy; retry event');
+  activeStripeTransactions++;
+  try{return await work();}finally{activeStripeTransactions--;}
+}
 function normalize(sql) {
   let i=0;
   // Placeholders are controlled literals in the server, never user-provided SQL.
@@ -38,8 +45,9 @@ export async function openPostgres(url){
     WHERE id IN (SELECT review_id FROM expired) AND status='running'`,[Date.now()]);
   return {
     async withSubscriptionLock(userId,work){
-      const client=await sharedPool.connect();
-      try{
+      return withStripePoolSlot(async()=>{
+        const client=await sharedPool.connect();
+        try{
         await client.query('BEGIN');
         const owner=await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[userId]);
         if(!owner.rows.length)throw new Error('Stripe billing owner does not exist');
@@ -50,8 +58,9 @@ export async function openPostgres(url){
         const result=await work(locked);
         await client.query('COMMIT');
         return result;
-      }catch(error){await client.query('ROLLBACK');throw error;}
-      finally{client.release();}
+        }catch(error){await client.query('ROLLBACK');throw error;}
+        finally{client.release();}
+      });
     },
     async reconcileExpiredJobs(){
       const result=await reconcileExpiredJobs();
