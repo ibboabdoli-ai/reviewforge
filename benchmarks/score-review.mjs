@@ -60,7 +60,7 @@ if(process.argv[1]&&fileURLToPath(import.meta.url)===process.argv[1]){
    // The PR962 gold set is commit-bound; an unlabeled list or omitted
    // snapshot could accidentally count a later commit as recovered recall.
    if(pr==='962'&&!path){
-     console.error('PR962 requires a JSON snapshot with repository, pr, headSha and findings.');
+     console.error('PR962 requires a JSON snapshot with repository, pr, headSha, status=completed, coverage.complete=true and findings.');
      process.exitCode=2;
    }else{
      try{
