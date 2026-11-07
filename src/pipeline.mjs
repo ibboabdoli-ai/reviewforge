@@ -1,6 +1,6 @@
 import { config } from './config.mjs';
 import { githubApi, installationToken, changedFiles, postReview } from './github.mjs';
-import { planReviewBatches, coverageSummary, validateFindings, reviewWithAI } from './reviewer.mjs';
+import { planReviewBatches, coverageSummary, validateFindings, unverifiedModelSuggestions, reviewWithAI } from './reviewer.mjs';
 import { repositoryAllowed } from './review-policy.mjs';
 import { selectReviewModel } from './model-router.mjs';
 
@@ -81,9 +81,11 @@ export async function analyzePullRequest({ repository, number, headSha, installa
     const choice=autoModel?selectReviewModel(part,{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep}):null;
     const response=await ai(part,{batchIndex:index+1,totalBatches:batches.length,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})});
+    const accepted=validateFindings(response.findings,part);
     return {
       summary:'Batch '+(index+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350),
-      findings:validateFindings(response.findings,part)
+      findings:accepted,
+      unverifiedSuggestions:unverifiedModelSuggestions(response,accepted)
     };
   }));
   if(batchResults.some(result=>result.status!=='fulfilled')){
@@ -91,6 +93,7 @@ export async function analyzePullRequest({ repository, number, headSha, installa
     failure.nonRetryable=true;
     throw failure;
   }
+  const unverifiedSuggestions=batchResults.some(result=>result.value.unverifiedSuggestions);
   const summaries=batchResults.map(result=>result.value.summary);
   const rawFindings=batchResults.flatMap(result=>result.value.findings);
   const severityRank={critical:0,high:1,medium:2,low:3};
@@ -102,6 +105,11 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   if (latest.head?.sha!==headSha || (latest.draft && !allowDraft) || latest.state!=='open') {
     return {status:'superseded',summary:'PR changed during analysis; no comments posted.',findings:[],posted:0};
   }
+  if(unverifiedSuggestions)return {
+    status:'partial',posted:0,findings:review.findings,coverage,
+    summary:(postMode==='dry-run'?'[Preview only] ':'')+summary+
+      ' Some AI suggestions failed evidence validation; manual inspection required. No GitHub review or fallback approval posted.'
+  };
   if (!coverage.complete || !batches.length) {
     // Never label a partial scan 'clean' or publish an incomplete review.
     return {status:'partial',summary:(postMode==='dry-run'?'[Preview only] ':'')+summary,findings:review.findings,posted:0,coverage};

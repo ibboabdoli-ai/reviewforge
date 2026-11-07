@@ -217,6 +217,25 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
 }
 
 const severity=['critical','high','medium','low'];
+/** A filtered or unanchored model suggestion is not evidence of a clean PR.
+ * No raw untrusted suggestion is persisted just to enforce this gate.
+ */
+export function unverifiedModelSuggestions(response,validated) {
+  if(!Array.isArray(response?.findings)||!Array.isArray(validated))return true;
+  const stats=response.diagnostics;
+  if(stats){
+    const counts=[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings];
+    if(!counts.every(n=>Number.isSafeInteger(n)&&n>=0) ||
+       stats.modelSuggestions!==stats.acceptedFindings+stats.filteredFindings ||
+       stats.acceptedFindings!==response.findings.length)return true;
+  }
+  // The existing eight-finding publication cap is intentional: it cannot
+  // itself produce a false clean verdict because eight valid findings remain.
+  // Distinguish that cap from suggestions discarded for invalid anchors.
+  const reportableLimit=8;
+  return validated.length<Math.min(response.findings.length,reportableLimit) ||
+    (stats?.filteredFindings??0)>0;
+}
 export function validateFindings(raw,files) {
   // A bounded review batch can contain multiple patch segments of the same
   // file. Union their changed-line anchors instead of discarding all but the
