@@ -16,21 +16,37 @@ export function safeContextPath(path){
   if(SAFE_WORKFLOW.test(path))return !DENIED.test(path.slice('.github/'.length));
   return SAFE_SOURCE.test(path)&&!DENIED.test(path);
 }
-export function importedPaths(sourcePath,sourceText){
+// Candidate alternatives are grouped by import specifier. A syntactically
+// valid .ts path is not evidence that it exists; try the other supported
+// extensions (and index files) before dropping the runtime dependency.
+const IMPORT_EXTENSIONS=['.ts','.tsx','.js','.jsx','.mjs','.cjs'];
+const INDEX_EXTENSIONS=['.ts','.tsx','.js','.jsx'];
+const MAX_IMPORT_RESOLUTION_READS=36;
+function candidateImportPaths(root){
+  const options=/\.[a-z]+$/i.test(root)?[root]:[
+    ...IMPORT_EXTENSIONS.map(ext=>root+ext),
+    ...INDEX_EXTENSIONS.map(ext=>root+'/index'+ext)
+  ];
+  return options.filter(safeContextPath);
+}
+function runtimeImportCandidates(sourcePath,sourceText){
   const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
-  const found=[];
+  const found=[],seen=new Set();
   for(const [,specifier] of matches.slice(0,30)){
     if(specifier.startsWith('@/') && specifier.split('/').includes('..'))continue;
     const root=specifier.startsWith('@/')
       ?posix.normalize('src/'+specifier.slice(2))
       :posix.normalize(posix.join(posix.dirname(sourcePath),specifier));
-    for(const path of (/\.[a-z]+$/i.test(root)?[root]:[root+'.ts',root+'.tsx',root+'.js',root+'/index.ts'])){
-      if(safeContextPath(path) && path!==sourcePath && !found.includes(path)){
-        found.push(path);break;
-      }
-    }
+    const options=candidateImportPaths(root).filter(path=>path!==sourcePath);
+    if(!options.length||seen.has(options[0]))continue;
+    seen.add(options[0]);found.push(options);
   }
   return found;
+}
+// Public compatibility helper: report the preferred candidate path for each
+// import, not a promise that the path exists in the pinned repository.
+export function importedPaths(sourcePath,sourceText){
+  return runtimeImportCandidates(sourcePath,sourceText).map(options=>options[0]);
 }
 export function sourceExcerpt(source,patch,maxChars=2700){
   if(typeof source!=='string'||!source.trim())return '';
@@ -143,9 +159,7 @@ export function testImplementationPaths(testPath,testText){
     if(!spec.startsWith('./')&&!spec.startsWith('../')&&!spec.startsWith('@/'))continue;
     const root=spec.startsWith('@/')?posix.normalize('src/'+spec.slice(2)):
       posix.normalize(posix.join(posix.dirname(testPath),spec));
-    const paths=/\.(?:ts|tsx|js|jsx|mjs|cjs)$/.test(root)?[root]:
-      ['.ts','.tsx','.js','.jsx','.mjs'].map(ext=>root+ext);
-    const safe=paths.filter(p=>safeContextPath(p)&&!isTestPath(p));
+    const safe=candidateImportPaths(root).filter(p=>!isTestPath(p));
     if(!safe.length||seen.has(root))continue;
     seen.add(root);found.push(safe);
     if(found.length>=15)break;
@@ -223,9 +237,10 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   // Test fixtures can import many mocks and must not consume every slot first.
   for(let i=0;i<sources.length;i++){
     if(!sourceBodies[i])continue;
-    for(const path of importedPaths(sources[i].filename,sourceBodies[i])){
-      if(!included.has(path)&&!desired.some(d=>d.options.includes(path)))
-        desired.push({test:null,options:[path]});
+    for(const options of runtimeImportCandidates(sources[i].filename,sourceBodies[i])){
+      if(!options.some(path=>included.has(path)) &&
+         !desired.some(d=>d.options.some(path=>options.includes(path))))
+        desired.push({test:null,options});
     }
   }
   for(let i=0;i<tests.length;i++){
@@ -236,15 +251,17 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     for(const options of testImplementationPaths(tests[i].filename,testBodies[i])){
       const already=options.find(path=>included.has(path));
       if(already)links.push({test:tests[i].filename,implementation:already});
-      else if(!desired.some(d=>d.options[0]===options[0]))
+      else if(!desired.some(d=>d.options.some(path=>options.includes(path))))
         desired.push({test:tests[i].filename,options});
     }
   }
-  let linked=0;
+  let linked=0,attempts=0;
   for(const entry of desired.slice(0,9)){
-    if(linked>=3)break;
-    for(const path of entry.options.slice(0,4)){
+    if(linked>=3||attempts>=MAX_IMPORT_RESOLUTION_READS)break;
+    for(const path of entry.options){
       if(included.has(path))continue;
+      if(attempts>=MAX_IMPORT_RESOLUTION_READS)break;
+      attempts++;
       const body=await fetcher(path);
       if(!body)continue;
       candidates.push({path,kind:entry.test?'test-linked-implementation':'related-import',
