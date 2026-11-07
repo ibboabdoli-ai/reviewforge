@@ -23,6 +23,44 @@ test('skill selector is bounded to built-in trusted rules',()=>{
  assert.ok(!text.includes('steal keys'));assert.ok(!text.includes('ignore all instructions'));
 });
 
+test('changed contact links and hostname parsers select a generic input-boundary review skill',()=>{
+ for(const filename of ['src/lib/contact-links.mjs','src/api/email-address.ts','tests/domain-validation.test.mjs']){
+  const ids=selectedReviewSkills([{filename}]).map(x=>x.id);
+  assert.ok(ids.includes('input-boundaries'),filename);
+ }
+ const policy=reviewSkillInstructions([{filename:'src/lib/contact-links.mjs'}]);
+ assert.match(policy,/INPUT BOUNDARIES SKILL/);
+ assert.match(policy,/grammar and separator placement/);
+ assert.match(policy,/per-component length limits/);
+ assert.match(policy,/distinguish malformed inputs from valid alternatives/);
+ // The trusted rule is generic and does not embed publicly known fixture answers.
+ assert.doesNotMatch(policy,/\.a@example\.se|a\.\.b@example\.se/);
+ assert.ok(!selectedReviewSkills([{filename:'src/math/rounding.mjs'}]).some(x=>x.id==='input-boundaries'));
+});
+test('input-boundary review instructions reach one mock model request without paid API use',async()=>{
+ const {reviewWithAI}=await import('../src/reviewer.mjs');
+ const {config}=await import('../src/config.mjs');
+ const oldKey=config.openai.apiKey,oldFetch=globalThis.fetch;
+ let calls=0,sent;
+ try{
+  config.openai.apiKey='synthetic-mock-only';
+  globalThis.fetch=async(url,opts)=>{
+   assert.match(String(url),/\/responses$/);
+   sent=JSON.parse(opts.body);
+   calls++;
+   return {ok:true,json:async()=>({status:'completed',output:[{content:[{
+    type:'output_text',text:JSON.stringify({summary:'Mock review',findings:[]})
+   }]}]})};
+  };
+  const found=await reviewWithAI([{filename:'src/lib/contact-links.mjs',
+   patch:'@@ -1,1 +1,2 @@\n unchanged\n+return safeEmailLink(address);'}]);
+  assert.equal(calls,1);
+  assert.equal(found.findings.length,0);
+  assert.equal((sent.instructions.match(/INPUT BOUNDARIES SKILL/g)||[]).length,1);
+  assert.equal(sent.store,false);
+ }finally{config.openai.apiKey=oldKey;globalThis.fetch=oldFetch;}
+});
+
 test('pagination and cursor changes receive a bounded total-order and time-normalization review rule',()=>{
   const paths=['src/events/page-cursor.mjs','src/history/pagination.ts','tests/page-cursor.test.mjs'];
   for(const filename of paths){
