@@ -5,13 +5,13 @@ import { resolve } from 'node:path';
 import { config,assertConfig,integrations,production } from './config.mjs';
 import { openConfiguredDatabase, seedDemo,createSession,getUserBySession, allowedReviews } from './db.mjs';
 import { randomToken, cookies,cookie, csrfFor, safeCompare, validOrigin, verifyGithub, sha256 } from './security.mjs';
-import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken } from './github.mjs';
+import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken, upsertInstalledRepository } from './github.mjs';
 import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
 import { enqueueManualReview } from './manual-review.mjs';
-import { requestWorkerReview, getWorkerReviewStatus } from './worker-review.mjs';
+import { requestWorkerReview, getWorkerReviewStatus, workerErrorStatus } from './worker-review.mjs';
 import { analyzePullRequestStep } from './incremental-review.mjs';
-import { checkout,portal,processStripeEvent } from './stripe.mjs';
+import { startCheckout,portal,processStripeEvent,stripeFailureCategory } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
 import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
@@ -88,22 +88,18 @@ async function webhookGithub(req,res){
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
     if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
-      await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private) VALUES(?,?,?,?,?,?)
-        ON CONFLICT(id) DO NOTHING`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
+      await upsertInstalledRepository(db,inst.id,repo);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
-      const allowance=await allowedReviews(db,installed.owner_user_id);
       const shadowUnlimited=isUnlimitedShadowRepository(repo.full_name,{
         allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
         unlimited:config.aiUnlimitedRepositories
       });
-      if(rr&&(allowance.used<allowance.limit||shadowUnlimited)){
-        const row=await db.prepare(`INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status)
-          VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING`).run(inst.id,repo.id,pr.number,pr.title?.slice(0,250)||'',pr.user?.login||'',pr.head?.sha||'');
-        if(row.changes){
-          queued=true;
-          const r=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,pr.number,pr.head.sha);
-          await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(r.id);
-        }
+      if(rr){
+        try{
+          const row=await db.reserveReview({installationId:inst.id,repositoryId:repo.id,prNumber:pr.number,
+            title:pr.title?.slice(0,250)||'',author:pr.user?.login||'',headSha:pr.head?.sha||'',unlimited:shadowUnlimited});
+          queued=row.created;
+        }catch(error){if(error.status!==429)throw error;}
       }
     }
   }
@@ -142,21 +138,15 @@ async function webhookGithub(req,res){
             allPages('pulls/'+prNo+'/reviews'),allPages('pulls/'+prNo+'/comments')
           ]);
           if(!alreadyReviewedExactHead(reviews,inline,head,request.created_at)){
-            const allowance=await allowedReviews(db,installed.owner_user_id);
             const unlimited=isUnlimitedShadowRepository(fullName,{
               allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
               unlimited:config.aiUnlimitedRepositories
             });
-            if(allowance.used<allowance.limit||unlimited){
-              const row=await db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status) VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING")
-                .run(inst.id,repo.id,prNo,String(pull.title||'').slice(0,250),pull.user?.login||'',head);
-              if(row.changes){
-                const inserted=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?')
-                  .get(repo.id,prNo,head);
-                await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(inserted.id);
-                queued=true;
-              }
-            }
+            try{
+              const row=await db.reserveReview({installationId:inst.id,repositoryId:repo.id,prNumber:prNo,
+                title:String(pull.title||'').slice(0,250),author:pull.user?.login||'',headSha:head,unlimited});
+              queued=row.created;
+            }catch(error){if(error.status!==429)throw error;}
           }
         }
       }
@@ -170,8 +160,7 @@ async function webhookGithub(req,res){
     for(const r of payload.repositories_removed||[])await db.prepare('UPDATE repositories SET enabled=0 WHERE id=? AND installation_id=?').run(r.id,payload.installation.id);
     for(const r of payload.repositories_added||[]) {
       const inst=await db.prepare("SELECT id FROM installations WHERE id=? AND status='active'").get(payload.installation.id);
-      if(inst)await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(?,?,?,?,?,?,1)
-        ON CONFLICT(id) DO UPDATE SET enabled=1`).run(r.id,inst.id,r.name,r.full_name,r.html_url||`https://github.com/${r.full_name}`,r.private?1:0);
+      if(inst)await upsertInstalledRepository(db,inst.id,r);
     }
   }
   await db.prepare('INSERT INTO deliveries(id) VALUES(?)').run(delivery);
@@ -199,7 +188,7 @@ export async function processQueue(reviewId=null){
   const job=db.claimJob
     ? await db.claimJob(reviewId)
     : await db.prepare(`SELECT j.id job_id,j.attempts,r.*,p.full_name FROM jobs j JOIN reviews r ON r.id=j.review_id
-      JOIN repositories p ON p.id=r.repository_id JOIN installations i ON i.id=r.installation_id
+      JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id
       WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
         AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now(),reviewId,reviewId);
   if(!job)return 'idle';busy=true;
@@ -346,7 +335,7 @@ export async function handler(req,res){
         if(!result){send(res,404,JSON.stringify({error:'Manual review not found for exact PR SHA'}),'application/json');return;}
         send(res,200,JSON.stringify(result),'application/json');return;
       }catch(error){
-        const code=[400,403,409,413].includes(error.status)?error.status:500;
+        const code=workerErrorStatus(error);
         if(code===500)console.error('[worker api]',String(error.message).slice(0,180));
         send(res,code,JSON.stringify({error:code===500?'Worker review request failed':String(error.message).slice(0,180)}),'application/json');
         return;
@@ -369,7 +358,10 @@ export async function handler(req,res){
     if(path==='/webhooks/stripe'&&req.method==='POST'){
       if(!config.stripe.webhookSecret){send(res,503,'Stripe webhook not configured','text/plain');return;}
       const raw=await readBody(req);try{await processStripeEvent(db,raw,req.headers['stripe-signature']);send(res,200,'ok','text/plain');}
-      catch(err){send(res,400,'Invalid Stripe event','text/plain');}return;
+      catch(err){
+        console.error('[stripe-webhook]',stripeFailureCategory(err));
+        send(res,err.status===400?400:503,'Stripe event could not be processed','text/plain');
+      }return;
     }
     if(path==='/'&&req.method==='GET'){c.user?redirect(res,'/dashboard'):send(res,200,ui.home());return;}
     if(path==='/demo'&&req.method==='GET'){
@@ -436,12 +428,12 @@ export async function handler(req,res){
         fetchPull:githubApi,
         installationToken
       });
-      // An already-queued exact-HEAD manual review can be kicked by its
-      // authenticated owner. Never replay completed/failed/running reviews.
+      // An already-queued exact-HEAD manual review can be kicked after
+      // enqueueManualReview rechecks this user's live repository access.
       // The existing manual marker guarantees dry-run even if policy changes.
       const prior=created.created?null:await db.prepare(
-        'SELECT j.status job_status,j.next_attempt_at,r.status review_status,r.posted FROM jobs j JOIN reviews r ON r.id=j.review_id JOIN manual_review_requests m ON m.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND i.owner_user_id=?'
-      ).get(created.id,c.user.id);
+        'SELECT j.status job_status,j.next_attempt_at,r.status review_status,r.posted FROM jobs j JOIN reviews r ON r.id=j.review_id JOIN manual_review_requests m ON m.review_id=r.id WHERE r.id=?'
+      ).get(created.id);
       const queued=prior?.job_status==='queued' && prior?.review_status==='queued'
         && Number(prior.posted)===0 && Number(prior.next_attempt_at)<=Date.now();
       if((created.created || queued) && process.env.VERCEL){
@@ -466,9 +458,7 @@ export async function handler(req,res){
       if(!guard(req,res,c,{real:true}))return;await formPost(req,c);
       if(!integrations().billing){fail(res,503,'Stripe not configured');return;}
       if(limited(req,'checkout',10)){fail(res,429,'Checkout limit reached');return;}
-      const current=await db.prepare('SELECT stripe_customer_id,status FROM subscriptions WHERE user_id=?').get(c.user.id);
-      if(current?.stripe_customer_id){fail(res,409,'A billing customer already exists. Use Manage subscription.');return;}
-      const session=await checkout(c.user);redirect(res,session.url);return;
+      const session=await startCheckout(db,c.user);redirect(res,session.url);return;
     }
     if(req.method==='POST'&&path==='/billing/portal'){
       if(!guard(req,res,c,{real:true}))return;await formPost(req,c);
@@ -478,6 +468,7 @@ export async function handler(req,res){
     }
     fail(res,404,'Page not found');
   }catch(err){console.error('[request]',String(err.message).slice(0,200));
+    if(err.githubReauth){redirect(res,'/auth/github');return;}
     fail(res,err.status||500,err.status?err.message:'Unexpected server error. Check server logs.');}
 }
 if (!process.env.VERCEL && process.argv[1] && fileURLToPath(import.meta.url)===resolve(process.argv[1])) {

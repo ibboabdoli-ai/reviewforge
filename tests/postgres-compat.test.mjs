@@ -5,14 +5,18 @@ import {sqlForPostgres} from '../src/db-postgres.mjs';
 test('Postgres SQL translation uses numbered parameters',()=>{
   assert.equal(sqlForPostgres('SELECT * FROM users WHERE login=? AND github_id=?'),
     'SELECT * FROM users WHERE login=$1 AND github_id=$2');
+  assert.equal(sqlForPostgres("SELECT p.id FROM repositories p WHERE p.id IN (?,?) AND p.enabled=1"),
+    "SELECT p.id FROM repositories p WHERE p.id IN ($1,$2) AND p.enabled=1");
 });
 test('SQLite ignore inserts become conflict-safe Postgres inserts',()=>{
   assert.equal(sqlForPostgres('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)'),
     'INSERT INTO jobs(review_id) VALUES($1) ON CONFLICT DO NOTHING');
+  assert.equal(sqlForPostgres("INSERT OR IGNORE INTO subscriptions(user_id,status) VALUES(?,'pending')"),
+    "INSERT INTO subscriptions(user_id,status) VALUES($1,'pending') ON CONFLICT DO NOTHING");
 });
 test('monthly limits and cleanup use native Postgres time expressions',()=>{
   assert.equal(sqlForPostgres("SELECT * FROM reviews WHERE created_at>=datetime('now','start of month')"),
-    "SELECT * FROM reviews WHERE created_at>=date_trunc('month',now())");
+    "SELECT * FROM reviews WHERE created_at>=(date_trunc('month',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')");
   assert.equal(sqlForPostgres("DELETE FROM deliveries WHERE received_at<datetime('now','-30 days')"),
     "DELETE FROM deliveries WHERE received_at<now() - interval '30 days'");
 });

@@ -203,7 +203,9 @@ export async function analyzePullRequestStep({
     status:'superseded',summary:'PR changed during staged analysis; no GitHub comments posted.',
     findings:[],posted:0
   };
-  if(unverifiedSuggestions)return {
+  // Publish substantiated findings even when other suggestions were filtered.
+  // Only a potentially false clean verdict must be blocked from approval.
+  if(unverifiedSuggestions && findings.length===0)return {
     status:'partial',posted:0,findings,coverage,
     summary:(postMode==='dry-run'?'[Preview only] ':'')+summary+
       ' Some AI suggestions failed evidence validation or a prior checkpoint lacks verification. Manual inspection required; no GitHub review or fallback approval posted.'

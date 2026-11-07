@@ -2,8 +2,33 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomToken, sha256 } from './security.mjs';
+const subscriptionQueues=new Map();
+
+function migrateReviewIdentity(db){
+  const schema=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='reviews'").get()?.sql;
+  if(!/UNIQUE\s*\(\s*repository_id\s*,\s*pr_number\s*,\s*head_sha\s*\)/i.test(schema||''))return;
+  const next=schema.replace(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?reviews["`]?/i,'CREATE TABLE reviews_next')
+    .replace(/UNIQUE\s*\(\s*repository_id\s*,\s*pr_number\s*,\s*head_sha\s*\)/i,
+      'UNIQUE(installation_id,repository_id,pr_number,head_sha)');
+  if(next===schema || !next.startsWith('CREATE TABLE reviews_next'))throw new Error('Cannot migrate review identity constraint');
+  db.exec('PRAGMA foreign_keys=OFF');
+  let started=false;
+  try{
+    db.exec('BEGIN IMMEDIATE');started=true;
+    db.exec(next);
+    db.exec('INSERT INTO reviews_next SELECT * FROM reviews');
+    db.exec('DROP TABLE reviews');
+    db.exec('ALTER TABLE reviews_next RENAME TO reviews');
+    db.exec('CREATE INDEX idx_reviews_installation ON reviews(installation_id,created_at DESC)');
+    db.exec('COMMIT');started=false;
+  }catch(error){if(started)db.exec('ROLLBACK');throw error;}
+  finally{db.exec('PRAGMA foreign_keys=ON');}
+  if(db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Review identity migration broke foreign keys');
+}
 
 export function openDatabase(file) {
+  if(file===':memory:' || /^file::memory:/i.test(file))
+    throw new Error('ReviewForge requires a file-backed SQLite database for transactional helpers');
   mkdirSync(dirname(file),{recursive:true});
   const db=new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
@@ -55,7 +80,7 @@ export function openDatabase(file) {
       error TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       finished_at TEXT,
-      UNIQUE(repository_id,pr_number,head_sha)
+      UNIQUE(installation_id,repository_id,pr_number,head_sha)
     );
     CREATE TABLE IF NOT EXISTS deliveries (
       id TEXT PRIMARY KEY,
@@ -93,16 +118,89 @@ export function openDatabase(file) {
       next_attempt_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY,received_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS stripe_checkout_proofs (
+      stripe_subscription_id TEXT PRIMARY KEY,
+      stripe_customer_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      session_id TEXT NOT NULL UNIQUE
+    );
     CREATE TABLE IF NOT EXISTS subscriptions (
       user_id INTEGER PRIMARY KEY REFERENCES users(id),
       stripe_customer_id TEXT UNIQUE,
       stripe_subscription_id TEXT UNIQUE,
       status TEXT NOT NULL DEFAULT 'free',
+      checkout_session_id TEXT,
+      checkout_previous_status TEXT,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
+  const subscriptionColumns=new Set(db.prepare('PRAGMA table_info(subscriptions)').all().map(row=>row.name));
+  if(!subscriptionColumns.has('checkout_session_id'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_session_id TEXT');
+  if(!subscriptionColumns.has('checkout_previous_status'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_previous_status TEXT');
+  migrateReviewIdentity(db);
+  db.withSubscriptionLock=async(userId,work)=>{
+    const previous=subscriptionQueues.get(file)||Promise.resolve();
+    let release;
+    const current=new Promise(resolve=>{release=resolve;});
+    subscriptionQueues.set(file,current);
+    await previous;
+    // A separate connection keeps unrelated queries off this transaction.
+    let locked;
+    let started=false;
+    try{
+      locked=new DatabaseSync(file);
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+      // A read snapshot allows unrelated writes during Stripe retrieval.
+      // If it becomes stale, SQLite refuses the later write and Stripe retries.
+      locked.exec('BEGIN');started=true;
+      if(!locked.prepare('SELECT id FROM users WHERE id=?').get(userId))
+        throw new Error('Stripe billing owner does not exist');
+      const result=await work(locked);
+      locked.exec('COMMIT');
+      started=false;
+      return result;
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked?.close();release();if(subscriptionQueues.get(file)===current)subscriptionQueues.delete(file);}
+  };
+  // BEGIN IMMEDIATE serializes the count and inserts across SQLite connections.
+  // Retry without blocking the event loop while another writer holds the lock.
+  db.reserveReview=async({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false})=>{
+    const locked=new DatabaseSync(file);
+    locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+    let started=false;
+    try{
+      const deadline=Date.now()+25000;
+      for(;;){
+        try{locked.exec('BEGIN IMMEDIATE');started=true;break;}
+        catch(error){
+          if(!/database (?:table )?is locked/i.test(error.message) || Date.now()>=deadline)
+            throw error;
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+      }
+      const repo=locked.prepare("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=? AND p.installation_id=? AND p.enabled=1 AND i.status='active'").get(repositoryId,installationId);
+      if(!repo)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
+      const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=? AND r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(installationId,repositoryId,prNumber,headSha);
+      let result;
+      if(existing)result={id:existing.id,created:false,manual:!!existing.manual_id};
+      else{
+        const status=locked.prepare('SELECT status FROM subscriptions WHERE user_id=?').get(repo.owner_user_id)?.status;
+        const limit=status==='active'||status==='trialing'?500:10;
+        const used=locked.prepare("SELECT COUNT(*) AS total FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? AND r.created_at>=datetime('now','start of month')").get(repo.owner_user_id).total;
+        if(!unlimited && Number(used)>=limit)throw Object.assign(new Error('Monthly review limit reached.'),{status:429});
+        const inserted=locked.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status,summary) VALUES(?,?,?,?,?,?,'queued',?) RETURNING id")
+          .get(installationId,repositoryId,prNumber,title,author,headSha,manual?'Manual shadow review requested; no GitHub posting.':'');
+        if(manual)locked.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(inserted.id);
+        locked.prepare('INSERT INTO jobs(review_id) VALUES(?)').run(inserted.id);
+        result={id:inserted.id,created:true,manual};
+      }
+      locked.exec('COMMIT');started=false;
+      return result;
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked.close();}
+  };
   return db;
 }
 export async function createSession(db,userId) {
