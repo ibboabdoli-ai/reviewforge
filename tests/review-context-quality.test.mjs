@@ -79,6 +79,39 @@ test('private paths, traversal, binary and unrelated repositories are not fetche
  assert.deepEqual(importedPaths('src/lib/x.ts','import x from "../../../.env";'),[]);
  await assert.rejects(collectReviewContext({repository:'../evil',sha,files,token:'fake',api}),/Invalid repository/);
 });
+test('runtime alias imports resolve within the same safe repository namespace',()=>{
+ assert.deepEqual(importedPaths('src/api/checkout.ts',
+   'import {current} from "@/lib/billing-state";'),['src/lib/billing-state.ts']);
+ assert.deepEqual(importedPaths('src/api/checkout.ts',
+   'import x from "@/../../credentials";'),[]);
+});
+test('focused runtime imports outrank unrelated test mocks within a bounded context',async()=>{
+ const target='c'.repeat(40),files=[
+  {filename:'src/lib/payment-flow.ts',status:'modified',patch:'@@ -1,1 +1,2 @@\n import {state} from "@/lib/payment-state";\n+export const result=state;'},
+  {filename:'tests/payment-flow.test.ts',status:'modified',patch:'@@ -1,1 +1,2 @@\n import "../src/lib/mock-a";\n+expect(result).toBeDefined();'}
+ ];
+ const bodies={
+  'src/lib/payment-flow.ts':'import {state} from "@/lib/payment-state";\nexport const result=state;',
+  'src/lib/payment-state.ts':'export const state={paid:true};',
+  'tests/payment-flow.test.ts':'import "../src/lib/mock-a";\nimport "../src/lib/mock-b";\nimport "../src/lib/mock-c";\nexpect(result).toBeDefined();',
+  'src/lib/mock-a.ts':'export const a=1;',
+  'src/lib/mock-b.ts':'export const b=1;',
+  'src/lib/mock-c.ts':'export const c=1;'
+ };
+ const requests=[];
+ const api=async(path,token)=>{
+  assert.equal(token,'fixture');assert.ok(path.endsWith('?ref='+target));
+  const filename=decodeURIComponent(path.split('/contents/')[1].split('?ref=')[0]);
+  requests.push(filename);
+  if(!(filename in bodies))throw new Error('GitHub 404: Not Found');
+  const body=bodies[filename];return {type:'file',encoding:'base64',size:Buffer.byteLength(body),
+   content:Buffer.from(body).toString('base64')};
+ };
+ const context=await collectReviewContext({repository:repo,sha:target,files,token:'fixture',api});
+ assert.ok(context.sourceFiles.includes('src/lib/payment-state.ts'));
+ assert.ok(context.totalChars<=12000);
+ assert.ok(requests.every(path=>path==='.coderabbit.yaml'||safeContextPath(path)));
+});
 test('project guidance is only a scoped, untrusted excerpt',()=>{
  const rules=projectRuleExcerpts(configFile,['src/lib/x.ts','tests/x.test.ts']);
  assert.match(rules,/mixed company-record/);

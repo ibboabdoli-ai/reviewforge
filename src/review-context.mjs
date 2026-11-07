@@ -17,10 +17,12 @@ export function safeContextPath(path){
   return SAFE_SOURCE.test(path)&&!DENIED.test(path);
 }
 export function importedPaths(sourcePath,sourceText){
-  const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"](\.{1,2}\/[^'"]+)['"]/g)];
+  const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
   const found=[];
   for(const [,specifier] of matches.slice(0,30)){
-    const root=posix.normalize(posix.join(posix.dirname(sourcePath),specifier));
+    const root=specifier.startsWith('@/')
+      ?posix.normalize('src/'+specifier.slice(2))
+      :posix.normalize(posix.join(posix.dirname(sourcePath),specifier));
     for(const path of (/\.[a-z]+$/i.test(root)?[root]:[root+'.ts',root+'.tsx',root+'.js',root+'/index.ts'])){
       if(safeContextPath(path) && path!==sourcePath && !found.includes(path)){
         found.push(path);break;
@@ -179,8 +181,8 @@ export function relatedSourceExcerpt(source,maxChars=1800){
   return redactKnownTokens(text);
 }
 /**
- * Bounded, source-only, SHA-pinned context. Test imports are ranked ahead of
- * unrelated direct imports; exactly the same diff drives actual findings.
+ * Bounded, source-only, SHA-pinned context. Direct runtime imports are ranked
+ * ahead of test-linked implementation modules; the same diff drives findings.
  * No GitHub writes, checkouts, test execution or model calls occur here.
  */
 export async function collectReviewContext({repository,sha,files,token,api}){
@@ -216,6 +218,15 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     candidates.push({path:sources[i].filename,kind:'changed-file-excerpt',
       text:sourceExcerpt(sourceBodies[i],sources[i].patch,sources.length>2?1500:1800)});
   }
+  // The changed runtime module is the strongest signal for a related source.
+  // Test fixtures can import many mocks and must not consume every slot first.
+  for(let i=0;i<sources.length;i++){
+    if(!sourceBodies[i])continue;
+    for(const path of importedPaths(sources[i].filename,sourceBodies[i])){
+      if(!included.has(path)&&!desired.some(d=>d.options.includes(path)))
+        desired.push({test:null,options:[path]});
+    }
+  }
   for(let i=0;i<tests.length;i++){
     if(!testBodies[i])continue;
     included.add(tests[i].filename);
@@ -226,17 +237,6 @@ export async function collectReviewContext({repository,sha,files,token,api}){
       if(already)links.push({test:tests[i].filename,implementation:already});
       else if(!desired.some(d=>d.options[0]===options[0]))
         desired.push({test:tests[i].filename,options});
-    }
-  }
-  // Keep production import context when the selected tests have no resolvable
-  // local implementation links (for example a test built entirely on mocks).
-  if(desired.length<3){
-    for(let i=0;i<sources.length;i++){
-      if(!sourceBodies[i])continue;
-      for(const path of importedPaths(sources[i].filename,sourceBodies[i])){
-        if(!included.has(path)&&!desired.some(d=>d.options.includes(path)))
-          desired.push({test:null,options:[path]});
-      }
     }
   }
   let linked=0;
