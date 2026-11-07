@@ -158,13 +158,13 @@ test('routine generated lockfile edits and deleted notes remain excluded',()=>{
   }
 });
 
-  
+
 // Deleting ecosystem checksum/lockfiles removes dependency-integrity evidence.
 // These are intentionally synthetic files, not customer/Production data.
 const ecosystemLocks=[
   'Cargo.lock','services/api/go.sum','Gemfile.lock',
   'web/bun.lockb','packages/ui/uv.lock','composer.lock'
-].map(filename=>({filename,status:'removed',patch:'@@ -1 +0,0 @@\\n-old checksum'}));
+].map(filename=>({filename,status:'removed',patch:'@@ -1 +0,0 @@\n-old checksum'}));
 
 test('deleted ecosystem lockfiles fail closed in both file and batch planners',()=>{
   for(const planner of [selectFilesForReview,planReviewBatches]){
