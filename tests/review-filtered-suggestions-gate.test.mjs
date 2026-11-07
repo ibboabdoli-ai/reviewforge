@@ -24,7 +24,7 @@ const capped={summary:'Eight actionable issues from a nine-suggestion batch.',
   diagnostics:{modelSuggestions:9,acceptedFindings:8,filteredFindings:1}};
 const cappedFiles=Array.from({length:9},(_,i)=>({
   filename:'src/entry-'+i+'.ts',status:'modified',
-  patch:'@@ -0,0 +1,1 @@\\n+const changed'+i+' = true;'
+  patch:'@@ -0,0 +1,1 @@\n+const changed'+i+' = true;'
 }));
 const clean={summary:'No supported concerns identified.',
   findings:[],diagnostics:{modelSuggestions:0,acceptedFindings:0,filteredFindings:0}};
