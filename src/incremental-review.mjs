@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { config } from './config.mjs';
 import { githubApi, installationToken, changedFiles, postReview } from './github.mjs';
-import { planReviewBatches, coverageSummary, validateFindings, reviewWithAI } from './reviewer.mjs';
+import { planReviewBatches, coverageSummary, validateFindings, unverifiedModelSuggestions, reviewWithAI } from './reviewer.mjs';
 import { repositoryAllowed } from './review-policy.mjs';
 import { selectReviewModel } from './model-router.mjs';
 import { collectReviewContext } from './review-context.mjs';
@@ -167,7 +167,8 @@ export async function analyzePullRequestStep({
         n=>Number.isSafeInteger(n)&&n>=0&&n<=1000)
         ?{modelSuggestions:stats.modelSuggestions,
           acceptedFindings:stats.acceptedFindings,filteredFindings:stats.filteredFindings}
-        :null
+        :null,
+      unverifiedSuggestions:unverifiedModelSuggestions(response,accepted)
     };
     results=[...results,item];
     const saved=await deps.saveProgress({
@@ -186,6 +187,8 @@ export async function analyzePullRequestStep({
     };
   }
 
+  // Old checkpoints lacking this proof must not authorize a clean fallback.
+  const unverifiedSuggestions=results.some(r=>r.unverifiedSuggestions!==false);
   const raw=results.flatMap(r=>r.findings);
   const rank={critical:0,high:1,medium:2,low:3};
   const findings=raw.sort((a,b)=>(rank[a.severity]??4)-(rank[b.severity]??4)||
@@ -199,6 +202,11 @@ export async function analyzePullRequestStep({
      (current.draft && !allowDraft)) return {
     status:'superseded',summary:'PR changed during staged analysis; no GitHub comments posted.',
     findings:[],posted:0
+  };
+  if(unverifiedSuggestions)return {
+    status:'partial',posted:0,findings,coverage,
+    summary:(postMode==='dry-run'?'[Preview only] ':'')+summary+
+      ' Some AI suggestions failed evidence validation or a prior checkpoint lacks verification. Manual inspection required; no GitHub review or fallback approval posted.'
   };
   if(postMode==='dry-run') return {
     status:'completed',summary:'[Preview only — not posted to GitHub] '+summary,

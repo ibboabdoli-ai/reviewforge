@@ -40,17 +40,25 @@ function hasDeletionOnlyHunk(patch){
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
 const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
+// A removed dependency lockfile can change the resolved supply chain. Unlike
+// routine lockfile edits, deletion cannot be silently excluded as generated.
+const REMOVED_LOCK_PATH=/(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|bun\.lockb?|uv\.lock|composer\.lock)$/i;
 // Deleted executable/configuration files have no added-line anchors. Until
 // removals can be reviewed as first-class patches, fail closed rather than
 // silently approving a PR that removed an auth or safety check.
 // Trust/ownership and container build files often have no extension; SQL
 // migration removals can delete access controls. Count these as unreviewed
 // instead of silently allowing a clean verdict.
-const REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$)/i;
+// Deleting TOML and Go module manifests can remove dependency or test gates.
+// Some permission and deployment gates are extensionless executables,
+// especially under bin/ and scripts/. Their removal has no reportable added
+// line; do not classify it as an ordinary deleted document.
+const REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql|toml|mod)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$|(?:^|\/)(?:bin|scripts)\/(?:[^/]+\/)*[^/.]+$)/i;
 function isRemovedSource(file){
   return file?.status==='removed' && typeof file.filename==='string' &&
-    REMOVED_SOURCE_PATH.test(file.filename) && !SKIPPED_PATH.test(file.filename) &&
-    !GENERATED_PATH.test(file.filename);
+    (REMOVED_LOCK_PATH.test(file.filename) ||
+      (REMOVED_SOURCE_PATH.test(file.filename) && !GENERATED_PATH.test(file.filename))) &&
+    !SKIPPED_PATH.test(file.filename);
 }
 const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
 // GitHub omits text patches for image assets. Report them as excluded, never as reviewed code.
@@ -209,6 +217,25 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
 }
 
 const severity=['critical','high','medium','low'];
+/** A filtered or unanchored model suggestion is not evidence of a clean PR.
+ * No raw untrusted suggestion is persisted just to enforce this gate.
+ */
+export function unverifiedModelSuggestions(response,validated) {
+  if(!Array.isArray(response?.findings)||!Array.isArray(validated))return true;
+  const stats=response.diagnostics;
+  if(stats){
+    const counts=[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings];
+    if(!counts.every(n=>Number.isSafeInteger(n)&&n>=0) ||
+       stats.modelSuggestions!==stats.acceptedFindings+stats.filteredFindings ||
+       stats.acceptedFindings!==response.findings.length)return true;
+  }
+  // The existing eight-finding publication cap is intentional: it cannot
+  // itself produce a false clean verdict because eight valid findings remain.
+  // Distinguish that cap from suggestions discarded for invalid anchors.
+  const reportableLimit=8;
+  return validated.length<Math.min(response.findings.length,reportableLimit) ||
+    (stats?.filteredFindings??0)>0;
+}
 export function validateFindings(raw,files) {
   // A bounded review batch can contain multiple patch segments of the same
   // file. Union their changed-line anchors instead of discarding all but the
