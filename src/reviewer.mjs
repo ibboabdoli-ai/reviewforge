@@ -229,7 +229,12 @@ export function unverifiedModelSuggestions(response,validated) {
        stats.modelSuggestions!==stats.acceptedFindings+stats.filteredFindings ||
        stats.acceptedFindings!==response.findings.length)return true;
   }
-  return validated.length!==response.findings.length || (stats?.filteredFindings??0)>0;
+  // The existing eight-finding publication cap is intentional: it cannot
+  // itself produce a false clean verdict because eight valid findings remain.
+  // Distinguish that cap from suggestions discarded for invalid anchors.
+  const reportableLimit=8;
+  return validated.length<Math.min(response.findings.length,reportableLimit) ||
+    (stats?.filteredFindings??0)>0;
 }
 export function validateFindings(raw,files) {
   // A bounded review batch can contain multiple patch segments of the same
