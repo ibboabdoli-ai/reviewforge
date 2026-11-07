@@ -42,7 +42,7 @@ const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
 const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
 // A removed dependency lockfile can change the resolved supply chain. Unlike
 // routine lockfile edits, deletion cannot be silently excluded as generated.
-const REMOVED_LOCK_PATH=/(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock)$/i;
+const REMOVED_LOCK_PATH=/(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|bun\.lockb?|uv\.lock|composer\.lock)$/i;
 // Deleted executable/configuration files have no added-line anchors. Until
 // removals can be reviewed as first-class patches, fail closed rather than
 // silently approving a PR that removed an auth or safety check.
