@@ -37,7 +37,12 @@ function header(title,desc,aside=''){return `<div class="page-header"><div><div 
 function statusItems(demo){ const ints=integrations();return [{name:'GitHub App',ready:ints.github},{name:'AI analysis',ready:ints.ai},{name:'Stripe billing',ready:ints.billing}].map(c=>`<div class="config-row"><span><i class="status-dot ${c.ready?'ok':'off'}"></i>${c.name}</span><strong>${c.ready?'Configured':'Needs setup'}</strong></div>`).join('');}
 /** Convert a live GitHub grant set into safe SQL parameters. */
 async function visibleIds(db,user,repositoryAccess){
-  const grants=await repositoryAccess(db,user);
+  let grants;
+  try{grants=await repositoryAccess(db,user);}
+  catch(error){
+    if(/sign in again/i.test(String(error?.message)))throw Object.assign(error,{status:401});
+    throw error;
+  }
   if(!(grants instanceof Map))throw new Error('Repository authorization lacks installation identity');
   return [...grants].filter(([repo,installation])=>Number.isSafeInteger(repo)&&Number.isSafeInteger(installation));
 }

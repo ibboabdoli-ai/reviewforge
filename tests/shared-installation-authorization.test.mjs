@@ -245,3 +245,30 @@ test('expired user token denies reads, while a current user token preserves acce
     assert.equal(calls,2);
   }finally{f.dispose();}
 });
+
+test('GitHub authorization expiry stays fail-closed with reauthentication status',async()=>{
+  const user={id:1,login:'alice'};
+  const pages=[
+    access=>dashboard(null,user,'csrf',{repositoryAccess:access}),
+    access=>reviewsPage(null,user,'csrf',{repositoryAccess:access}),
+    access=>reviewDetail(null,user,'csrf',1,{repositoryAccess:access}),
+    access=>reposPage(null,user,'csrf',{repositoryAccess:access}),
+    access=>manualReviewPage(null,user,'csrf',new URLSearchParams(),{repositoryAccess:access})
+  ];
+  for(const message of [
+    'GitHub authorization missing; sign in again.',
+    'GitHub authorization expired; please sign in again.'
+  ]){
+    const access=async()=>{throw new Error(message);};
+    for(const page of pages)
+      await assert.rejects(()=>page(access),error=>error.status===401&&error.message===message);
+  }
+});
+test('unrelated GitHub failures and invalid grant shapes are not made into reauthentication',async()=>{
+  const user={id:1,login:'alice'};
+  const failure=new Error('GitHub API connection failed');
+  await assert.rejects(()=>reviewsPage(null,user,'csrf',{repositoryAccess:async()=>{throw failure;}}),
+    error=>error===failure && error.status===undefined);
+  await assert.rejects(()=>reposPage(null,user,'csrf',{repositoryAccess:async()=>[]}),
+    /Repository authorization lacks installation identity/);
+});
