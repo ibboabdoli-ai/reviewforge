@@ -84,6 +84,8 @@ test('runtime alias imports resolve within the same safe repository namespace',(
    'import {current} from "@/lib/billing-state";'),['src/lib/billing-state.ts']);
  assert.deepEqual(importedPaths('src/api/checkout.ts',
    'import x from "@/../../credentials";'),[]);
+ assert.deepEqual(importedPaths('src/api/checkout.ts',
+   'import x from "@/../lib/unrelated";'),[]);
 });
 test('focused runtime imports outrank unrelated test mocks within a bounded context',async()=>{
  const target='c'.repeat(40),files=[

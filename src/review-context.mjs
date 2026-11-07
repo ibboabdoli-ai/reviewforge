@@ -20,6 +20,7 @@ export function importedPaths(sourcePath,sourceText){
   const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
   const found=[];
   for(const [,specifier] of matches.slice(0,30)){
+    if(specifier.startsWith('@/') && specifier.split('/').includes('..'))continue;
     const root=specifier.startsWith('@/')
       ?posix.normalize('src/'+specifier.slice(2))
       :posix.normalize(posix.join(posix.dirname(sourcePath),specifier));
