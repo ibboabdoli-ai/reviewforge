@@ -217,6 +217,20 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
 }
 
 const severity=['critical','high','medium','low'];
+/** A filtered or unanchored model suggestion is not evidence of a clean PR.
+ * No raw untrusted suggestion is persisted just to enforce this gate.
+ */
+export function unverifiedModelSuggestions(response,validated) {
+  if(!Array.isArray(response?.findings)||!Array.isArray(validated))return true;
+  const stats=response.diagnostics;
+  if(stats){
+    const counts=[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings];
+    if(!counts.every(n=>Number.isSafeInteger(n)&&n>=0) ||
+       stats.modelSuggestions!==stats.acceptedFindings+stats.filteredFindings ||
+       stats.acceptedFindings!==response.findings.length)return true;
+  }
+  return validated.length!==response.findings.length || (stats?.filteredFindings??0)>0;
+}
 export function validateFindings(raw,files) {
   // A bounded review batch can contain multiple patch segments of the same
   // file. Union their changed-line anchors instead of discarding all but the
