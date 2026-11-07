@@ -105,7 +105,9 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   if (latest.head?.sha!==headSha || (latest.draft && !allowDraft) || latest.state!=='open') {
     return {status:'superseded',summary:'PR changed during analysis; no comments posted.',findings:[],posted:0};
   }
-  if(unverifiedSuggestions)return {
+  // Publish substantiated findings even when other suggestions were filtered.
+  // Only a potentially false clean verdict must be blocked from approval.
+  if(unverifiedSuggestions && findings.length===0)return {
     status:'partial',posted:0,findings:review.findings,coverage,
     summary:(postMode==='dry-run'?'[Preview only] ':'')+summary+
       ' Some AI suggestions failed evidence validation; manual inspection required. No GitHub review or fallback approval posted.'
