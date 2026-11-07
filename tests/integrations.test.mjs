@@ -25,8 +25,9 @@ test('Signed Stripe events activate and cancel entitlements; duplicate deliverie
     config.stripe.webhookSecret='whsec_integrations';config.stripe.pricePro='price_pro_test';
     const event=(id,type,status)=>({id,type,data:{object:{id:'sub_abc',customer:'cus_abc',status,metadata:{reviewforge_user_id:'123'}}}});
     const a=signedEvent(event('evt_new','customer.subscription.created','active'));
-    const subscription={id:'sub_abc',customer:'cus_abc',created:100,status:'active',metadata:{reviewforge_user_id:'123'},items:{data:[{price:{id:'price_pro_test'}}]}};
-    const options={retrieveSubscription:async()=>subscription};
+    const subscription={id:'sub_abc',customer:'cus_abc',created:100,status:'active',metadata:{reviewforge_user_id:'123'},items:{data:[{price:{id:'price_pro_test'}}],has_more:false}};
+    const options={retrieveSubscription:async()=>subscription,
+      listSubscriptions:async()=>({object:'list',data:[subscription],has_more:false})};
     assert.equal(await processStripeEvent(db,a.raw,a.signature,options), 'customer.subscription.created');
     assert.equal(await activePlan(db,123),'pro');
     assert.equal(await processStripeEvent(db,a.raw,a.signature,options),'duplicate');

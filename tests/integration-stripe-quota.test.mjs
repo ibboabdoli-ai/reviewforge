@@ -22,17 +22,19 @@ test('combined SQLite Stripe and monthly reservations remain responsive',async()
     let started,release;
     const entered=new Promise(resolve=>{started=resolve;});
     const hold=new Promise(resolve=>{release=resolve;});
-    const stripe=processStripeEvent(db,raw,signature,{retrieveSubscription:async()=>{
-      started();await hold;return {id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'},items:{data:[{price:{id:'price_pro_test'}}]}};
+    const live={id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'},items:{data:[{price:{id:'price_pro_test'}}],has_more:false}};
+    const listSubscriptions=async()=>({object:'list',data:[live],has_more:false});
+    const stripe=processStripeEvent(db,raw,signature,{listSubscriptions,retrieveSubscription:async()=>{
+      started();await hold;return live;
     }});
     await entered;
     let reserved;
     try{reserved=await db.reserveReview({installationId:10,repositoryId:20,prNumber:1,title:'PR',author:'owner',headSha:'a'.repeat(40)});}
     finally{release();}
-    await assert.rejects(stripe,/locked|snapshot/i);
+    assert.equal(await stripe,'customer.subscription.created');
     assert.equal(reserved.created,true);
-    assert.equal(db.prepare("SELECT id FROM stripe_events WHERE id='evt_combined'").get(),undefined);
-    await processStripeEvent(db,raw,signature,{retrieveSubscription:async()=>({id:'sub_combined',customer:'cus_combined',created:100,status:'active',metadata:{reviewforge_user_id:'1'},items:{data:[{price:{id:'price_pro_test'}}]}})});
+    assert.ok(db.prepare("SELECT id FROM stripe_events WHERE id='evt_combined'").get());
+    assert.equal(await processStripeEvent(db,raw,signature,{listSubscriptions,retrieveSubscription:async()=>live}),'duplicate');
     assert.equal(await activePlan(db,1),'pro');
     assert.equal(db.prepare('SELECT count(*) n FROM jobs').get().n,1);
   }finally{[config.stripe.webhookSecret,config.stripe.pricePro]=old;db.close();rmSync(dir,{recursive:true,force:true});}

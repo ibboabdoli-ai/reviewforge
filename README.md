@@ -35,6 +35,7 @@ The app starts at `http://localhost:3000`. The local demo uses a deterministic r
 5. Test a real, **test-only** PR and signed webhook in dry-run mode before allowing posting.
 6. Confirm the authenticated daily cron runs, simulate failed/stale queue retries, monitor errors, and extend rate limits and tenant-isolation tests. Hobby cron recovery runs only once daily; more frequent retries need a suitable plan or external worker.
 7. Configure Stripe **test mode** only after migration 006, and verify subscription webhooks before any live billing. A Checkout reservation remains pending after an uncertain Stripe API failure or abandoned session; reconcile it against Stripe before allowing another payable session.
+   Subscription webhooks reconcile against a complete, bounded Stripe customer subscription list. More than 500 subscriptions, incomplete pages, conflicting customer ownership, or repeated API failures require manual billing reconciliation before relying on the entitlement; never infer Pro from a partial list.
 
 **Public repository does not imply a public working SaaS.** Open issues and pull requests before changes are merged. See `GITHUB_AI_SETUP_FA.md` and `VERCEL_NEON_SETUP_FA.md` for the longer setup guides.
 

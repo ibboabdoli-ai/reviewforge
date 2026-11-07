@@ -70,6 +70,7 @@ export async function openPostgres(url){
         if(!owner.rows.length)throw new Error('Stripe billing owner does not exist');
         const locked={prepare(sql){return {
           async get(...args){const result=await client.query(sqlForPostgres(sql),args);return result.rows[0];},
+          async all(...args){const result=await client.query(sqlForPostgres(sql),args);return result.rows;},
           async run(...args){const result=await client.query(sqlForPostgres(sql),args);return {changes:result.rowCount||0};}
         };}};
         const result=await work(locked);
