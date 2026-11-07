@@ -157,3 +157,45 @@ test('routine generated lockfile edits and deleted notes remain excluded',()=>{
     assert.equal(result.coverage.complete,true);
   }
 });
+
+  
+// Deleting ecosystem checksum/lockfiles removes dependency-integrity evidence.
+// These are intentionally synthetic files, not customer/Production data.
+const ecosystemLocks=[
+  'Cargo.lock','services/api/go.sum','Gemfile.lock',
+  'web/bun.lockb','packages/ui/uv.lock','composer.lock'
+].map(filename=>({filename,status:'removed',patch:'@@ -1 +0,0 @@\\n-old checksum'}));
+
+test('deleted ecosystem lockfiles fail closed in both file and batch planners',()=>{
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const result=planner([...ecosystemLocks,modified]);
+    assert.equal(result.coverage.removedCode,ecosystemLocks.length);
+    assert.equal(result.coverage.reviewable,ecosystemLocks.length+1);
+    assert.equal(result.coverage.reviewed,1);
+    assert.equal(result.coverage.complete,false);
+    const selected=result.files||result.batches.flat();
+    assert.deepEqual(selected.map(f=>f.filename),['src/health.ts']);
+  }
+});
+
+test('deleted ecosystem lockfiles never trigger model reservation or a clean posted review',async()=>{
+  for(const run of [analyzePullRequest,analyzePullRequestStep]){
+    const calls={reservations:0,models:0,posts:0,checkpoints:0};
+    const deps={
+      githubApi:async()=>({head:{sha},state:'open',draft:false}),
+      installationToken:async()=> 'synthetic',
+      changedFiles:async()=>[...ecosystemLocks,modified],
+      reserveModelCalls:async()=>{calls.reservations++;return true;},
+      reviewWithAI:async()=>{calls.models++;return {summary:'Clean',findings:[]};},
+      postReview:async()=>{calls.posts++;return 'inline';},
+      loadProgress:async()=>{calls.checkpoints++;return null;},
+      initProgress:async()=>{calls.checkpoints++;return true;},
+      saveProgress:async()=>{calls.checkpoints++;return true;}
+    };
+    const result=await run({repository:'sandbox/reviewforge-fixture',number:1,
+      headSha:sha,installationId:3,reviewId:1,postMode:'live'},deps);
+    assert.equal(result.status,'partial');
+    assert.equal(result.coverage.removedCode,ecosystemLocks.length);
+    assert.deepEqual(calls,{reservations:0,models:0,posts:0,checkpoints:0});
+  }
+});
