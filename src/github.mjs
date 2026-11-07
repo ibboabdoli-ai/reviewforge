@@ -33,9 +33,9 @@ export async function persistUserToken(db,userId,data) {
     data.expires_in?Date.now()+data.expires_in*1000:0,userId);
 }
 export async function githubUserToken(db,user) {
-  if(!user.token_cipher) throw new Error('GitHub authorization missing; sign in again.');
+  if(!user.token_cipher) throw Object.assign(new Error('GitHub authorization missing; sign in again.'),{status:401,githubReauth:true});
   if (!user.token_expires_at || user.token_expires_at>Date.now()+60000) return decrypt(user.token_cipher,config.sessionSecret);
-  if(!user.refresh_cipher) throw new Error('GitHub token expired; please sign in again.');
+  if(!user.refresh_cipher) throw Object.assign(new Error('GitHub token expired; please sign in again.'),{status:401,githubReauth:true});
   const form=new URLSearchParams({client_id:config.github.clientId,client_secret:config.github.clientSecret,
     grant_type:'refresh_token',refresh_token:decrypt(user.refresh_cipher,config.sessionSecret)});
   let res,data;
@@ -52,7 +52,7 @@ export async function githubUserToken(db,user) {
         return decrypt(latest.token_cipher,config.sessionSecret);
       if(attempt<2)await new Promise(resolve=>setTimeout(resolve,25));
     }
-    throw new Error('GitHub authorization expired; please sign in again.');
+    throw Object.assign(new Error('GitHub authorization expired; please sign in again.'),{status:401,githubReauth:true});
   }
   await persistUserToken(db,user.id,data); return data.access_token;
 }

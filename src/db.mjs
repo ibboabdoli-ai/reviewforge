@@ -129,11 +129,16 @@ export function openDatabase(file) {
       stripe_customer_id TEXT UNIQUE,
       stripe_subscription_id TEXT UNIQUE,
       status TEXT NOT NULL DEFAULT 'free',
+      checkout_session_id TEXT,
+      checkout_previous_status TEXT,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
+  const subscriptionColumns=new Set(db.prepare('PRAGMA table_info(subscriptions)').all().map(row=>row.name));
+  if(!subscriptionColumns.has('checkout_session_id'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_session_id TEXT');
+  if(!subscriptionColumns.has('checkout_previous_status'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_previous_status TEXT');
   migrateReviewIdentity(db);
   db.withSubscriptionLock=async(userId,work)=>{
     const previous=subscriptionQueues.get(file)||Promise.resolve();

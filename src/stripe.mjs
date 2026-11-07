@@ -19,7 +19,7 @@ async function stripe(path,params){
     body:new URLSearchParams(params),signal:AbortSignal.timeout(20000)
   });
   const data=await res.json();
-  if(!res.ok)throw new Error(`Stripe: ${(data.error?.message||res.status).slice(0,180)}`);
+  if(!res.ok)throw Object.assign(new Error(`Stripe: ${(data.error?.message||res.status).slice(0,180)}`),{stripeStatus:res.status});
   return data;
 }
 export function checkout(user){
@@ -31,13 +31,60 @@ export function checkout(user){
     'subscription_data[metadata][reviewforge_user_id]':String(user.id)});
 }
 /** Reserve the billing owner before creating any payable Stripe session. */
-export async function startCheckout(db,user,{create=checkout}={}){
-  const reserved=await db.prepare("INSERT OR IGNORE INTO subscriptions(user_id,status) VALUES(?,'pending')").run(user.id);
+export async function startCheckout(db,user,{create=checkout,listSubscriptions:list=listSubscriptions}={}){
+  const existing=await db.prepare('SELECT stripe_customer_id,stripe_subscription_id,status FROM subscriptions WHERE user_id=?').get(user.id);
+  if(existing && !['canceled','incomplete_expired','free'].includes(existing.status))
+    throw Object.assign(new Error('Billing is already pending or subscribed; resolve the existing session first.'),{status:409});
+  if(existing?.stripe_subscription_id){
+    if(!/^cus_[\w]+$/.test(existing.stripe_customer_id)||!/^sub_[\w]+$/.test(existing.stripe_subscription_id))
+      throw new Error('Stored Stripe subscription identity cannot be verified');
+    const all=await completeSubscriptions(existing.stripe_customer_id,list,AbortSignal.timeout(30000));
+    const predecessor=all.find(item=>item.id===existing.stripe_subscription_id);
+    verifiedSubscription(predecessor,existing.stripe_subscription_id,Number(user.id));
+    for(const item of all){
+      if(Number(item.metadata?.reviewforge_user_id)!==Number(user.id)){
+        if(!terminal(item))throw new Error('Stripe customer ownership requires manual reconciliation');
+        continue;
+      }
+      verifiedSubscription(item,item.id,Number(user.id));entitlementStatus(item);
+      if(!terminal(item))throw Object.assign(new Error('An existing Stripe subscription requires billing reconciliation before Checkout.'),{status:409});
+    }
+  }else if(existing?.stripe_customer_id){
+    throw new Error('Stored Stripe customer identity cannot be verified');
+  }
+  let reserved=await db.prepare("INSERT OR IGNORE INTO subscriptions(user_id,status) VALUES(?,'pending')").run(user.id);
+  if(reserved.changes!==1 && existing)
+    reserved=await db.prepare(`UPDATE subscriptions SET checkout_previous_status=status,status='pending',checkout_session_id=NULL,updated_at=CURRENT_TIMESTAMP
+      WHERE user_id=? AND status=? AND COALESCE(stripe_customer_id,'')=? AND COALESCE(stripe_subscription_id,'')=?`)
+      .run(user.id,existing.status,existing.stripe_customer_id||'',existing.stripe_subscription_id||'');
   if(reserved.changes!==1)
     throw Object.assign(new Error('Billing is already pending or subscribed; resolve the existing session first.'),{status:409});
-  // A failed response may still mean Stripe created the session. Keep the
-  // reservation until a verified webhook or manual reconciliation resolves it.
-  return create(user);
+  let session;
+  try{session=await create(user);}catch(error){
+    // Only definitive client rejections prove that Stripe created no session.
+    if(Number.isInteger(error?.stripeStatus) && error.stripeStatus>=400 && error.stripeStatus<500 &&
+       ![408,409,429].includes(error.stripeStatus))await releaseCheckout(db,user.id);
+    throw error;
+  }
+  if(!/^cs_[\w]+$/.test(session?.id)||typeof session.url!=='string')
+    throw new Error('Stripe Checkout session cannot be verified; manual reconciliation required');
+  const saved=await db.prepare(`UPDATE subscriptions SET checkout_session_id=? WHERE user_id=? AND status='pending' AND checkout_session_id IS NULL`)
+    .run(session.id,user.id);
+  if(saved.changes!==1)throw new Error('Stripe Checkout reservation changed; manual reconciliation required');
+  return session;
+}
+/** A session can release only its own still-pending reservation. */
+async function releaseCheckout(db,userId){
+  return db.withSubscriptionLock(userId,async locked=>{
+    const row=await locked.prepare("SELECT checkout_previous_status FROM subscriptions WHERE user_id=? AND status='pending' AND checkout_session_id IS NULL").get(userId);
+    if(!row)return false;
+    if(row.checkout_previous_status)
+      await locked.prepare(`UPDATE subscriptions SET status=checkout_previous_status,checkout_previous_status=NULL,checkout_session_id=NULL,updated_at=CURRENT_TIMESTAMP
+        WHERE user_id=? AND status='pending' AND checkout_session_id IS NULL`).run(userId);
+    else await locked.prepare("DELETE FROM subscriptions WHERE user_id=? AND status='pending' AND checkout_session_id IS NULL AND stripe_subscription_id IS NULL")
+      .run(userId);
+    return true;
+  });
 }
 export function portal(customerId){return stripe('billing_portal/sessions',{customer:customerId,return_url:config.baseUrl+'/billing'});}
 async function retrieveSubscription(id,signal=AbortSignal.timeout(20000)){
@@ -112,16 +159,33 @@ export async function processStripeEvent(db,raw,header,{retrieveSubscription:ret
   try{event=JSON.parse(raw);}catch{throw Object.assign(new Error('Invalid Stripe event JSON'),{status:400});}
   const obj=event.data?.object||{};
   if(typeof event.id!=='string'||!event.id.startsWith('evt_'))throw Object.assign(new Error('Stripe event has no ID'),{status:400});
+  if(event.type==='checkout.session.expired' && obj.mode==='subscription'){
+    const userId=Number(obj.client_reference_id);
+    if(!Number.isSafeInteger(userId)||userId<=0||!/^cs_[\w]+$/.test(obj.id))
+      throw new Error('Stripe Checkout identity cannot be verified');
+    return db.withSubscriptionLock(userId,async locked=>{
+      if(await locked.prepare('SELECT id FROM stripe_events WHERE id=?').get(event.id))return 'duplicate';
+      const row=await locked.prepare("SELECT checkout_previous_status FROM subscriptions WHERE user_id=? AND status='pending' AND checkout_session_id=?")
+        .get(userId,obj.id);
+      if(row?.checkout_previous_status)
+        await locked.prepare(`UPDATE subscriptions SET status=checkout_previous_status,checkout_previous_status=NULL,checkout_session_id=NULL,updated_at=CURRENT_TIMESTAMP
+          WHERE user_id=? AND status='pending' AND checkout_session_id=?`).run(userId,obj.id);
+      else if(row)await locked.prepare("DELETE FROM subscriptions WHERE user_id=? AND status='pending' AND checkout_session_id=? AND stripe_subscription_id IS NULL")
+        .run(userId,obj.id);
+      await locked.prepare('INSERT INTO stripe_events(id) VALUES(?)').run(event.id);
+      return event.type;
+    });
+  }
   // A signed Checkout completion records identity proof, never entitlement.
   if(event.type==='checkout.session.completed' && obj.mode==='subscription'){
     const userId=Number(obj.client_reference_id);
     if(!Number.isSafeInteger(userId)||userId<=0 || !/^cs_[\w]+$/.test(obj.id) ||
        !/^sub_[\w]+$/.test(obj.subscription) || !/^cus_[\w]+$/.test(obj.customer))
       throw new Error('Stripe Checkout identity cannot be verified');
-    const before=await db.prepare('SELECT stripe_customer_id,stripe_subscription_id,status FROM subscriptions WHERE user_id=?').get(userId);
-    const pending=before?.status==='pending' && !before.stripe_subscription_id;
+    const before=await db.prepare('SELECT stripe_customer_id,stripe_subscription_id,status,checkout_session_id FROM subscriptions WHERE user_id=?').get(userId);
+    const pending=before?.status==='pending';
     const incoming=pending?verifiedSubscription(await retrieve(obj.subscription),obj.subscription,userId):null;
-    if(incoming && (incoming.customer!==obj.customer || (before.stripe_customer_id && before.stripe_customer_id!==obj.customer)))
+    if(incoming && (incoming.customer!==obj.customer || (!before.stripe_subscription_id && before.stripe_customer_id && before.stripe_customer_id!==obj.customer)))
       throw new Error('Stripe Checkout customer does not match pending owner');
     return db.withSubscriptionLock(userId,async locked=>{
       if(await locked.prepare('SELECT id FROM stripe_events WHERE id=?').get(event.id))return 'duplicate';
@@ -131,11 +195,13 @@ export async function processStripeEvent(db,raw,header,{retrieveSubscription:ret
       const proof=await locked.prepare('SELECT stripe_customer_id,user_id,session_id FROM stripe_checkout_proofs WHERE stripe_subscription_id=?').get(obj.subscription);
       if(proof?.stripe_customer_id!==obj.customer || Number(proof.user_id)!==userId || proof.session_id!==obj.id)
         throw new Error('Stripe Checkout proof conflicts with stored ownership');
-      const current=await locked.prepare('SELECT stripe_customer_id,stripe_subscription_id,status FROM subscriptions WHERE user_id=?').get(userId);
+      const current=await locked.prepare('SELECT stripe_customer_id,stripe_subscription_id,status,checkout_session_id FROM subscriptions WHERE user_id=?').get(userId);
+      if(current?.checkout_session_id && current.checkout_session_id!==obj.id)
+        throw new Error('Stripe Checkout session does not match pending owner');
       if(current?.status==='pending' && !current.stripe_subscription_id){
         if(!incoming || currentKey(current)!==currentKey(before))
           throw new Error('Stripe pending subscription changed concurrently; retry event');
-        const changed=await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,updated_at=CURRENT_TIMESTAMP
+        const changed=await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,checkout_previous_status=NULL,checkout_session_id=NULL,updated_at=CURRENT_TIMESTAMP
           WHERE user_id=? AND stripe_subscription_id IS NULL AND status='pending'`)
           .run(incoming.customer,incoming.id,entitlementStatus(incoming),userId);
         if(!changed.changes)throw new Error('Stripe pending subscription changed concurrently; retry event');
@@ -215,12 +281,17 @@ export async function processStripeEvent(db,raw,header,{retrieveSubscription:ret
           }
           if(!selected)throw new Error('Stripe subscription ownership requires manual reconciliation');
           const status=entitlementStatus(selected);
+          // A canceled predecessor webhook cannot release a newer payable session.
+          if(current?.status==='pending' && current.stripe_subscription_id===selected.id && terminal(selected)){
+            await locked.prepare('INSERT INTO stripe_events(id) VALUES(?)').run(event.id);
+            return event.type;
+          }
           if(current){
             const changed=pending
-              ?await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,updated_at=CURRENT_TIMESTAMP
+              ?await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,checkout_previous_status=NULL,checkout_session_id=NULL,updated_at=CURRENT_TIMESTAMP
                 WHERE user_id=? AND stripe_subscription_id IS NULL AND status='pending'`)
                 .run(selected.customer,selected.id,status,userId)
-              :await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,updated_at=CURRENT_TIMESTAMP
+              :await locked.prepare(`UPDATE subscriptions SET stripe_customer_id=?,stripe_subscription_id=?,status=?,checkout_previous_status=NULL,checkout_session_id=NULL,updated_at=CURRENT_TIMESTAMP
                 WHERE user_id=? AND stripe_subscription_id=? AND stripe_customer_id=?`)
                 .run(selected.customer,selected.id,status,userId,current.stripe_subscription_id,current.stripe_customer_id);
             if(!changed.changes)throw new Error('Stripe subscription changed concurrently; retry event');

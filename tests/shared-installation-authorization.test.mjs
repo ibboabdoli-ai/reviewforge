@@ -4,9 +4,9 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {openDatabase} from '../src/db.mjs';
-import {dashboard,reviewsPage,reviewDetail,reposPage,manualReviewPage} from '../src/ui.mjs';
+import {dashboard,reviewsPage,reviewDetail,reposPage,manualReviewPage,billingPage} from '../src/ui.mjs';
 import {enqueueManualReview} from '../src/manual-review.mjs';
-import {authorizedRepositoryIds,authorizedRepositoryGrants,syncInstallations} from '../src/github.mjs';
+import {authorizedRepositoryIds,authorizedRepositoryGrants,syncInstallations,githubUserToken} from '../src/github.mjs';
 import {config} from '../src/config.mjs';
 import {encrypt} from '../src/security.mjs';
 
@@ -15,6 +15,21 @@ const bob={id:2,github_id:202,login:'bob'};
 const publicRepo='org/alice-code',privateRepo='org/bob-secret';
 const access=async (_db,user)=>new Map([[user.id===alice.id?11:12,7]]);
 const sha='a'.repeat(40);
+
+test('missing GitHub authorization requests sign-in instead of an unclassified server error',async()=>{
+  await assert.rejects(githubUserToken(null,{id:1,token_cipher:null}),error=>
+    error.status===401&&error.githubReauth===true&&/sign in again/.test(error.message));
+});
+
+test('a canceled billing owner can see the Checkout action again',async()=>{
+  const f=fixture(),previous=[config.stripe.secret,config.stripe.webhookSecret,config.stripe.pricePro];
+  try{
+    f.db.prepare("INSERT INTO subscriptions(user_id,stripe_customer_id,stripe_subscription_id,status) VALUES(1,'cus_old','sub_old','canceled')").run();
+    config.stripe.secret='sk_test_synthetic';config.stripe.webhookSecret='whsec_synthetic';config.stripe.pricePro='price_synthetic';
+    const html=await billingPage(f.db,alice,'csrf');
+    assert.match(html,/Choose Pro/);
+  }finally{[config.stripe.secret,config.stripe.webhookSecret,config.stripe.pricePro]=previous;f.dispose();}
+});
 
 function fixture(){
   const dir=mkdtempSync(join(tmpdir(),'rf-shared-installation-'));

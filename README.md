@@ -28,13 +28,13 @@ The app starts at `http://localhost:3000`. The local demo uses a deterministic r
 
 ## Production checklist
 
-1. Use an isolated database. Apply `migrations/001_initial.sql` through `migrations/007_review_installation_identity.sql` in numeric order, or verify each schema change already exists. In particular, apply `006_stripe_checkout_proofs.sql` **before** enabling Stripe webhooks, and `007_review_installation_identity.sql` before deploying installation-scoped review deduplication. Test migrations on a disposable database first; this checklist does not assert that production has been migrated.
+1. Use an isolated database. Apply `migrations/001_initial.sql` through `migrations/008_stripe_checkout_reservations.sql` in numeric order, or verify each schema change already exists. In particular, apply `006_stripe_checkout_proofs.sql` and `008_stripe_checkout_reservations.sql` **before** enabling Stripe webhooks, and `007_review_installation_identity.sql` before deploying installation-scoped review deduplication. Test migrations on a disposable database first; this checklist does not assert that production has been migrated.
 2. Deploy with `DATABASE_URL` (pooled), `SESSION_SECRET`, and `REVIEW_POST_MODE=dry-run`.
 3. Verify `/healthz` on the intended deployment, without logging any environment variable values.
 4. Register a GitHub App in your own GitHub account with minimal permissions and configure OAuth/webhook secrets directly in Vercel.
 5. Test a real, **test-only** PR and signed webhook in dry-run mode before allowing posting.
 6. Confirm the authenticated daily cron runs, simulate failed/stale queue retries, monitor errors, and extend rate limits and tenant-isolation tests. Hobby cron recovery runs only once daily; more frequent retries need a suitable plan or external worker.
-7. Configure Stripe **test mode** only after migration 006, and verify subscription webhooks before any live billing. A Checkout reservation remains pending after an uncertain Stripe API failure or abandoned session; reconcile it against Stripe before allowing another payable session.
+7. Configure Stripe **test mode** only after migrations 006 and 008, and verify subscription webhooks before any live billing. A Checkout reservation remains pending after an uncertain Stripe API failure; reconcile it against Stripe before allowing another payable session. A signed expiration for the recorded session releases its reservation, while a definite client rejection releases it immediately. Subscribe to `checkout.session.expired` as well as completion and subscription lifecycle events.
    Subscription webhooks reconcile against a complete, bounded Stripe customer subscription list. More than 500 subscriptions, incomplete pages, conflicting customer ownership, or repeated API failures require manual billing reconciliation before relying on the entitlement; never infer Pro from a partial list.
 
 **Public repository does not imply a public working SaaS.** Open issues and pull requests before changes are merged. See `GITHUB_AI_SETUP_FA.md` and `VERCEL_NEON_SETUP_FA.md` for the longer setup guides.

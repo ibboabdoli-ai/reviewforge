@@ -468,6 +468,7 @@ export async function handler(req,res){
     }
     fail(res,404,'Page not found');
   }catch(err){console.error('[request]',String(err.message).slice(0,200));
+    if(err.githubReauth){redirect(res,'/auth/github');return;}
     fail(res,err.status||500,err.status?err.message:'Unexpected server error. Check server logs.');}
 }
 if (!process.env.VERCEL && process.argv[1] && fileURLToPath(import.meta.url)===resolve(process.argv[1])) {
