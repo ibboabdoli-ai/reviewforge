@@ -21,6 +21,8 @@ export const BASE_REVIEW_POLICY = [
   'Return ONLY JSON matching the supplied schema. Report 0-8 independent findings, confidence >= 0.75.'
 ].join(' ');
 const SKILLS=[
+  {id:'pagination-ordering',match:/(?:^|[-_./])(?:cursor|pagination|paging|page[-_]?token|audit[-_]?log|event[-_]?log|timeline)(?:[-_./]|$)/i,
+   instruction:'PAGINATION ORDERING SKILL: when changed code sorts and pages ordered records, verify a single total order is used consistently by both sorting and cursor filtering, including all tie-breaker keys. If valid timestamp representations vary in fractional precision or offsets, check chronological instant ordering rather than assuming raw string order is equivalent. Consider a page boundary on equal timestamps and a page boundary on equivalent but differently formatted instants. Only report a source-supported defect; if inputs are normalized to a canonical format, do not invent this problem.'},
   {id:'authorization',match:/(?:^|\/)(?:auth|permissions?|roles?|accounts?|sessions?|middleware|security|api)(?:\/|\.|-)|(?:acl|tenant|owner|rbac|policy)/i,
    instruction:'AUTHORIZATION SKILL: verify authenticated identity at the trust boundary, resource ownership, tenant-scoped reads and writes, role checks, session validation, privilege escalation, and deny-by-default behavior. Do not assume endpoints are public or private without evidence.'},
   {id:'payments',match:/(?:^|\/)(?:stripe|billing|checkout|payments?|subscriptions?|invoices?|webhooks?)(?:\/|\.|-)/i,
