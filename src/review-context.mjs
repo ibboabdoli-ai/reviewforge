@@ -23,7 +23,7 @@ const IMPORT_EXTENSIONS=['.ts','.tsx','.js','.jsx','.mjs','.cjs'];
 const INDEX_EXTENSIONS=['.ts','.tsx','.js','.jsx'];
 const MAX_IMPORT_RESOLUTION_READS=36;
 function candidateImportPaths(root){
-  const options=/\.[a-z]+$/i.test(root)?[root]:[
+  const options=IMPORT_EXTENSIONS.some(ext=>root.endsWith(ext))?[root]:[
     ...IMPORT_EXTENSIONS.map(ext=>root+ext),
     ...INDEX_EXTENSIONS.map(ext=>root+'/index'+ext)
   ];
