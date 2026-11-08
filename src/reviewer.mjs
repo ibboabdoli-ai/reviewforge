@@ -19,22 +19,47 @@ export function redactKnownTokens(patch){
   return patch.replace(/sk-(?:proj-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}/g,'[REDACTED_TOKEN]')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi,'$1[REDACTED_TOKEN]');
 }
-// Inline findings currently require an added line in the affected hunk.
-// An addition in another hunk cannot anchor a removed guard here. Until
-// deleted-line findings are supported, keep these changes explicitly partial.
-/** Detect a deleted-only hunk with no added-line anchor; ignore file headers. */
+// A deletion-only hunk normally has no reportable added-line anchor.
+// Exception: a *byte-identical contiguous* removed block reinserted inside
+// the same named function in another hunk. Then the moved block has new-line
+// anchors and its changed position can be reviewed as part of the full diff.
+// Other removals remain partial; never infer semantic safety from relocation.
 function hasDeletionOnlyHunk(patch){
-  let inHunk=false,removed=false,added=false;
-  for(const line of patch.split('\n')){
-    if(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)){
-      if(removed&&!added)return true;
-      inHunk=true;removed=false;added=false;
-    }else if(inHunk){
-      if(line.startsWith('-'))removed=true;
-      if(line.startsWith('+'))added=true;
+  const hunks=[];
+  let current=null,run=null,runType=null;
+  const flushRun=()=>{
+    if(run?.length && current)current[runType].push(run);
+    run=null;runType=null;
+  };
+  for(const line of String(patch).split('\n')){
+    const header=line.match(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(.*)$/);
+    if(header){
+      flushRun();
+      current={scope:header[1].trim(),added:[],removed:[]};
+      hunks.push(current);
+      continue;
     }
+    if(!current)continue;
+    const type=line.startsWith('+')?'added':line.startsWith('-')?'removed':null;
+    if(type!==runType)flushRun();
+    if(type){runType=type;if(!run)run=[];run.push(line.slice(1));}
   }
-  return removed&&!added;
+  flushRun();
+  const containsBlock=(candidate,block)=>{
+    if(candidate.length<block.length)return false;
+    for(let i=0;i<=candidate.length-block.length;i++)
+      if(block.every((row,index)=>candidate[i+index]===row))return true;
+    return false;
+  };
+  return hunks.some(h=>{
+    if(!h.removed.length || h.added.length)return false;
+    // Missing function scope, separate removal runs or an edited replacement
+    // cannot be proven to have an alternate changed-line anchor.
+    if(!h.scope || h.removed.length!==1)return true;
+    const removed=h.removed[0];
+    return !hunks.some(other=>other!==h && other.scope===h.scope &&
+      other.added.some(added=>containsBlock(added,removed)));
+  });
 }
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
