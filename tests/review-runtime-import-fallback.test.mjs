@@ -185,3 +185,19 @@ test('side-effect import in a changed behavior test links its implementation',as
   assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===implementation),
     'The behavior-test relationship must be preserved');
 });
+
+
+// Regression: CommonJS code is supported by the sampler (.cjs/.js), but
+// runtime require() dependencies were not included by the import-only scanner.
+test('runtime CommonJS require resolves its SHA-pinned local dependency',async()=>{
+  const implementation='scripts/plugin.cjs';
+  const {context,requested}=await inspect({
+    changedSourcePath:'scripts/bootstrap.cjs',implementation,
+    specifier:'./unused',
+    sourceTextOverride:"const plugin = require('./plugin.cjs');\nplugin();"
+  });
+  assert.ok(requested.includes(implementation),
+    'The referenced CommonJS dependency must be requested at the PR head SHA');
+  assert.ok(context.sourceFiles.includes(implementation),
+    'CommonJS implementation must reach the reviewing model');
+});

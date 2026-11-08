@@ -30,7 +30,7 @@ function candidateImportPaths(root){
   return options.filter(safeContextPath);
 }
 function runtimeImportCandidates(sourcePath,sourceText){
-  const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*|\bimport\s+)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
+  const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
   const found=[],seen=new Set();
   for(const [,specifier] of matches.slice(0,30)){
     if(specifier.startsWith('@/') && specifier.split('/').includes('..'))continue;
