@@ -4,7 +4,7 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget'}) {
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={}}) {
   const sourcePath='src/app/page.tsx';
   const sourceText=`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
@@ -16,7 +16,8 @@ async function inspect({specifier,implementation,includeMatchingTest=false,testS
   const sourceFiles={
     [sourcePath]:sourceText,
     [testPath]:testText,
-    [implementation]:'export const Widget={authorized:true};'
+    [implementation]:'export const Widget={authorized:true};',
+    ...extraSources
   };
   const requested=[];
   const api=async(path,token)=>{
@@ -82,4 +83,22 @@ test('test-only dotted import resolves .tsx and preserves the test link',async()
   assert.ok(requested.includes(implementation),'Try .tsx when .ts is absent');
   assert.ok(context.sourceFiles.includes(implementation),'Include the test-linked module');
   assert.ok(context.testLinks.some(link=>link.test==='tests/page.test.ts'&&link.implementation===implementation));
+});
+
+// Regression: explicit test imports must resolve their own candidate, rather
+// than inheriting the first existing file from a different runtime import.
+test('explicit .tsx behavior test import links to .tsx when runtime resolves .ts',async()=>{
+  const runtime='src/app/components/Widget.ts';
+  const explicit='src/app/components/Widget.tsx';
+  const {context}=await inspect({
+    specifier:'./components/Widget',implementation:runtime,includeMatchingTest:true,
+    testSpecifier:'../src/app/components/Widget.tsx',
+    extraSources:{[explicit]:'export const Widget={tsx:true};'}
+  });
+  assert.ok(context.sourceFiles.includes(runtime),'Runtime import resolves the .ts file');
+  assert.ok(context.sourceFiles.includes(explicit),'Explicit test import must also include .tsx');
+  assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===explicit),
+    'Test relationship must point to the explicitly imported .tsx implementation');
+  assert.ok(!context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===runtime),
+    'Do not attach a misleading test relationship to the unrelated .ts fallback');
 });
