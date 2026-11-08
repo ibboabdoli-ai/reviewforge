@@ -23,6 +23,9 @@ const IMPORT_EXTENSIONS=['.ts','.tsx','.js','.jsx','.mjs','.cjs'];
 const INDEX_EXTENSIONS=['.ts','.tsx','.js','.jsx'];
 const MAX_IMPORT_RESOLUTION_READS=36;
 function candidateImportPaths(root,{commonjs=false}={}){
+  // Explicit data/native module specifiers are not extensionless JavaScript.
+  // Appending .js/.ts would invent an unrelated dependency and false test link.
+  if(/\.(?:json|node)$/i.test(root))return [];
   const explicit=IMPORT_EXTENSIONS.some(ext=>root.endsWith(ext));
   // Node CommonJS require('./name') searches .js, .json and .node before
   // directories, not .ts/.tsx. We can safely fetch only .js among those
