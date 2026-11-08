@@ -242,8 +242,12 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   for(let i=0;i<sources.length;i++){
     if(!sourceBodies[i])continue;
     for(const options of runtimeImportCandidates(sources[i].filename,sourceBodies[i])){
-      if(!options.some(path=>included.has(path)) &&
-         !desired.some(d=>d.options.some(path=>options.includes(path))))
+      // A changed .tsx sibling does not prove that an extensionless import
+      // resolves to it; the higher-priority .ts choice must still be checked.
+      // Distinct candidate orders may not be collapsed by partial overlap.
+      if(!included.has(options[0]) &&
+         !desired.some(d=>d.options.length===options.length &&
+           d.options.every((path,index)=>path===options[index)))
         desired.push({test:null,options});
     }
   }
