@@ -65,10 +65,18 @@ export async function analyzePullRequestStep({
 
   const useContext=repositoryAllowed(repository,config.aiContextRepositories);
   // For staged reviews, compute every input before the first paid attempt.
-  const reviewContext=useContext
-    ? await (deps.collectReviewContext || collectReviewContext)({
-        repository,sha:headSha,files,token,api
-      })
+  // Batch-local selection can read the same immutable file more than once.
+  const contextReads=new Map();
+  const contextApi=(path,auth)=>{
+    if(!path.includes('/contents/') || !path.endsWith('?ref='+headSha))
+      return api(path,auth);
+    if(!contextReads.has(path))contextReads.set(path,Promise.resolve().then(()=>api(path,auth)));
+    return contextReads.get(path);
+  };
+  const reviewContexts=useContext
+    ? await Promise.all(batches.map(batch=>(deps.collectReviewContext || collectReviewContext)({
+        repository,sha:headSha,files:batch,token,api:contextApi
+      })))
     : null;
   // The PR may advance while its changed-file list and optional SHA-pinned
   // context are being fetched. Never reserve quota or call a paid model for
@@ -85,7 +93,7 @@ export async function analyzePullRequestStep({
       enhancedRisk:useContext})
     :null;
   const planHash=createHash('sha256').update(JSON.stringify({
-    headSha,postMode,allowDraft,batches,coverage,reviewContext,
+    headSha,postMode,allowDraft,batches,coverage,reviewContexts,
     modelPolicy:{
       auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
       defaultModel:config.openai.model,
@@ -150,7 +158,7 @@ export async function analyzePullRequestStep({
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
-      ...(reviewContext?{reviewContext}:{}) ,
+      ...(reviewContexts?{reviewContext:reviewContexts[next]}:{}) ,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})};
     deps.onModelStart?.();
     let response;
@@ -203,7 +211,9 @@ export async function analyzePullRequestStep({
     status:'superseded',summary:'PR changed during staged analysis; no GitHub comments posted.',
     findings:[],posted:0
   };
-  if(unverifiedSuggestions)return {
+  // Publish substantiated findings even when other suggestions were filtered.
+  // Only a potentially false clean verdict must be blocked from approval.
+  if(unverifiedSuggestions && findings.length===0)return {
     status:'partial',posted:0,findings,coverage,
     summary:(postMode==='dry-run'?'[Preview only] ':'')+summary+
       ' Some AI suggestions failed evidence validation or a prior checkpoint lacks verification. Manual inspection required; no GitHub review or fallback approval posted.'

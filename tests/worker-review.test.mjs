@@ -6,7 +6,7 @@ import {join} from 'node:path';
 import {readFileSync} from 'node:fs';
 import {openDatabase} from '../src/db.mjs';
 import {allowedRepositories} from '../src/review-policy.mjs';
-import {requestWorkerReview,getWorkerReviewStatus,validateWorkerReviewInput,workerReviewAllowed} from '../src/worker-review.mjs';
+import {requestWorkerReview,getWorkerReviewStatus,validateWorkerReviewInput,workerReviewAllowed,workerErrorStatus} from '../src/worker-review.mjs';
 import {retryState} from '../src/queue-policy.mjs';
 const repo='ibboabdoli-ai/Proffera',sha='a'.repeat(40);
 const policy={
@@ -19,16 +19,22 @@ function fixture(){
  const dir=mkdtempSync(join(tmpdir(),'rf-worker-review-'));
  const db=openDatabase(join(dir,'db.sqlite'));
  db.prepare("INSERT INTO users(id,login,name) VALUES(7,'ibbo','Owner')").run();
+ db.prepare("INSERT INTO users(id,login,name) VALUES(8,'member','Other member')").run();
  db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(42,7,'ibboabdoli-ai','active')").run();
  db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,private,enabled) VALUES(100,42,'Proffera',?,'https://github.com/ibboabdoli-ai/Proffera',0,1)").run(repo);
- let calls=0;
- const deps={policy,installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
+ let calls=0,accessMode='allow';const checkedUsers=[];
+ const deps={policy,repositoryAccess:async(_db,user)=>{
+  checkedUsers.push(Number(user.id));
+  if(accessMode==='error')throw new Error('GitHub authorization unavailable');
+  return new Map(accessMode==='allow'&&Number(user.id)===7?[[100,42]]:[]);
+ },installationToken:async id=>{assert.equal(id,42);return 'fake-token';},
   fetchPull:async(path,token)=>{calls++;assert.equal(token,'fake-token');
    assert.equal(path,'/repos/'+repo+'/pulls/943');
    return {head:{sha,repo:{full_name:repo}},base:{ref:'main'},state:'open',draft:false,
     title:'Maria',user:{login:'ibboabdoli-ai'}};}};
  const body={repository:repo,pr_number:943,head_sha:sha};
- return {db,deps,body,calls:()=>calls,dispose:()=>{db.close();rmSync(dir,{recursive:true,force:true});}};
+ return {db,deps,body,calls:()=>calls,checkedUsers,setAccessMode:value=>{accessMode=value;},
+  dispose:()=>{db.close();rmSync(dir,{recursive:true,force:true});}};
 }
 test('worker request is denied without fourth exact repository allowlist',()=>{
  assert.equal(workerReviewAllowed(repo,policy),true);
@@ -44,6 +50,21 @@ test('worker accepts only three exact, type-safe parameters',()=>{
   {repository:repo,pr_number:943,head_sha:sha,installation_id:1},
   {repository:'https://other/Proffera',pr_number:943,head_sha:sha}])
   assert.throws(()=>validateWorkerReviewInput(bad),/Invalid|Only/);
+});
+test('worker checks the installation owner, never borrows another member access, and fails closed',async()=>{
+ const f=fixture();
+ try{
+  f.setAccessMode('deny');
+  await assert.rejects(requestWorkerReview(f.db,f.body,f.deps),/not accessible/);
+  f.setAccessMode('error');
+  await assert.rejects(requestWorkerReview(f.db,f.body,f.deps),/GitHub authorization unavailable/);
+  assert.deepEqual(f.checkedUsers,[7,7]);
+  assert.equal(f.calls(),0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) n FROM jobs').get().n,0);
+  f.setAccessMode('allow');
+  assert.equal((await requestWorkerReview(f.db,f.body,f.deps)).created,true);
+  assert.deepEqual(f.checkedUsers,[7,7,7]);
+ }finally{f.dispose();}
 });
 test('worker submits exact-head request once and status exposes only manual review',async()=>{
  const f=fixture();
@@ -65,6 +86,19 @@ test('worker submits exact-head request once and status exposes only manual revi
   const done=await getWorkerReviewStatus(f.db,f.body,policy);
   assert.equal(done.findings.length,1);assert.equal(done.findings[0].line,2);
  }finally{f.dispose();}
+});
+test('worker request cannot bypass an exhausted owner monthly quota',async()=>{
+ const f=fixture();try{
+  for(let n=1;n<=10;n++)f.db.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,head_sha) VALUES(42,100,?,'Previous',?)").run(n,String(n).padStart(40,'b'));
+  await assert.rejects(requestWorkerReview(f.db,f.body,f.deps),/Monthly review limit/);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,0);
+  assert.equal(f.db.prepare('SELECT count(*) n FROM reviews').get().n,10);
+ }finally{f.dispose();}
+});
+test('worker route preserves the monthly quota HTTP status',()=>{
+ assert.equal(workerErrorStatus({status:429}),429);
+ assert.equal(workerErrorStatus({status:403}),403);
+ assert.equal(workerErrorStatus(new Error('unexpected')),500);
 });
 test('wrong head is refused before the database write',async()=>{
  const f=fixture();
