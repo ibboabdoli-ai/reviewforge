@@ -251,8 +251,15 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     for(const options of testImplementationPaths(tests[i].filename,testBodies[i])){
       const already=options.find(path=>included.has(path));
       if(already)links.push({test:tests[i].filename,implementation:already});
-      else if(!desired.some(d=>d.options.some(path=>options.includes(path))))
-        desired.push({test:tests[i].filename,options});
+      else {
+        // A runtime import may already own this candidate group. Preserve the
+        // test relationship without repeating the SHA-pinned file fetch.
+        const existing=desired.find(d=>d.options.some(path=>options.includes(path)));
+        if(existing){
+          if(!existing.tests)existing.tests=[];
+          if(!existing.tests.includes(tests[i].filename))existing.tests.push(tests[i].filename);
+        }else desired.push({test:tests[i].filename,options});
+      }
     }
   }
   let linked=0,attempts=0;
@@ -268,6 +275,7 @@ export async function collectReviewContext({repository,sha,files,token,api}){
         text:relatedSourceExcerpt(body,1600)});
       included.add(path);linked++;
       if(entry.test)links.push({test:entry.test,implementation:path});
+      for(const testPath of entry.tests||[])links.push({test:testPath,implementation:path});
       break;
     }
   }
