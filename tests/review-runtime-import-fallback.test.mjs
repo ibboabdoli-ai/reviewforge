@@ -4,8 +4,8 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={}}) {
-  const sourcePath='src/app/page.tsx';
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx'}) {
+  const sourcePath=changedSourcePath;
   const sourceText=`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
   const testText=`import {Widget} from "${testSpecifier}";\nexpect(Widget).toBeDefined();`;
@@ -101,4 +101,25 @@ test('explicit .tsx behavior test import links to .tsx when runtime resolves .ts
     'Test relationship must point to the explicitly imported .tsx implementation');
   assert.ok(!context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===runtime),
     'Do not attach a misleading test relationship to the unrelated .ts fallback');
+});
+
+// A changed .tsx source is not proof that an extensionless test import resolves
+// to it: an unchanged .ts sibling can take precedence at the same commit.
+test('test import must prefer .ts sibling to an already included .tsx source',async()=>{
+  const tsx='src/app/components/Widget.tsx';
+  const ts='src/app/components/Widget.ts';
+  const {context,requested}=await inspect({
+    changedSourcePath:tsx,
+    specifier:'./missing-dependency',
+    implementation:tsx,
+    includeMatchingTest:true,
+    testSpecifier:'../src/app/components/Widget',
+    extraSources:{[ts]:'export const Widget={typescript:true};'}
+  });
+  assert.ok(requested.includes(ts),'Must probe higher-priority .ts before attributing the .tsx source');
+  assert.ok(context.sourceFiles.includes(ts),'Include the actual source referenced by the test');
+  assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===ts),
+    'The extensionless test import resolves to the .ts sibling');
+  assert.ok(!context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===tsx),
+    'Never link a test to the unrelated already-included .tsx module');
 });
