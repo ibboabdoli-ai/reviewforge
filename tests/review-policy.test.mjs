@@ -41,7 +41,10 @@ test('PostgreSQL receives a compatible parameterized atomic reservation',()=>{
 test('worker gate and cron auth are explicitly implemented',async()=>{
   const { readFileSync }=await import('node:fs');
   const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
-  assert.match(server,/repositoryAllowed\(repo\.full_name,config\.aiAllowedRepositories\)/);
+  // The allowlist check moved into the tested pure webhook decision helper.
+  assert.match(server,/automaticShadowReviewDecision\(\{/);
+  const policy=readFileSync(new URL('../src/review-policy.mjs',import.meta.url),'utf8');
+  assert.match(policy,/repositoryAllowed\(repository,allowed\)/);
   assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit,Date\.now\(\),count\)/);
   assert.match(server,/req\.method==='GET'\?process\.env\.CRON_SECRET:process\.env\.WORKER_SECRET/);
 });
