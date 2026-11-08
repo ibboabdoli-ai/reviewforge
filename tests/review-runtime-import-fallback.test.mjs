@@ -46,6 +46,8 @@ test('runtime .tsx fallback survives a matching test import without being shadow
   assert.ok(requested.includes(implementation),'The .tsx fallback must be tried');
   assert.ok(context.sourceFiles.includes(implementation),
     'The actual .tsx runtime dependency must be given to the reviewing model');
+  assert.ok(context.testLinks.some(link=>link.test==='tests/page.test.ts'&&link.implementation===implementation),
+    'The included runtime dependency must retain its associated behavior-test link');
   assert.match(context.snippets.find(s=>s.path===implementation)?.text||'',/authorized/);
 });
 
