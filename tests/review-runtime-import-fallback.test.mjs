@@ -4,11 +4,11 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false}) {
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget'}) {
   const sourcePath='src/app/page.tsx';
   const sourceText=`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
-  const testText='import {Widget} from "../src/app/components/Widget";\nexpect(Widget).toBeDefined();';
+  const testText=`import {Widget} from "${testSpecifier}";\nexpect(Widget).toBeDefined();`;
   const files=[{filename:sourcePath,status:'modified',
     patch:`@@ -1,1 +1,2 @@\n import {Widget} from "${specifier}";\n+export const action=Widget;`}];
   if(includeMatchingTest)files.push({filename:testPath,status:'modified',
@@ -61,4 +61,23 @@ test('runtime extensionless import resolves a directory index module',async()=>{
   const {context,requested}=await inspect({specifier:'./components/Widget',implementation});
   assert.ok(requested.includes(implementation));
   assert.ok(context.sourceFiles.includes(implementation));
+});
+
+test('runtime dotted module basename resolves its .ts implementation',async()=>{
+  const implementation='src/lib/tenant.service.ts';
+  const {context,requested}=await inspect({specifier:'@/lib/tenant.service',implementation});
+  assert.ok(requested.includes(implementation),'Dotted runtime imports must try .ts');
+  assert.ok(context.sourceFiles.includes(implementation),'Include the runtime module');
+});
+
+test('test-only dotted import resolves .tsx and preserves the test link',async()=>{
+  const implementation='src/lib/pricing.config.tsx';
+  const {context,requested}=await inspect({
+    specifier:'./components/missing-unrelated',implementation,
+    includeMatchingTest:true,testSpecifier:'../src/lib/pricing.config'
+  });
+  assert.ok(requested.includes('src/lib/pricing.config.ts'),'Try .ts before .tsx');
+  assert.ok(requested.includes(implementation),'Try .tsx when .ts is absent');
+  assert.ok(context.sourceFiles.includes(implementation),'Include the test-linked module');
+  assert.ok(context.testLinks.some(link=>link.test==='tests/page.test.ts'&&link.implementation===implementation));
 });
