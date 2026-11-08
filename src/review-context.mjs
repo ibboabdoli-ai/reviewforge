@@ -124,7 +124,7 @@ export function projectRuleExcerpts(yaml,paths){
     .slice(0,3).map(s=>s.body.join(' ').slice(0,1100)).filter(Boolean).join('\n');
   return redactKnownTokens(text).slice(0,2200);
 }
-async function fetchFile({repository,sha,path,api,token}){
+async function fetchFile({repository,sha,path,api,token,missingPaths}){
   if(path!=='.coderabbit.yaml' && !safeContextPath(path))return null;
   if(!/^[a-f0-9]{40}$/i.test(sha))throw new Error('Invalid immutable PR SHA');
   const q=path.split('/').map(encodeURIComponent).join('/');
@@ -135,7 +135,10 @@ async function fetchFile({repository,sha,path,api,token}){
     if(source.includes('\uFFFD')||source.includes('\0'))return null;
     return source;
   }catch(e){
-    if(/^GitHub 404:/.test(String(e?.message)))return null;
+    if(/^GitHub 404:/.test(String(e?.message))){
+      missingPaths?.add(path); // Only a confirmed 404 means an earlier resolution choice is absent.
+      return null;
+    }
     throw new Error('Related context unavailable; safe review context could not be retrieved');
   }
 }
@@ -220,7 +223,8 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const sources=(workflows.length>=2 || (workflows.length===1 && adapter))
     ? [...workflows,...(adapter?[adapter]:[])]
     : runtimeFiles.slice(0,SOURCE_LIMIT);
-  const fetcher=path=>fetchFile({repository,sha,path,api,token});
+  const missingPaths=new Set();
+  const fetcher=path=>fetchFile({repository,sha,path,api,token,missingPaths});
   const [rule,...bodies]=await Promise.all([
     fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
     ...tests.map(f=>fetcher(f.filename))
@@ -253,7 +257,9 @@ export async function collectReviewContext({repository,sha,files,token,api}){
       // Overlap alone is not equivalent: Widget.tsx explicitly imports .tsx,
       // whereas an extensionless runtime import may resolve Widget.ts first.
       testNeeds.push({test:tests[i].filename,options});
-      if(options.some(path=>included.has(path)))continue;
+      // A later included fallback does not prove earlier candidates are absent.
+      // Probe the higher-priority options before linking an extensionless test import.
+      if(included.has(options[0]))continue;
       if(!desired.some(d=>d.options.length===options.length &&
           d.options.every((path,index)=>path===options[index])))
         desired.push({test:tests[i].filename,options});
@@ -263,7 +269,7 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   for(const entry of desired.slice(0,9)){
     if(linked>=3||attempts>=MAX_IMPORT_RESOLUTION_READS)break;
     for(const path of entry.options){
-      if(included.has(path))continue;
+      if(included.has(path))break; // First available option wins; do not fetch lower-priority siblings.
       if(attempts>=MAX_IMPORT_RESOLUTION_READS)break;
       attempts++;
       const body=await fetcher(path);
@@ -277,7 +283,11 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   // Bind relationships only to the module actually available at this SHA.
   // This also preserves links when an earlier runtime import fetched the file.
   for(const {test,options} of testNeeds){
-    const resolved=options.find(path=>included.has(path));
+    // Do not attach a test to a later fallback unless earlier candidates were
+    // confirmed absent at this SHA. Quota exhaustion or unsafe/oversize files
+    // are unknown, not 404; omit the unverified relationship instead.
+    const resolved=options.find((path,index)=>included.has(path)&&
+      options.slice(0,index).every(prior=>missingPaths.has(prior)));
     if(resolved)links.push({test,implementation:resolved});
   }
   const projectRules=projectRuleExcerpts(rule,changed.map(f=>f.filename));
