@@ -4,9 +4,9 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[],additionalChangedSources=[]}) {
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[],additionalChangedSources=[],sourceTextOverride=null}) {
   const sourcePath=changedSourcePath;
-  const sourceText=`import {Widget} from "${specifier}";\nexport const action=Widget;`;
+  const sourceText=sourceTextOverride??`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
   const testText=`import {Widget} from "${testSpecifier}";\nexpect(Widget).toBeDefined();`;
   const files=[{filename:sourcePath,status:'modified',
@@ -155,4 +155,19 @@ test('runtime import prefers .ts over already included .tsx sibling',async()=>{
   });
   assert.ok(requested.includes(preferred),'Resolve higher-priority .ts even when .tsx is already included');
   assert.ok(context.sourceFiles.includes(preferred),'Send the true runtime dependency, not only the changed sibling');
+});
+
+
+// Regression: a runtime side-effect import is a real dependency. The old
+// collector only recognized `from` and dynamic `import(` syntax.
+test('side-effect runtime import includes its SHA-pinned dependency',async()=>{
+  const implementation='src/app/components/register.ts';
+  const {context,requested}=await inspect({
+    specifier:'./unused',implementation,
+    sourceTextOverride:'import "./components/register";\\nexport const ready=true;'.replace('\\n','\n')
+  });
+  assert.ok(requested.includes(implementation),
+    'The side-effect import must be resolved even without a from clause');
+  assert.ok(context.sourceFiles.includes(implementation),
+    'Include the side-effect dependency for review');
 });
