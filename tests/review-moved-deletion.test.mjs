@@ -64,3 +64,29 @@ test('unnamed hunk scopes do not waive the incomplete-review gate',()=>{
   assert.equal(coverage(unnamed).complete,false);
   assert.equal(coverage(unnamed).unanchoredDeletions,1);
 });
+
+/**
+ * Codex P1 reproduction: two different object methods share a Git hunk
+ * header. Moving the private-route guard to the public route must NOT make
+ * a deletion-only private-route hunk look fully reviewed.
+ * The private method now returns SECRET to an unauthorized caller.
+ */
+test('a shared object-header is not proof of the same guarded function',()=>{
+  const crossMethod=[
+    '@@ -10,4 +10,5 @@ export const handlers = {',
+    '   publicRoute(request) {',
+    '+    if (!request.isAdmin) return "DENIED";',
+    '+    return "PUBLIC";',
+    '   },',
+    '@@ -30,5 +31,4 @@ export const handlers = {',
+    '   privateRoute(request) {',
+    '-    if (!request.isAdmin) return "DENIED";',
+    '     return "SECRET";',
+    '   }',
+  ].join('\n');
+  const planned=planReviewBatches(file(crossMethod));
+  assert.equal(planned.coverage.complete,false,
+    'Private-route deletion has no added-line anchor: fail closed');
+  assert.equal(planned.coverage.unanchoredDeletions,1);
+  assert.equal(selectFilesForReview(file(crossMethod)).coverage.complete,false);
+});
