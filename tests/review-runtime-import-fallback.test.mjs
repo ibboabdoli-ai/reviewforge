@@ -4,7 +4,7 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[]}) {
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[],additionalChangedSources=[]}) {
   const sourcePath=changedSourcePath;
   const sourceText=`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
@@ -13,6 +13,8 @@ async function inspect({specifier,implementation,includeMatchingTest=false,testS
     patch:`@@ -1,1 +1,2 @@\n import {Widget} from "${specifier}";\n+export const action=Widget;`}];
   if(includeMatchingTest)files.push({filename:testPath,status:'modified',
     patch:'@@ -0,0 +1,1 @@\n+expect(Widget).toBeDefined();'});
+  for(const path of additionalChangedSources)files.push({filename:path,status:'modified',
+    patch:'@@ -1,1 +1,1 @@\n+export const Widget={changed:true};'});
   const sourceFiles={
     [sourcePath]:sourceText,
     [testPath]:testText,
@@ -139,4 +141,18 @@ test('oversized .ts runtime dependency does not silently select .tsx fallback',a
   assert.ok(!requested.includes(fallback),'An oversized preferred candidate is not a 404');
   assert.ok(!context.sourceFiles.includes(fallback),
     'Do not send an unrelated fallback source as the runtime dependency');
+});
+
+// A changed .tsx is not evidence that runtime extensionless import resolves to it.
+// An unchanged .ts sibling has higher precedence and must still be probed.
+test('runtime import prefers .ts over already included .tsx sibling',async()=>{
+  const preferred='src/app/components/Widget.ts';
+  const changedFallback='src/app/components/Widget.tsx';
+  const {context,requested}=await inspect({
+    specifier:'./components/Widget',implementation:preferred,
+    additionalChangedSources:[changedFallback],
+    extraSources:{[changedFallback]:'export const Widget={tsxOnly:true};'}
+  });
+  assert.ok(requested.includes(preferred),'Resolve higher-priority .ts even when .tsx is already included');
+  assert.ok(context.sourceFiles.includes(preferred),'Send the true runtime dependency, not only the changed sibling');
 });
