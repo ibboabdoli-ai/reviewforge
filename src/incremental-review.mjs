@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { distinctFindings } from './finding-identity.mjs';
 import { config } from './config.mjs';
 import { githubApi, installationToken, changedFiles, postReview } from './github.mjs';
 import { planReviewBatches, coverageSummary, validateFindings, unverifiedModelSuggestions, reviewWithAI } from './reviewer.mjs';
@@ -199,10 +200,8 @@ export async function analyzePullRequestStep({
   const unverifiedSuggestions=results.some(r=>r.unverifiedSuggestions!==false);
   const raw=results.flatMap(r=>r.findings);
   const rank={critical:0,high:1,medium:2,low:3};
-  const findings=raw.sort((a,b)=>(rank[a.severity]??4)-(rank[b.severity]??4)||
-    b.confidence-a.confidence)
-    .filter((f,i,arr)=>arr.findIndex(g=>g.path===f.path&&g.line===f.line)===i)
-    .slice(0,8);
+  const findings=distinctFindings(raw.sort((a,b)=>(rank[a.severity]??4)-(rank[b.severity]??4)||
+    b.confidence-a.confidence),8);
   const review={findings,summary:results.map(r=>r.summary).join(' ').slice(0,1200)};
   const summary=coverageSummary(coverage)+' '+review.summary;
   const current=await api(pullPath,token);
