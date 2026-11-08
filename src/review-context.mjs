@@ -156,7 +156,7 @@ export function isTestPath(path){
 export function testImplementationPaths(testPath,testText){
   // Resolve static test imports and mocks. Never evaluate imported source.
   const found=[],seen=new Set();
-  const pattern=/(?:\bfrom\s*|\bimport\s*\(\s*|\b(?:vi|jest)\.(?:mock|doMock)\(\s*|\brequire\(\s*)['"]([^'"]{1,160})['"]/g;
+  const pattern=/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\b(?:vi|jest)\.(?:mock|doMock)\(\s*|\brequire\(\s*)['"]([^'"]{1,160})['"]/g;
   for(const match of String(testText).slice(0,45000).matchAll(pattern)){
     const spec=match[1];
     if(!spec.startsWith('./')&&!spec.startsWith('../')&&!spec.startsWith('@/'))continue;
