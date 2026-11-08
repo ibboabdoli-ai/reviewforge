@@ -51,3 +51,21 @@ export function nextUtcDay(at=Date.now()){
   const today=new Date(at).toISOString().slice(0,10);
   return Date.parse(today+'T00:00:00.000Z')+86400000+60000;
 }
+
+/** Opt-in automatic private review for PRs including Draft.
+ * Never accept a single wildcard or loose repository match.
+ * This decision controls enqueue only; no-post is durably recorded per review.
+ */
+export function automaticShadowReviewDecision({event,action,repository,draft}={},{
+  allowed=[],shadow=[],automatic=[],fallbackOnly=[]
+}={}){
+  const enabled=repositoryAllowed(repository,allowed) &&
+    repositoryAllowed(repository,shadow) &&
+    repositoryAllowed(repository,automatic);
+  const queue=event==='pull_request' &&
+    ['opened','synchronize','reopened','ready_for_review'].includes(action) &&
+    repositoryAllowed(repository,allowed) &&
+    (!repositoryAllowed(repository,fallbackOnly)||enabled) &&
+    (!draft||enabled);
+  return {queue,automatic:queue&&enabled};
+}
