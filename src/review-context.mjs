@@ -170,8 +170,11 @@ export function testImplementationPaths(testPath,testText){
       posix.normalize(posix.join(posix.dirname(testPath),spec));
     const commonjs=/\brequire\s*\(\s*['"]/.test(match[0]);
     const safe=candidateImportPaths(root,{commonjs}).filter(p=>!isTestPath(p));
-    if(!safe.length||seen.has(root))continue;
-    seen.add(root);found.push(safe);
+    // The same specifier may resolve to distinct implementations under
+    // import() and CommonJS require(). Only collapse identical candidate lists.
+    const key=safe.join('\x00');
+    if(!safe.length||seen.has(key))continue;
+    seen.add(key);found.push(safe);
     if(found.length>=15)break;
   }
   return found;

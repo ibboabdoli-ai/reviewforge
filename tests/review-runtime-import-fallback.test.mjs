@@ -261,3 +261,30 @@ test('extensionless CommonJS require does not silently fall back to .ts',async()
   assert.ok(!context.sourceFiles.includes(implementation),
     'Do not provide a misleading related implementation to the model');
 });
+
+
+// Dynamic import() and CommonJS require() can select different implementations
+// for the same specifier. Preserve both links in either statement order.
+for(const order of ['import-first','require-first']){
+  test('mixed import and require preserve both SHA-pinned test dependencies: '+order,async()=>{
+    const esm='src/lib/dual.ts',commonjs='src/lib/dual.js';
+    const statements=[
+      "const imported = import('../src/lib/dual');",
+      "const required = require('../src/lib/dual');"
+    ];
+    if(order==='require-first')statements.reverse();
+    const {context,requested}=await inspect({
+      specifier:'./no-runtime-dependency',implementation:commonjs,
+      includeMatchingTest:true,
+      testTextOverride:statements.join('\\n').replaceAll('\\n','\n'),
+      extraSources:{[esm]:'export const moduleKind="import";'}
+    });
+    for(const path of [esm,commonjs]){
+      assert.ok(requested.includes(path),'Fetch both distinct resolution targets: '+path);
+      assert.ok(context.sourceFiles.includes(path),'Include both implementations: '+path);
+      assert.ok(context.testLinks.some(link=>
+        link.test==='tests/page.test.ts'&&link.implementation===path),
+        'Keep both independent behavior-test links: '+path);
+    }
+  });
+}
