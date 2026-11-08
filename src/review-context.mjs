@@ -226,7 +226,7 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     ...tests.map(f=>fetcher(f.filename))
   ]);
   const sourceBodies=bodies.slice(0,sources.length),testBodies=bodies.slice(sources.length);
-  const candidates=[],included=new Set(),links=[],desired=[];
+  const candidates=[],included=new Set(),links=[],desired=[],testNeeds=[];
   for(let i=0;i<sources.length;i++){
     if(!sourceBodies[i])continue;
     included.add(sources[i].filename);
@@ -249,17 +249,14 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     candidates.push({path:tests[i].filename,kind:'changed-test-behavior',
       text:sourceExcerpt(testBodies[i],tests[i].patch,1750)});
     for(const options of testImplementationPaths(tests[i].filename,testBodies[i])){
-      const already=options.find(path=>included.has(path));
-      if(already)links.push({test:tests[i].filename,implementation:already});
-      else {
-        // A runtime import may already own this candidate group. Preserve the
-        // test relationship without repeating the SHA-pinned file fetch.
-        const existing=desired.find(d=>d.options.some(path=>options.includes(path)));
-        if(existing){
-          if(!existing.tests)existing.tests=[];
-          if(!existing.tests.includes(tests[i].filename))existing.tests.push(tests[i].filename);
-        }else desired.push({test:tests[i].filename,options});
-      }
+      // Keep each test's actual import candidates separate from runtime imports.
+      // Overlap alone is not equivalent: Widget.tsx explicitly imports .tsx,
+      // whereas an extensionless runtime import may resolve Widget.ts first.
+      testNeeds.push({test:tests[i].filename,options});
+      if(options.some(path=>included.has(path)))continue;
+      if(!desired.some(d=>d.options.length===options.length &&
+          d.options.every((path,index)=>path===options[index])))
+        desired.push({test:tests[i].filename,options});
     }
   }
   let linked=0,attempts=0;
@@ -274,10 +271,14 @@ export async function collectReviewContext({repository,sha,files,token,api}){
       candidates.push({path,kind:entry.test?'test-linked-implementation':'related-import',
         text:relatedSourceExcerpt(body,1600)});
       included.add(path);linked++;
-      if(entry.test)links.push({test:entry.test,implementation:path});
-      for(const testPath of entry.tests||[])links.push({test:testPath,implementation:path});
       break;
     }
+  }
+  // Bind relationships only to the module actually available at this SHA.
+  // This also preserves links when an earlier runtime import fetched the file.
+  for(const {test,options} of testNeeds){
+    const resolved=options.find(path=>included.has(path));
+    if(resolved)links.push({test,implementation:resolved});
   }
   const projectRules=projectRuleExcerpts(rule,changed.map(f=>f.filename));
   let used=projectRules.length;
