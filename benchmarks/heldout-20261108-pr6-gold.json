@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "benchmarkId": "heldout-activity-notices-20261108",
+  "preregistration": "Registered before either external AI reviewer evaluates this synthetic target. Never supply gold to a model.",
+  "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
+  "targetPr": 6,
+  "targetBaseSha": "420bf122458eb298080bca9e94e6fcfb32339e59",
+  "targetHeadSha": "5d414d485105e4795b86978679ef9cc106507360",
+  "cases": [
+    {
+      "id": "equal-timestamp-cursor-loss",
+      "kind": "functional-correctness",
+      "path": "src/services/activity-feed.mjs",
+      "lineMin": 11,
+      "lineMax": 13,
+      "witness": "One tenant with three published events at the same timestamp: page one at limit 1 returns highest id, page two loses remaining IDs because the cursor predicate uses only timestamp.",
+      "expectedFix": "Use matching timestamp plus unique ID total order for sort and next-page predicate.",
+      "rating": "high"
+    },
+    {
+      "id": "notice-send-retry-lost",
+      "kind": "stateful-retry",
+      "path": "src/services/notice-dispatch.mjs",
+      "lineMin": 11,
+      "lineMax": 15,
+      "witness": "A transient transport error occurs after markSent; later retry returns duplicate without sending the notice.",
+      "expectedFix": "Only mark successful delivery after confirmed transport success while preserving safe deduplication and retries.",
+      "rating": "high"
+    }
+  ],
+  "cleanControls": [
+    {
+      "path": "src/lib/tenant-activity.mjs",
+      "contract": "Filters by tenant and published state with stable order."
+    },
+    {
+      "path": "src/lib/notice-store.mjs",
+      "contract": "Serializes callbacks for the same notice ID."
+    }
+  ],
+  "scoring": {
+    "primary": "Two independently witnessed runtime defects, correct source path and anchor required; evaluate novel findings separately.",
+    "source": "Exact immutable target SHA, frozen before AI comparison.",
+    "guardrails": "No production credentials, writes, merge, approval or paid retry after ambiguous response."
+  }
+}
