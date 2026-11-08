@@ -58,7 +58,7 @@ function hasDeletionOnlyHunk(patch){
     // that an added guard and an unanchored deleted guard are in one function.
     // Keep the narrow moved-hunk exception for explicit named declarations;
     // this is still not a full AST-verified security proof.
-    const namedFunction=/^(?:export\\s+)?(?:(?:default|async)\\s+)*function\\s+\\*?\\s*[A-Za-z_$][\\w$]*\\s*\\(/.test(h.scope);
+    const namedFunction=/^(?:export\s+)?(?:(?:default|async)\s+)*function\s+\*?\s*[A-Za-z_$][\w$]*\s*\(/.test(h.scope);
     if(!namedFunction || h.removed.length!==1)return true;
     const removed=h.removed[0];
     return !hunks.some(other=>other!==h && other.scope===h.scope &&
