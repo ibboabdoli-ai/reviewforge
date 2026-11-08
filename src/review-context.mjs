@@ -273,7 +273,12 @@ export async function collectReviewContext({repository,sha,files,token,api}){
       if(attempts>=MAX_IMPORT_RESOLUTION_READS)break;
       attempts++;
       const body=await fetcher(path);
-      if(!body)continue;
+      if(!body){
+        // A null source may be oversized or undecodable, not absent. Only a
+        // pinned 404 proves that trying a lower-priority sibling is valid.
+        if(!missingPaths.has(path))break;
+        continue;
+      }
       candidates.push({path,kind:entry.test?'test-linked-implementation':'related-import',
         text:relatedSourceExcerpt(body,1600)});
       included.add(path);linked++;
