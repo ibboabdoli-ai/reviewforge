@@ -22,22 +22,31 @@ export function safeContextPath(path){
 const IMPORT_EXTENSIONS=['.ts','.tsx','.js','.jsx','.mjs','.cjs'];
 const INDEX_EXTENSIONS=['.ts','.tsx','.js','.jsx'];
 const MAX_IMPORT_RESOLUTION_READS=36;
-function candidateImportPaths(root){
-  const options=IMPORT_EXTENSIONS.some(ext=>root.endsWith(ext))?[root]:[
+function candidateImportPaths(root,{commonjs=false}={}){
+  // Explicit data/native module specifiers are not extensionless JavaScript.
+  // Appending .js/.ts would invent an unrelated dependency and false test link.
+  if(/\.(?:json|node)$/i.test(root))return [];
+  const explicit=IMPORT_EXTENSIONS.some(ext=>root.endsWith(ext));
+  // Node CommonJS require('./name') searches .js, .json and .node before
+  // directories, not .ts/.tsx. We can safely fetch only .js among those
+  // candidates; an unknown JSON/native sibling must not justify falling back
+  // to unrelated TS/JSX/index sources. Explicit .cjs stays supported.
+  const options=explicit?[root]:commonjs?[root+'.js']:[
     ...IMPORT_EXTENSIONS.map(ext=>root+ext),
     ...INDEX_EXTENSIONS.map(ext=>root+'/index'+ext)
   ];
   return options.filter(safeContextPath);
 }
 function runtimeImportCandidates(sourcePath,sourceText){
-  const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
+  const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
   const found=[],seen=new Set();
-  for(const [,specifier] of matches.slice(0,30)){
+  for(const match of matches.slice(0,30)){
+    const specifier=match[1],commonjs=/\brequire\s*\(\s*['"]/.test(match[0]);
     if(specifier.startsWith('@/') && specifier.split('/').includes('..'))continue;
     const root=specifier.startsWith('@/')
       ?posix.normalize('src/'+specifier.slice(2))
       :posix.normalize(posix.join(posix.dirname(sourcePath),specifier));
-    const options=candidateImportPaths(root).filter(path=>path!==sourcePath);
+    const options=candidateImportPaths(root,{commonjs}).filter(path=>path!==sourcePath);
     if(!options.length||seen.has(options[0]))continue;
     seen.add(options[0]);found.push(options);
   }
@@ -124,7 +133,7 @@ export function projectRuleExcerpts(yaml,paths){
     .slice(0,3).map(s=>s.body.join(' ').slice(0,1100)).filter(Boolean).join('\n');
   return redactKnownTokens(text).slice(0,2200);
 }
-async function fetchFile({repository,sha,path,api,token}){
+async function fetchFile({repository,sha,path,api,token,missingPaths}){
   if(path!=='.coderabbit.yaml' && !safeContextPath(path))return null;
   if(!/^[a-f0-9]{40}$/i.test(sha))throw new Error('Invalid immutable PR SHA');
   const q=path.split('/').map(encodeURIComponent).join('/');
@@ -135,7 +144,10 @@ async function fetchFile({repository,sha,path,api,token}){
     if(source.includes('\uFFFD')||source.includes('\0'))return null;
     return source;
   }catch(e){
-    if(/^GitHub 404:/.test(String(e?.message)))return null;
+    if(/^GitHub 404:/.test(String(e?.message))){
+      missingPaths?.add(path); // Only a confirmed 404 means an earlier resolution choice is absent.
+      return null;
+    }
     throw new Error('Related context unavailable; safe review context could not be retrieved');
   }
 }
@@ -153,15 +165,19 @@ export function isTestPath(path){
 export function testImplementationPaths(testPath,testText){
   // Resolve static test imports and mocks. Never evaluate imported source.
   const found=[],seen=new Set();
-  const pattern=/(?:\bfrom\s*|\bimport\s*\(\s*|\b(?:vi|jest)\.(?:mock|doMock)\(\s*|\brequire\(\s*)['"]([^'"]{1,160})['"]/g;
+  const pattern=/(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+|\b(?:vi|jest)\.(?:mock|doMock)\(\s*|\brequire\s*\(\s*)['"]([^'"]{1,160})['"]/g;
   for(const match of String(testText).slice(0,45000).matchAll(pattern)){
     const spec=match[1];
     if(!spec.startsWith('./')&&!spec.startsWith('../')&&!spec.startsWith('@/'))continue;
     const root=spec.startsWith('@/')?posix.normalize('src/'+spec.slice(2)):
       posix.normalize(posix.join(posix.dirname(testPath),spec));
-    const safe=candidateImportPaths(root).filter(p=>!isTestPath(p));
-    if(!safe.length||seen.has(root))continue;
-    seen.add(root);found.push(safe);
+    const commonjs=/\brequire\s*\(\s*['"]/.test(match[0]);
+    const safe=candidateImportPaths(root,{commonjs}).filter(p=>!isTestPath(p));
+    // The same specifier may resolve to distinct implementations under
+    // import() and CommonJS require(). Only collapse identical candidate lists.
+    const key=safe.join('\x00');
+    if(!safe.length||seen.has(key))continue;
+    seen.add(key);found.push(safe);
     if(found.length>=15)break;
   }
   return found;
@@ -220,13 +236,14 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const sources=(workflows.length>=2 || (workflows.length===1 && adapter))
     ? [...workflows,...(adapter?[adapter]:[])]
     : runtimeFiles.slice(0,SOURCE_LIMIT);
-  const fetcher=path=>fetchFile({repository,sha,path,api,token});
+  const missingPaths=new Set();
+  const fetcher=path=>fetchFile({repository,sha,path,api,token,missingPaths});
   const [rule,...bodies]=await Promise.all([
     fetcher('.coderabbit.yaml'),...sources.map(f=>fetcher(f.filename)),
     ...tests.map(f=>fetcher(f.filename))
   ]);
   const sourceBodies=bodies.slice(0,sources.length),testBodies=bodies.slice(sources.length);
-  const candidates=[],included=new Set(),links=[],desired=[];
+  const candidates=[],included=new Set(),links=[],desired=[],testNeeds=[];
   for(let i=0;i<sources.length;i++){
     if(!sourceBodies[i])continue;
     included.add(sources[i].filename);
@@ -238,8 +255,12 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   for(let i=0;i<sources.length;i++){
     if(!sourceBodies[i])continue;
     for(const options of runtimeImportCandidates(sources[i].filename,sourceBodies[i])){
-      if(!options.some(path=>included.has(path)) &&
-         !desired.some(d=>d.options.some(path=>options.includes(path))))
+      // A changed .tsx sibling does not prove that an extensionless import
+      // resolves to it; the higher-priority .ts choice must still be checked.
+      // Distinct candidate orders may not be collapsed by partial overlap.
+      if(!included.has(options[0]) &&
+         !desired.some(d=>d.options.length===options.length &&
+           d.options.every((path,index)=>path===options[index])))
         desired.push({test:null,options});
     }
   }
@@ -249,35 +270,47 @@ export async function collectReviewContext({repository,sha,files,token,api}){
     candidates.push({path:tests[i].filename,kind:'changed-test-behavior',
       text:sourceExcerpt(testBodies[i],tests[i].patch,1750)});
     for(const options of testImplementationPaths(tests[i].filename,testBodies[i])){
-      const already=options.find(path=>included.has(path));
-      if(already)links.push({test:tests[i].filename,implementation:already});
-      else {
-        // A runtime import may already own this candidate group. Preserve the
-        // test relationship without repeating the SHA-pinned file fetch.
-        const existing=desired.find(d=>d.options.some(path=>options.includes(path)));
-        if(existing){
-          if(!existing.tests)existing.tests=[];
-          if(!existing.tests.includes(tests[i].filename))existing.tests.push(tests[i].filename);
-        }else desired.push({test:tests[i].filename,options});
-      }
+      // Keep each test's actual import candidates separate from runtime imports.
+      // Overlap alone is not equivalent: Widget.tsx explicitly imports .tsx,
+      // whereas an extensionless runtime import may resolve Widget.ts first.
+      testNeeds.push({test:tests[i].filename,options});
+      // A later included fallback does not prove earlier candidates are absent.
+      // Probe the higher-priority options before linking an extensionless test import.
+      if(included.has(options[0]))continue;
+      if(!desired.some(d=>d.options.length===options.length &&
+          d.options.every((path,index)=>path===options[index])))
+        desired.push({test:tests[i].filename,options});
     }
   }
   let linked=0,attempts=0;
   for(const entry of desired.slice(0,9)){
     if(linked>=3||attempts>=MAX_IMPORT_RESOLUTION_READS)break;
     for(const path of entry.options){
-      if(included.has(path))continue;
+      if(included.has(path))break; // First available option wins; do not fetch lower-priority siblings.
       if(attempts>=MAX_IMPORT_RESOLUTION_READS)break;
       attempts++;
       const body=await fetcher(path);
-      if(!body)continue;
+      if(!body){
+        // A null source may be oversized or undecodable, not absent. Only a
+        // pinned 404 proves that trying a lower-priority sibling is valid.
+        if(!missingPaths.has(path))break;
+        continue;
+      }
       candidates.push({path,kind:entry.test?'test-linked-implementation':'related-import',
         text:relatedSourceExcerpt(body,1600)});
       included.add(path);linked++;
-      if(entry.test)links.push({test:entry.test,implementation:path});
-      for(const testPath of entry.tests||[])links.push({test:testPath,implementation:path});
       break;
     }
+  }
+  // Bind relationships only to the module actually available at this SHA.
+  // This also preserves links when an earlier runtime import fetched the file.
+  for(const {test,options} of testNeeds){
+    // Do not attach a test to a later fallback unless earlier candidates were
+    // confirmed absent at this SHA. Quota exhaustion or unsafe/oversize files
+    // are unknown, not 404; omit the unverified relationship instead.
+    const resolved=options.find((path,index)=>included.has(path)&&
+      options.slice(0,index).every(prior=>missingPaths.has(prior)));
+    if(resolved)links.push({test,implementation:resolved});
   }
   const projectRules=projectRuleExcerpts(rule,changed.map(f=>f.filename));
   let used=projectRules.length;
