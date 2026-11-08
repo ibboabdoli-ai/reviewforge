@@ -218,3 +218,46 @@ test('CommonJS behavior test with spaced require links to SHA-pinned source',asy
   assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===implementation),
     'Behavior test link must be preserved');
 });
+
+
+// Node's extensionless CommonJS resolution prefers .js over an unrelated .ts
+// sibling. A pinned sampler must not send the wrong implementation to AI.
+test('CommonJS require prefers .js over competing .ts sibling',async()=>{
+  const implementation='scripts/plugin.js',other='scripts/plugin.ts';
+  const {context,requested}=await inspect({
+    changedSourcePath:'scripts/bootstrap.cjs',specifier:'./unused',implementation,
+    sourceTextOverride:"const plugin = require('./plugin');\nplugin();",
+    extraSources:{[other]:'export const plugin = "unrelated TS implementation";'}
+  });
+  assert.ok(requested.includes(implementation),'The actual Node runtime module must be requested');
+  assert.ok(!requested.includes(other),'Never try TypeScript before the CommonJS .js resolution');
+  assert.ok(context.sourceFiles.includes(implementation),'Include the executed implementation');
+  assert.ok(!context.sourceFiles.includes(other),'Do not include the unrelated sibling as a dependency');
+});
+
+test('CommonJS behavior test links to .js rather than competing .ts',async()=>{
+  const implementation='src/lib/service.js',other='src/lib/service.ts';
+  const {context,requested}=await inspect({
+    specifier:'./no-runtime-dependency',implementation,includeMatchingTest:true,
+    testTextOverride:"const service = require ('../src/lib/service');\nexpect(service).toBeTruthy();",
+    extraSources:{[other]:'export const service = "unrelated TS implementation";'}
+  });
+  assert.ok(requested.includes(implementation),'Resolve the CommonJS .js module');
+  assert.ok(!requested.includes(other),'Do not sample the TypeScript sibling for require()');
+  assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===implementation),
+    'Link the CommonJS test only to the correct source file');
+  assert.ok(!context.testLinks.some(l=>l.implementation===other),
+    'Avoid false relationships to the .ts sibling');
+});
+
+test('extensionless CommonJS require does not silently fall back to .ts',async()=>{
+  const implementation='scripts/plugin.ts';
+  const {context,requested}=await inspect({
+    changedSourcePath:'scripts/bootstrap.cjs',specifier:'./unused',implementation,
+    sourceTextOverride:"const plugin = require('./plugin');\nplugin();"
+  });
+  assert.ok(requested.includes('scripts/plugin.js'),'First probe the Node CommonJS .js candidate');
+  assert.ok(!requested.includes(implementation),'Unverified .ts is not a Node require() fallback');
+  assert.ok(!context.sourceFiles.includes(implementation),
+    'Do not provide a misleading related implementation to the model');
+});

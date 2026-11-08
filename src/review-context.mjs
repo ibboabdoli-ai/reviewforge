@@ -22,8 +22,13 @@ export function safeContextPath(path){
 const IMPORT_EXTENSIONS=['.ts','.tsx','.js','.jsx','.mjs','.cjs'];
 const INDEX_EXTENSIONS=['.ts','.tsx','.js','.jsx'];
 const MAX_IMPORT_RESOLUTION_READS=36;
-function candidateImportPaths(root){
-  const options=IMPORT_EXTENSIONS.some(ext=>root.endsWith(ext))?[root]:[
+function candidateImportPaths(root,{commonjs=false}={}){
+  const explicit=IMPORT_EXTENSIONS.some(ext=>root.endsWith(ext));
+  // Node CommonJS require('./name') searches .js, .json and .node before
+  // directories, not .ts/.tsx. We can safely fetch only .js among those
+  // candidates; an unknown JSON/native sibling must not justify falling back
+  // to unrelated TS/JSX/index sources. Explicit .cjs stays supported.
+  const options=explicit?[root]:commonjs?[root+'.js']:[
     ...IMPORT_EXTENSIONS.map(ext=>root+ext),
     ...INDEX_EXTENSIONS.map(ext=>root+'/index'+ext)
   ];
@@ -32,12 +37,13 @@ function candidateImportPaths(root){
 function runtimeImportCandidates(sourcePath,sourceText){
   const matches=[...String(sourceText).matchAll(/(?:from\s*|import\s*\(\s*|\bimport\s+|\brequire\s*\(\s*)['"]((?:\.{1,2}\/|@\/)[^'"]+)['"]/g)];
   const found=[],seen=new Set();
-  for(const [,specifier] of matches.slice(0,30)){
+  for(const match of matches.slice(0,30)){
+    const specifier=match[1],commonjs=/\brequire\s*\(\s*['"]/.test(match[0]);
     if(specifier.startsWith('@/') && specifier.split('/').includes('..'))continue;
     const root=specifier.startsWith('@/')
       ?posix.normalize('src/'+specifier.slice(2))
       :posix.normalize(posix.join(posix.dirname(sourcePath),specifier));
-    const options=candidateImportPaths(root).filter(path=>path!==sourcePath);
+    const options=candidateImportPaths(root,{commonjs}).filter(path=>path!==sourcePath);
     if(!options.length||seen.has(options[0]))continue;
     seen.add(options[0]);found.push(options);
   }
@@ -162,7 +168,8 @@ export function testImplementationPaths(testPath,testText){
     if(!spec.startsWith('./')&&!spec.startsWith('../')&&!spec.startsWith('@/'))continue;
     const root=spec.startsWith('@/')?posix.normalize('src/'+spec.slice(2)):
       posix.normalize(posix.join(posix.dirname(testPath),spec));
-    const safe=candidateImportPaths(root).filter(p=>!isTestPath(p));
+    const commonjs=/\brequire\s*\(\s*['"]/.test(match[0]);
+    const safe=candidateImportPaths(root,{commonjs}).filter(p=>!isTestPath(p));
     if(!safe.length||seen.has(root))continue;
     seen.add(root);found.push(safe);
     if(found.length>=15)break;
