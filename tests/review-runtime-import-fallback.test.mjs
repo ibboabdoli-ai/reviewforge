@@ -4,11 +4,11 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[],additionalChangedSources=[],sourceTextOverride=null}) {
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[],additionalChangedSources=[],sourceTextOverride=null,testTextOverride=null}) {
   const sourcePath=changedSourcePath;
   const sourceText=sourceTextOverride??`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
-  const testText=`import {Widget} from "${testSpecifier}";\nexpect(Widget).toBeDefined();`;
+  const testText=testTextOverride??`import {Widget} from "${testSpecifier}";\nexpect(Widget).toBeDefined();`;
   const files=[{filename:sourcePath,status:'modified',
     patch:`@@ -1,1 +1,2 @@\n import {Widget} from "${specifier}";\n+export const action=Widget;`}];
   if(includeMatchingTest)files.push({filename:testPath,status:'modified',
@@ -170,4 +170,18 @@ test('side-effect runtime import includes its SHA-pinned dependency',async()=>{
     'The side-effect import must be resolved even without a from clause');
   assert.ok(context.sourceFiles.includes(implementation),
     'Include the side-effect dependency for review');
+});
+
+// A changed behavior test can load a runtime module via a bare side-effect
+// import. Its SHA-pinned implementation must be included and linked.
+test('side-effect import in a changed behavior test links its implementation',async()=>{
+  const implementation='src/app/components/register.ts';
+  const {context,requested}=await inspect({
+    specifier:'./unused-runtime',implementation,includeMatchingTest:true,
+    testTextOverride:'import "../src/app/components/register";\\nexpect(true).toBe(true);'.replace('\\n','\n')
+  });
+  assert.ok(requested.includes(implementation),'Implementation must be fetched at immutable SHA');
+  assert.ok(context.sourceFiles.includes(implementation),'Implementation must reach review context');
+  assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===implementation),
+    'The behavior-test relationship must be preserved');
 });
