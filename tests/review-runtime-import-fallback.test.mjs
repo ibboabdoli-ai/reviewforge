@@ -288,3 +288,34 @@ for(const order of ['import-first','require-first']){
     }
   });
 }
+
+
+// Explicit CommonJS JSON/native targets are not JavaScript filenames. The
+// extensionless JS resolver must not fabricate a .json.js or .node.js sibling.
+// This fixture uses the same immutable-SHA synthetic GitHub API as above.
+for(const extension of ['json','node']){
+  test('explicit non-JavaScript CommonJS .'+extension+' does not fetch a fabricated JS sibling',async()=>{
+    const fabricated='scripts/config.'+extension+'.js';
+    const {context,requested}=await inspect({
+      changedSourcePath:'scripts/bootstrap.cjs',specifier:'./unused',
+      implementation:fabricated,
+      sourceTextOverride:"const config = require('./config."+extension+"');\\nvoid config;"
+    });
+    assert.ok(!requested.includes(fabricated),
+      'Never resolve an explicit non-JS require target to an unrelated .js file');
+    assert.ok(!context.sourceFiles.includes(fabricated),
+      'Unrelated fabricated JS source must not enter model context');
+  });
+}
+
+test('explicit non-JavaScript CommonJS test import cannot acquire a false test link',async()=>{
+  const fabricated='src/lib/config.json.js';
+  const {context,requested}=await inspect({
+    specifier:'./unused',implementation:fabricated,includeMatchingTest:true,
+    testTextOverride:"const config = require('../src/lib/config.json');\\nexpect(config).toBeTruthy();"
+  });
+  assert.ok(!requested.includes(fabricated),
+    'Do not fetch a fabricated .json.js implementation for require(.json)');
+  assert.ok(!context.testLinks.some(l=>l.implementation===fabricated),
+    'Do not attach a behavior test to a module Node would never require');
+});
