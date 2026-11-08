@@ -247,7 +247,7 @@ export async function collectReviewContext({repository,sha,files,token,api}){
       // Distinct candidate orders may not be collapsed by partial overlap.
       if(!included.has(options[0]) &&
          !desired.some(d=>d.options.length===options.length &&
-           d.options.every((path,index)=>path===options[index)))
+           d.options.every((path,index)=>path===options[index]))
         desired.push({test:null,options});
     }
   }
