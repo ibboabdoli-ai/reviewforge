@@ -4,7 +4,7 @@ import {collectReviewContext} from '../src/review-context.mjs';
 
 const sha='f'.repeat(40), repository='sample/runtime-imports';
 
-async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx'}) {
+async function inspect({specifier,implementation,includeMatchingTest=false,testSpecifier='../src/app/components/Widget',extraSources={},changedSourcePath='src/app/page.tsx',oversizedPaths=[]}) {
   const sourcePath=changedSourcePath;
   const sourceText=`import {Widget} from "${specifier}";\nexport const action=Widget;`;
   const testPath='tests/page.test.ts';
@@ -29,7 +29,7 @@ async function inspect({specifier,implementation,includeMatchingTest=false,testS
     requested.push(filepath);
     if(!Object.hasOwn(sourceFiles,filepath))throw new Error('GitHub 404: Not Found');
     const value=sourceFiles[filepath];
-    return {type:'file',encoding:'base64',size:Buffer.byteLength(value),
+    return {type:'file',encoding:'base64',size:oversizedPaths.includes(filepath)?55001:Buffer.byteLength(value),
       content:Buffer.from(value).toString('base64')};
   };
   const context=await collectReviewContext({repository,sha,files,api,token:'fixture'});
@@ -122,4 +122,21 @@ test('test import must prefer .ts sibling to an already included .tsx source',as
     'The extensionless test import resolves to the .ts sibling');
   assert.ok(!context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===tsx),
     'Never link a test to the unrelated already-included .tsx module');
+});
+
+// When the preferred source exists but exceeds the context size limit, its
+// existence is unknown to the sampler, not equivalent to a GitHub 404.
+// A lower-priority sibling must not masquerade as the runtime dependency.
+test('oversized .ts runtime dependency does not silently select .tsx fallback',async()=>{
+  const preferred='src/app/components/Widget.ts';
+  const fallback='src/app/components/Widget.tsx';
+  const {context,requested}=await inspect({
+    specifier:'./components/Widget',implementation:preferred,
+    extraSources:{[fallback]:'export const Widget={wrongSibling:true};'},
+    oversizedPaths:[preferred]
+  });
+  assert.ok(requested.includes(preferred),'The preferred candidate was inspected');
+  assert.ok(!requested.includes(fallback),'An oversized preferred candidate is not a 404');
+  assert.ok(!context.sourceFiles.includes(fallback),
+    'Do not send an unrelated fallback source as the runtime dependency');
 });
