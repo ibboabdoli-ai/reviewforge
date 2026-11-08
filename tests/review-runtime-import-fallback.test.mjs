@@ -201,3 +201,20 @@ test('runtime CommonJS require resolves its SHA-pinned local dependency',async()
   assert.ok(context.sourceFiles.includes(implementation),
     'CommonJS implementation must reach the reviewing model');
 });
+
+// A CommonJS behavior test may legally put whitespace before require(.
+// The runtime parser already accepts this; test dependency discovery must too.
+test('CommonJS behavior test with spaced require links to SHA-pinned source',async()=>{
+  const implementation='src/lib/tenant-service.js';
+  const {context,requested}=await inspect({
+    specifier:'./components/unrelated-module',implementation,
+    includeMatchingTest:true,
+    testTextOverride:"const service = require ('../src/lib/tenant-service.js');\nexpect(service).toBeTruthy();"
+  });
+  assert.ok(requested.includes(implementation),
+    'Spaced require() must resolve the behavior test implementation at pinned HEAD');
+  assert.ok(context.sourceFiles.includes(implementation),
+    'Referenced CommonJS implementation must reach review context');
+  assert.ok(context.testLinks.some(l=>l.test==='tests/page.test.ts'&&l.implementation===implementation),
+    'Behavior test link must be preserved');
+});
