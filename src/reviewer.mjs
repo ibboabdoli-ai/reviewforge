@@ -53,9 +53,13 @@ function hasDeletionOnlyHunk(patch){
   };
   return hunks.some(h=>{
     if(!h.removed.length || h.added.length)return false;
-    // Missing function scope, separate removal runs or an edited replacement
-    // cannot be proven to have an alternate changed-line anchor.
-    if(!h.scope || h.removed.length!==1)return true;
+    // Generic @@ headers (e.g. "export const handlers = {") can cover
+    // multiple independent methods. Treat them as UNKNOWN, never as proof
+    // that an added guard and an unanchored deleted guard are in one function.
+    // Keep the narrow moved-hunk exception for explicit named declarations;
+    // this is still not a full AST-verified security proof.
+    const namedFunction=/^(?:export\\s+)?(?:(?:default|async)\\s+)*function\\s+\\*?\\s*[A-Za-z_$][\\w$]*\\s*\\(/.test(h.scope);
+    if(!namedFunction || h.removed.length!==1)return true;
     const removed=h.removed[0];
     return !hunks.some(other=>other!==h && other.scope===h.scope &&
       other.added.some(added=>containsBlock(added,removed)));
