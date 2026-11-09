@@ -19,51 +19,24 @@ export function redactKnownTokens(patch){
   return patch.replace(/sk-(?:proj-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}/g,'[REDACTED_TOKEN]')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi,'$1[REDACTED_TOKEN]');
 }
-// A deletion-only hunk normally has no reportable added-line anchor.
-// Exception: a *byte-identical contiguous* removed block reinserted inside
-// the same named function in another hunk. Then the moved block has new-line
-// anchors and its changed position can be reviewed as part of the full diff.
-// Other removals remain partial; never infer semantic safety from relocation.
+// A deletion-only hunk has no reportable added-line anchor. Git's textual
+// hunk suffix cannot establish AST/enclosing-function identity: even two
+// different functions in different namespaces may have the same header.
+// Until trusted source-aware proof and removed-line anchors exist, reject
+// ALL deletion-only hunks as incomplete instead of declaring them clean.
+/** Fail closed on deletion-only hunks, ignoring pre-hunk file headers. */
 function hasDeletionOnlyHunk(patch){
-  const hunks=[];
-  let current=null,run=null,runType=null;
-  const flushRun=()=>{
-    if(run?.length && current)current[runType].push(run);
-    run=null;runType=null;
-  };
+  let inHunk=false,removed=false,added=false;
   for(const line of String(patch).split('\n')){
-    const header=line.match(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(.*)$/);
-    if(header){
-      flushRun();
-      current={scope:header[1].trim(),added:[],removed:[]};
-      hunks.push(current);
-      continue;
+    if(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)){
+      if(inHunk && removed && !added)return true;
+      inHunk=true;removed=false;added=false;
+    }else if(inHunk){
+      if(line.startsWith('-'))removed=true;
+      if(line.startsWith('+'))added=true;
     }
-    if(!current)continue;
-    const type=line.startsWith('+')?'added':line.startsWith('-')?'removed':null;
-    if(type!==runType)flushRun();
-    if(type){runType=type;if(!run)run=[];run.push(line.slice(1));}
   }
-  flushRun();
-  const containsBlock=(candidate,block)=>{
-    if(candidate.length<block.length)return false;
-    for(let i=0;i<=candidate.length-block.length;i++)
-      if(block.every((row,index)=>candidate[i+index]===row))return true;
-    return false;
-  };
-  return hunks.some(h=>{
-    if(!h.removed.length || h.added.length)return false;
-    // Generic @@ headers (e.g. "export const handlers = {") can cover
-    // multiple independent methods. Treat them as UNKNOWN, never as proof
-    // that an added guard and an unanchored deleted guard are in one function.
-    // Keep the narrow moved-hunk exception for explicit named declarations;
-    // this is still not a full AST-verified security proof.
-    const namedFunction=/^(?:export\s+)?(?:(?:default|async)\s+)*function\s+\*?\s*[A-Za-z_$][\w$]*\s*\(/.test(h.scope);
-    if(!namedFunction || h.removed.length!==1)return true;
-    const removed=h.removed[0];
-    return !hunks.some(other=>other!==h && other.scope===h.scope &&
-      other.added.some(added=>containsBlock(added,removed)));
-  });
+  return inHunk && removed && !added;
 }
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
