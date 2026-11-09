@@ -195,19 +195,34 @@ export function prioritizeBehaviorTests(testFiles,sourceFiles){
     const tokens=f.filename.toLowerCase().split(/[^a-z0-9]+/);
     return Math.max(0,...names.map(words=>tokens.filter(t=>words.has(t)).length));
   };
-  // Under the fixed three-test context budget, keep trust-boundary regressions
-  // visible before convenience/demo tests. Stable ties use source overlap.
-  const ranked=testFiles.map((f,i)=>({f,i,risk:risk(f),rank:score(f)}))
-    .sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i);
-  // Keep up to two of the three slots linked to changed source paths.
-  // An unrelated security-named test may still occupy the remaining slot.
-  // Swapping, rather than inserting, preserves already-selected linked tests.
-  const linkedAvailable=ranked.filter(x=>x.rank>0).length;
+  // Same-directory foo.test.ts / foo.ts is stronger evidence than a
+  // generic shared domain folder such as "booking". Keep two such direct
+  // regressions within the existing three-slot budget, before considering
+  // lexical overlap. Leave the remaining slot for risk-ranked tests.
+  const sourceStems=new Set(sourceFiles.map(f=>
+    f.filename.toLowerCase().replace(/\.[cm]?[jt]sx?$/, '')));
+  const directlyLinked=f=>sourceStems.has(f.filename.toLowerCase()
+    .replace(/\.(?:test|spec)\.[cm]?[jt]sx?$/, ''));
+  const ranked=testFiles.map((f,i)=>({
+    f,i,risk:risk(f),rank:score(f),direct:directlyLinked(f)
+  })).sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i);
+  const minimumDirect=Math.min(2,ranked.filter(x=>x.direct).length);
+  let directSelected=ranked.slice(0,3).filter(x=>x.direct).length;
+  while(ranked.length>3 && directSelected<minimumDirect){
+    const next=ranked.findIndex((x,i)=>i>=3&&x.direct);
+    const evict=[2,1,0].find(i=>ranked[i]&&!ranked[i].direct);
+    if(next<0||evict===undefined)break;
+    [ranked[evict],ranked[next]]=[ranked[next],ranked[evict]];
+    directSelected++;
+  }
+  // Keep up to two linked tests total. Strong same-path links count even if
+  // the basename is short and lexical token overlap is unavailable.
+  const linkedAvailable=ranked.filter(x=>x.direct||x.rank>0).length;
   const minimumLinked=Math.min(2,linkedAvailable);
-  let linkedSelected=ranked.slice(0,3).filter(x=>x.rank>0).length;
+  let linkedSelected=ranked.slice(0,3).filter(x=>x.direct||x.rank>0).length;
   while(ranked.length>3 && linkedSelected<minimumLinked){
-    const nextLinked=ranked.findIndex((x,i)=>i>=3&&x.rank>0);
-    const evict=[2,1,0].find(i=>ranked[i]?.rank===0);
+    const nextLinked=ranked.findIndex((x,i)=>i>=3&&(x.direct||x.rank>0));
+    const evict=[2,1,0].find(i=>ranked[i]&&!ranked[i].direct&&ranked[i].rank===0);
     if(nextLinked<0||evict===undefined)break;
     [ranked[evict],ranked[nextLinked]]=[ranked[nextLinked],ranked[evict]];
     linkedSelected++;
