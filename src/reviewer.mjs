@@ -19,22 +19,24 @@ export function redactKnownTokens(patch){
   return patch.replace(/sk-(?:proj-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}/g,'[REDACTED_TOKEN]')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi,'$1[REDACTED_TOKEN]');
 }
-// Inline findings currently require an added line in the affected hunk.
-// An addition in another hunk cannot anchor a removed guard here. Until
-// deleted-line findings are supported, keep these changes explicitly partial.
-/** Detect a deleted-only hunk with no added-line anchor; ignore file headers. */
+// A deletion-only hunk has no reportable added-line anchor. Git's textual
+// hunk suffix cannot establish AST/enclosing-function identity: even two
+// different functions in different namespaces may have the same header.
+// Until trusted source-aware proof and removed-line anchors exist, reject
+// ALL deletion-only hunks as incomplete instead of declaring them clean.
+/** Fail closed on deletion-only hunks, ignoring pre-hunk file headers. */
 function hasDeletionOnlyHunk(patch){
   let inHunk=false,removed=false,added=false;
-  for(const line of patch.split('\n')){
+  for(const line of String(patch).split('\n')){
     if(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)){
-      if(removed&&!added)return true;
+      if(inHunk && removed && !added)return true;
       inHunk=true;removed=false;added=false;
     }else if(inHunk){
       if(line.startsWith('-'))removed=true;
       if(line.startsWith('+'))added=true;
     }
   }
-  return removed&&!added;
+  return inHunk && removed && !added;
 }
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
