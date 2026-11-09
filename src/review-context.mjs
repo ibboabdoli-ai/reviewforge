@@ -184,7 +184,8 @@ export function testImplementationPaths(testPath,testText){
 }
 export function prioritizeBehaviorTests(testFiles,sourceFiles){
   const names=sourceFiles.map(f=>new Set(f.filename.toLowerCase().split(/[^a-z0-9]+/)
-    .filter(x=>x.length>3&&!['public','components','tests','source','features'].includes(x))));
+    .filter(x=>x.length>3&&!['public','components','tests','source','features',
+      'services','shared','utils','helpers','handlers','routes','pages','hooks'].includes(x))));
   const riskWords=new Set(['auth','authentication','authorization','security','privacy',
     'session','fingerprint','rate','limit','guard','permission','token',
     'payment','billing','refund','webhook','retry','idempotency','quota']);
