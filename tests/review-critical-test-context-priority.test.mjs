@@ -53,3 +53,20 @@ test('risk-named but unrelated tests cannot crowd out every test tied to changed
     'At least one source-linked regression must survive the three-test context budget');
   assert.equal(selected.length,3,'Do not increase the context or model budget');
 });
+
+test('unrelated security-named tests cannot displace a second changed-source regression',()=>{
+  const sources=entries(['src/components/widget-grid.tsx','src/lib/price-planner.ts']);
+  const tests=entries([
+    'tests/auth-login.test.ts',
+    'tests/security-audit.test.ts',
+    'tests/token-refresh.test.ts',
+    'tests/widget-grid.test.ts',
+    'tests/price-planner.test.ts'
+  ]);
+  const selected=prioritizeBehaviorTests(tests,sources).slice(0,3).map(f=>f.filename);
+  assert.ok(selected.includes('tests/widget-grid.test.ts'),
+    'Keep a regression linked to the first changed runtime path');
+  assert.ok(selected.includes('tests/price-planner.test.ts'),
+    'Keep a regression linked to the second changed runtime path');
+  assert.equal(selected.length,3,'The AI test-context budget must remain unchanged');
+});
