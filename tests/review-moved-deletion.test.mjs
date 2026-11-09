@@ -111,7 +111,7 @@ test('same named function headers across namespaces cannot waive a private guard
     '-  const permitted = isAdmin(token);',
     '-  if (!permitted) return false;',
     '   return "SECRET";',
-  ].join('\\n');
+  ].join('\n');
   const selected=selectFilesForReview(file(crossNamespace));
   const planned=planReviewBatches(file(crossNamespace));
   assert.equal(planned.coverage.complete,false,
