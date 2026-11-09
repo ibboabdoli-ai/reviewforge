@@ -184,13 +184,50 @@ export function testImplementationPaths(testPath,testText){
 }
 export function prioritizeBehaviorTests(testFiles,sourceFiles){
   const names=sourceFiles.map(f=>new Set(f.filename.toLowerCase().split(/[^a-z0-9]+/)
-    .filter(x=>x.length>3&&!['public','components','tests','source'].includes(x))));
+    .filter(x=>x.length>3&&!['public','components','tests','source','features',
+      'services','shared','utils','helpers','handlers','routes','pages','hooks'].includes(x))));
+  const riskWords=new Set(['auth','authentication','authorization','security','privacy',
+    'session','fingerprint','rate','limit','guard','permission','token',
+    'payment','billing','refund','webhook','retry','idempotency','quota']);
+  const risk=f=>Number(f.filename.toLowerCase().split(/[^a-z0-9]+/)
+    .some(word=>riskWords.has(word)));
   const score=f=>{
     const tokens=f.filename.toLowerCase().split(/[^a-z0-9]+/);
     return Math.max(0,...names.map(words=>tokens.filter(t=>words.has(t)).length));
   };
-  return testFiles.map((f,i)=>({f,i,rank:score(f)}))
-    .sort((a,b)=>b.rank-a.rank||a.i-b.i).map(x=>x.f);
+  // Same-directory foo.test.ts / foo.ts is stronger evidence than a
+  // generic shared domain folder such as "booking". Keep two such direct
+  // regressions within the existing three-slot budget, before considering
+  // lexical overlap. Leave the remaining slot for risk-ranked tests.
+  const sourceStems=new Set(sourceFiles.map(f=>
+    f.filename.toLowerCase().replace(/\.[cm]?[jt]sx?$/, '')));
+  const directlyLinked=f=>sourceStems.has(f.filename.toLowerCase()
+    .replace(/\.(?:test|spec)\.[cm]?[jt]sx?$/, ''));
+  const ranked=testFiles.map((f,i)=>({
+    f,i,risk:risk(f),rank:score(f),direct:directlyLinked(f)
+  })).sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i);
+  const minimumDirect=Math.min(2,ranked.filter(x=>x.direct).length);
+  let directSelected=ranked.slice(0,3).filter(x=>x.direct).length;
+  while(ranked.length>3 && directSelected<minimumDirect){
+    const next=ranked.findIndex((x,i)=>i>=3&&x.direct);
+    const evict=[2,1,0].find(i=>ranked[i]&&!ranked[i].direct);
+    if(next<0||evict===undefined)break;
+    [ranked[evict],ranked[next]]=[ranked[next],ranked[evict]];
+    directSelected++;
+  }
+  // Keep up to two linked tests total. Strong same-path links count even if
+  // the basename is short and lexical token overlap is unavailable.
+  const linkedAvailable=ranked.filter(x=>x.direct||x.rank>0).length;
+  const minimumLinked=Math.min(2,linkedAvailable);
+  let linkedSelected=ranked.slice(0,3).filter(x=>x.direct||x.rank>0).length;
+  while(ranked.length>3 && linkedSelected<minimumLinked){
+    const nextLinked=ranked.findIndex((x,i)=>i>=3&&(x.direct||x.rank>0));
+    const evict=[2,1,0].find(i=>ranked[i]&&!ranked[i].direct&&ranked[i].rank===0);
+    if(nextLinked<0||evict===undefined)break;
+    [ranked[evict],ranked[nextLinked]]=[ranked[nextLinked],ranked[evict]];
+    linkedSelected++;
+  }
+  return ranked.map(x=>x.f);
 }
 export function relatedSourceExcerpt(source,maxChars=1800){
   // Bounded representation of a related implementation module; not a diff.
@@ -233,9 +270,21 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const adapter=runtimeFiles.find(f=>f.filename.startsWith('scripts/'));
   // Multiple independent workflow gates must remain visible even when there
   // is no JS adapter in the PR; retain the two-source limit for ordinary PRs.
-  const sources=(workflows.length>=2 || (workflows.length===1 && adapter))
+  const workflowSelection=workflows.length>=2 || (workflows.length===1 && adapter);
+  // A changed transaction-lock holder can be displaced by unrelated earlier
+  // edits, hiding the very callback lifetime that must be audited. Keep one
+  // such source within the existing two-slot ordinary context budget.
+  // Scope this strictly to an explicit lock-holder file AND changed SQL
+  // advisory/transaction lock operation; never expand workflow budgets.
+  const lockHolder=runtimeFiles.find(f=>
+    /(?:^|\/)[a-zA-Z0-9_.-]*lock[a-zA-Z0-9_.-]*\.[cm]?[jt]sx?$/.test(f.filename) &&
+    /(?:pg_advisory_(?:xact_)?lock|idle_in_transaction_session_timeout|lock_timeout)/i
+      .test(f.patch));
+  const sources=workflowSelection
     ? [...workflows,...(adapter?[adapter]:[])]
-    : runtimeFiles.slice(0,SOURCE_LIMIT);
+    : lockHolder
+      ? [lockHolder,...runtimeFiles.filter(f=>f!==lockHolder)].slice(0,SOURCE_LIMIT)
+      : runtimeFiles.slice(0,SOURCE_LIMIT);
   const missingPaths=new Set();
   const fetcher=path=>fetchFile({repository,sha,path,api,token,missingPaths});
   const [rule,...bodies]=await Promise.all([
