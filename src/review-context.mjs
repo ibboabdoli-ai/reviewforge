@@ -270,9 +270,21 @@ export async function collectReviewContext({repository,sha,files,token,api}){
   const adapter=runtimeFiles.find(f=>f.filename.startsWith('scripts/'));
   // Multiple independent workflow gates must remain visible even when there
   // is no JS adapter in the PR; retain the two-source limit for ordinary PRs.
-  const sources=(workflows.length>=2 || (workflows.length===1 && adapter))
+  const workflowSelection=workflows.length>=2 || (workflows.length===1 && adapter);
+  // A changed transaction-lock holder can be displaced by unrelated earlier
+  // edits, hiding the very callback lifetime that must be audited. Keep one
+  // such source within the existing two-slot ordinary context budget.
+  // Scope this strictly to an explicit lock-holder file AND changed SQL
+  // advisory/transaction lock operation; never expand workflow budgets.
+  const lockHolder=runtimeFiles.find(f=>
+    /(?:^|\/)[a-zA-Z0-9_.-]*lock[a-zA-Z0-9_.-]*\.[cm]?[jt]sx?$/.test(f.filename) &&
+    /(?:pg_advisory_(?:xact_)?lock|idle_in_transaction_session_timeout|lock_timeout)/i
+      .test(f.patch));
+  const sources=workflowSelection
     ? [...workflows,...(adapter?[adapter]:[])]
-    : runtimeFiles.slice(0,SOURCE_LIMIT);
+    : lockHolder
+      ? [lockHolder,...runtimeFiles.filter(f=>f!==lockHolder)].slice(0,SOURCE_LIMIT)
+      : runtimeFiles.slice(0,SOURCE_LIMIT);
   const missingPaths=new Set();
   const fetcher=path=>fetchFile({repository,sha,path,api,token,missingPaths});
   const [rule,...bodies]=await Promise.all([
