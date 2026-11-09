@@ -185,12 +185,19 @@ export function testImplementationPaths(testPath,testText){
 export function prioritizeBehaviorTests(testFiles,sourceFiles){
   const names=sourceFiles.map(f=>new Set(f.filename.toLowerCase().split(/[^a-z0-9]+/)
     .filter(x=>x.length>3&&!['public','components','tests','source'].includes(x))));
+  const riskWords=new Set(['auth','authentication','authorization','security','privacy',
+    'session','fingerprint','rate','limit','guard','permission','token',
+    'payment','billing','refund','webhook','retry','idempotency','quota']);
+  const risk=f=>Number(f.filename.toLowerCase().split(/[^a-z0-9]+/)
+    .some(word=>riskWords.has(word)));
   const score=f=>{
     const tokens=f.filename.toLowerCase().split(/[^a-z0-9]+/);
     return Math.max(0,...names.map(words=>tokens.filter(t=>words.has(t)).length));
   };
-  return testFiles.map((f,i)=>({f,i,rank:score(f)}))
-    .sort((a,b)=>b.rank-a.rank||a.i-b.i).map(x=>x.f);
+  // Under the fixed three-test context budget, keep trust-boundary regressions
+  // visible before convenience/demo tests. Stable ties use source overlap.
+  return testFiles.map((f,i)=>({f,i,risk:risk(f),rank:score(f)}))
+    .sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i).map(x=>x.f);
 }
 export function relatedSourceExcerpt(source,maxChars=1800){
   // Bounded representation of a related implementation module; not a diff.
