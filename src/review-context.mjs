@@ -196,8 +196,19 @@ export function prioritizeBehaviorTests(testFiles,sourceFiles){
   };
   // Under the fixed three-test context budget, keep trust-boundary regressions
   // visible before convenience/demo tests. Stable ties use source overlap.
-  return testFiles.map((f,i)=>({f,i,risk:risk(f),rank:score(f)}))
-    .sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i).map(x=>x.f);
+  const ranked=testFiles.map((f,i)=>({f,i,risk:risk(f),rank:score(f)}))
+    .sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i);
+  // A collection of unrelated security-named tests must not evict every
+  // regression explicitly tied to a changed implementation path. Preserve
+  // one such slot only if the three highest-ranked tests lack any overlap.
+  if(ranked.length>3 && ranked.slice(0,3).every(x=>x.rank===0)){
+    const linkedIndex=ranked.findIndex(x=>x.rank>0);
+    if(linkedIndex>=3){
+      const [linked]=ranked.splice(linkedIndex,1);
+      ranked.splice(2,0,linked);
+    }
+  }
+  return ranked.map(x=>x.f);
 }
 export function relatedSourceExcerpt(source,maxChars=1800){
   // Bounded representation of a related implementation module; not a diff.
