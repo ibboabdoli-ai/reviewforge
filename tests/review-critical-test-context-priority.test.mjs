@@ -70,3 +70,26 @@ test('unrelated security-named tests cannot displace a second changed-source reg
     'Keep a regression linked to the second changed runtime path');
   assert.equal(selected.length,3,'The AI test-context budget must remain unchanged');
 });
+
+test('generic shared features/ segment must not mislabel unrelated security tests as source-linked',()=>{
+  // Isolated regression: old matcher marked all three unrelated security
+  // tests as source-linked through the generic directory token 'features'.
+  // That prevented the two-slot rescue for actual changed-source regressions.
+  const sources=entries([
+    'src/features/booking/availability.ts',
+    'src/features/pricing/annual-rates.ts'
+  ]);
+  const tests=entries([
+    'src/features/auth/login-security.test.ts',
+    'src/features/privacy/audit-security.test.ts',
+    'src/features/token/session-token.test.ts',
+    'src/features/booking/availability.test.ts',
+    'src/features/pricing/annual-rates.test.ts'
+  ]);
+  const selected=prioritizeBehaviorTests(tests,sources).slice(0,3).map(f=>f.filename);
+  assert.equal(selected.length,3,'Preserve fixed context and model budget');
+  assert.ok(selected.includes('src/features/booking/availability.test.ts'),
+    'Reserve changed-booking regression rather than generic-folder security test');
+  assert.ok(selected.includes('src/features/pricing/annual-rates.test.ts'),
+    'Reserve changed-pricing regression rather than generic-folder security test');
+});
