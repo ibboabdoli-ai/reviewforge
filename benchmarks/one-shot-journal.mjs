@@ -27,6 +27,9 @@ function atomicCreate(path, payload) {
     // linkSync creates the destination atomically and fails on EEXIST.
     // renameSync could silently replace an existing report on POSIX.
     linkSync(temp, path);
+    // A hard link does NOT move its source. Remove the sensitive temporary
+    // name after publication; the canonical destination still owns the data.
+    rmSync(temp, { force: true });
   } catch (error) {
     rmSync(temp, { force: true });
     throw error;

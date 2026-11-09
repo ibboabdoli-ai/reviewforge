@@ -234,3 +234,19 @@ test('different locks cannot replace an existing report at the same path', async
   assert.equal(settled.filter(x=>x.status==='rejected').length,1);
   assert.equal(read(target.reportPath).status,'completed');
 });
+
+test('successful report and usage receipts leave no private partial hard links', async t => {
+  const target=setup(t);
+  const {readdirSync}=await import('node:fs');
+  const {dirname}=await import('node:path');
+  await runSingleAttempt({
+    ...target, execute: async ({markModelRequestStart,recordProviderUsage})=>{
+      markModelRequestStart();
+      recordProviderUsage({httpStatus:200,inputTokens:42,outputTokens:10});
+      return {summary:'ok',findings:[]};
+    }
+  });
+  const names=readdirSync(dirname(target.reportPath));
+  assert.deepEqual(names.filter(name=>name.includes('.partial-')),[],
+    'No secondary links to confidential reports or receipts may remain');
+});
