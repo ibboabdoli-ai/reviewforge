@@ -183,3 +183,54 @@ test('completed model output is redacted before writing a private report', async
   assert.ok(!text.includes('EXAMPLESECRETABCDEFG'));
   assert.match(text,/REDACTED_TOKEN/);
 });
+
+test('known HTTP 503 cannot complete even if the callback returns success-shaped output', async t => {
+  const target=setup(t);
+  await assert.rejects(runSingleAttempt({
+    ...target, execute: async ({markModelRequestStart,recordProviderUsage})=>{
+      markModelRequestStart();
+      recordProviderUsage({httpStatus:503,inputTokens:null,outputTokens:null});
+      return {summary:'Looks successful',findings:[]};
+    }
+  }),/REVIEW_NOT_COMPLETED/);
+  const result=read(target.reportPath);
+  assert.notEqual(result.status,'completed');
+  assert.equal(result.providerUsage.httpStatus,503);
+  assert.equal(result.independentQualityMeasured,false);
+});
+
+test('provider diagnostics are numeric-only and cannot retain credentials', async t => {
+  const target=setup(t);
+  await runSingleAttempt({
+    ...target, execute: async ({markModelRequestStart})=>{
+      markModelRequestStart();
+      return {summary:'ok',findings:[],
+        diagnostics:{message:'sk-proj-DIAGNOSTICSSYNTHETICSECRET123',
+          acceptedFindings:0,modelSuggestions:0,filteredFindings:0}};
+    }
+  });
+  const body=readFileSync(target.reportPath,'utf8');
+  assert.ok(!body.includes('DIAGNOSTICSSYNTHETICSECRET123'));
+  assert.deepEqual(read(target.reportPath).diagnostics,{
+    acceptedFindings:0,modelSuggestions:0,filteredFindings:0});
+});
+
+test('different locks cannot replace an existing report at the same path', async t => {
+  const target=setup(t);
+  let release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const common={reportPath:target.reportPath,metadata:target.metadata};
+  const execute=label=>async ({markModelRequestStart})=>{
+    markModelRequestStart();
+    await gate;
+    return {summary:label,findings:[]};
+  };
+  const one=runSingleAttempt({...common,lockPath:target.lockPath,execute:execute('first')});
+  const two=runSingleAttempt({...common,lockPath:target.lockPath+'.other',execute:execute('second')});
+  release();
+  const settled=await Promise.allSettled([one,two]);
+  assert.equal(settled.filter(x=>x.status==='fulfilled').length,1,
+    'No more than one successful writer may publish the shared report');
+  assert.equal(settled.filter(x=>x.status==='rejected').length,1);
+  assert.equal(read(target.reportPath).status,'completed');
+});

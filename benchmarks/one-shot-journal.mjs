@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, linkSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 
@@ -24,8 +24,9 @@ function atomicCreate(path, payload) {
   const temp = path + '.partial-' + randomUUID();
   try {
     writeFileSync(temp, JSON.stringify(payload, null, 2), { flag: 'wx', mode: 0o600 });
-    if (existsSync(path)) throw new Error('Journal target already exists');
-    renameSync(temp, path);
+    // linkSync creates the destination atomically and fails on EEXIST.
+    // renameSync could silently replace an existing report on POSIX.
+    linkSync(temp, path);
   } catch (error) {
     rmSync(temp, { force: true });
     throw error;
@@ -62,6 +63,16 @@ function cleanFinding(f) {
     title: redact(f.title).slice(0, 140),
     body: redact(f.body).slice(0, 1200),
     confidence: Number.isFinite(f.confidence) ? f.confidence : null
+  };
+}
+
+function cleanDiagnostics(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const natural = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  return {
+    modelSuggestions: natural(raw.modelSuggestions),
+    acceptedFindings: natural(raw.acceptedFindings),
+    filteredFindings: natural(raw.filteredFindings)
   };
 }
 
@@ -141,26 +152,39 @@ export async function runSingleAttempt({ lockPath, reportPath, metadata, execute
   try {
     const result = await execute({ markModelRequestStart, recordProviderUsage });
     if (modelAttemptCount !== 1 || !result ||
-        typeof result.summary !== 'string' || !Array.isArray(result.findings)) {
+        typeof result.summary !== 'string' || !Array.isArray(result.findings) ||
+        (providerUsage?.httpStatus != null &&
+         (providerUsage.httpStatus < 200 || providerUsage.httpStatus >= 300))) {
       throw new Error('INVALID_COMPLETED_REVIEW');
     }
     const report = { ...base(), status: 'completed',
       summary: redact(result.summary).slice(0, 600),
       findings: result.findings.slice(0, 8).map(cleanFinding).filter(Boolean),
-      diagnostics: result.diagnostics || null,
+      diagnostics: cleanDiagnostics(result.diagnostics),
       note: 'Result received, but independent gold scoring has not run'
     };
     atomicCreate(reportPath, report);
     return report;
   } catch (error) {
     const status = failureKind(error);
-    // No raw provider error text, request body or API key is saved.
-    atomicCreate(reportPath, { ...base(), status,
-      errorCode: status, findings: null,
-      providerOutcome: modelAttemptCount ? 'unknown_after_attempt' : 'not_started',
-      note: 'No trustworthy model verdict. Do not replay this paid attempt.'
-    });
-    const safe = new Error('REVIEW_NOT_COMPLETED: diagnostic saved; do not retry');
+    // No raw provider error, request body or API key is saved. A competing
+    // attempt must never overwrite the report that already won publication.
+    let reportAvailable = existsSync(reportPath);
+    if (!reportAvailable) {
+      try {
+        atomicCreate(reportPath, { ...base(), status,
+          errorCode: status, findings: null,
+          providerOutcome: modelAttemptCount ? 'unknown_after_attempt' : 'not_started',
+          note: 'No trustworthy model verdict. Do not replay this paid attempt.'
+        });
+        reportAvailable = true;
+      } catch {
+        // Disk error or concurrent no-clobber: preserve the original lock.
+      }
+    }
+    const safe = new Error(reportAvailable
+      ? 'REVIEW_NOT_COMPLETED: inspect existing report; do not retry'
+      : 'REVIEW_NOT_COMPLETED: inspect attempt lock; report unavailable; do not retry');
     safe.code = status;
     throw safe;
   }
