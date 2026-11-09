@@ -90,3 +90,32 @@ test('a shared object-header is not proof of the same guarded function',()=>{
   assert.equal(planned.coverage.unanchoredDeletions,1);
   assert.equal(selectFilesForReview(file(crossMethod)).coverage.complete,false);
 });
+
+
+/**
+ * Distinct TypeScript namespaces can each declare `export function verifyCode`.
+ * Git may print the identical textual hunk header for both functions, although
+ * their enclosing namespaces (and authorization boundaries) differ. Moving
+ * an access guard from Private.verifyCode to Public.verifyCode must not turn
+ * an unanchored Private deletion into a full, clean-reviewable diff.
+ */
+test('same named function headers across namespaces cannot waive a private guard deletion',()=>{
+  const crossNamespace=[
+    '@@ -12,4 +12,6 @@ export function verifyCode(token) {',
+    '   // inside namespace Public',
+    '+  const permitted = isAdmin(token);',
+    '+  if (!permitted) return false;',
+    '   return "PUBLIC";',
+    '@@ -48,6 +50,4 @@ export function verifyCode(token) {',
+    '   // inside namespace Private',
+    '-  const permitted = isAdmin(token);',
+    '-  if (!permitted) return false;',
+    '   return "SECRET";',
+  ].join('\\n');
+  const selected=selectFilesForReview(file(crossNamespace));
+  const planned=planReviewBatches(file(crossNamespace));
+  assert.equal(planned.coverage.complete,false,
+    'Same textual function header does not prove the same enclosing scope');
+  assert.equal(planned.coverage.unanchoredDeletions,1);
+  assert.equal(selected.coverage.complete,false);
+});
