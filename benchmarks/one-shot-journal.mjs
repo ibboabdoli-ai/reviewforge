@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync, linkSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, linkSync, rmSync, openSync, closeSync, fsyncSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, dirname } from 'node:path';
 
 /**
  * Local, single-attempt journal for a controlled paid benchmark.
@@ -20,16 +20,29 @@ function safeMetadata(value) {
     headSha: value.headSha, engineSha: value.engineSha, model: value.model };
 }
 
+// Node on Windows does not support fsync-ing a directory handle (EPERM).
+// On POSIX fsync the parent directory as well as the file. On Windows,
+// FlushFileBuffers on the file is performed via flush:true below; power-loss
+// durability of directory metadata cannot be guaranteed by portable Node.
+function syncParentDirectory(path) {
+  if (process.platform === 'win32') return false;
+  const fd = openSync(dirname(path), 'r');
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  return true;
+}
+
 function atomicCreate(path, payload) {
   const temp = path + '.partial-' + randomUUID();
   try {
-    writeFileSync(temp, JSON.stringify(payload, null, 2), { flag: 'wx', mode: 0o600 });
+    writeFileSync(temp, JSON.stringify(payload, null, 2), { flag: 'wx', mode: 0o600, flush: true });
     // linkSync creates the destination atomically and fails on EEXIST.
     // renameSync could silently replace an existing report on POSIX.
     linkSync(temp, path);
+    syncParentDirectory(path);
     // A hard link does NOT move its source. Remove the sensitive temporary
     // name after publication; the canonical destination still owns the data.
     rmSync(temp, { force: true });
+    syncParentDirectory(path);
   } catch (error) {
     rmSync(temp, { force: true });
     throw error;
@@ -102,11 +115,29 @@ export function inspectAttempt({ lockPath, reportPath }) {
   }
   if (!existsSync(lockPath)) return { status: 'not_started', modelAttemptCount: 0 };
   const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  // A narrow receipt may survive a process crash after HTTP 200 but before
+  // the final model result could be validated. Match the same immutable
+  // repository/PR/head/engine/model identity before exposing token evidence.
+  let receipt = null;
+  if (existsSync(reportPath + '.usage.json')) {
+    try {
+      const saved = JSON.parse(readFileSync(reportPath + '.usage.json', 'utf8'));
+      if (saved.repository === lock.repository && saved.pr === lock.pr &&
+          saved.headSha === lock.headSha && saved.engineSha === lock.engineSha &&
+          saved.model === lock.model) {
+        receipt = sanitizeUsage(saved.providerUsage);
+      }
+    } catch {
+      // Corrupt or mismatched receipts must never become billing evidence.
+    }
+  }
   // Old 2026-11-09 one-shot lock is understood but must never be replayed.
   return {
-    status: 'orphaned_unverified', modelAttemptCount: null,
+    status: 'orphaned_unverified',
+    modelAttemptCount: receipt ? 1 : null,
+    providerUsage: receipt,
     startedAt: lock.startedAt || null,
-    reason: 'A started attempt has no persisted response; do not retry'
+    reason: 'A started attempt has no persisted model verdict; do not retry'
   };
 }
 
@@ -128,7 +159,10 @@ export async function runSingleAttempt({ lockPath, reportPath, metadata, execute
   writeFileSync(lockPath, JSON.stringify({
     ...identity, status: 'started_unverified', startedAt, maximumAttempts: 1,
     providerOutcome: 'unknown', costUsd: null
-  }), { flag: 'wx', mode: 0o600 });
+  }), { flag: 'wx', mode: 0o600, flush: true });
+  // Best-effort host-crash durable before any model work. The POSIX parent
+  // directory is fsynced; Windows has file flushing but no portable dir fsync.
+  syncParentDirectory(lockPath);
 
   let modelAttemptCount = 0, providerUsage = null;
   const markModelRequestStart = () => {

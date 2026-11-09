@@ -250,3 +250,45 @@ test('successful report and usage receipts leave no private partial hard links',
   assert.deepEqual(names.filter(name=>name.includes('.partial-')),[],
     'No secondary links to confidential reports or receipts may remain');
 });
+
+test('orphan inspection recovers trustworthy usage receipt without declaring model success', async t => {
+  const target=setup(t);
+  writeFileSync(target.lockPath,JSON.stringify({
+    ...target.metadata,status:'started_unverified',startedAt:'2026-11-09T21:05:05.637Z'
+  }));
+  writeFileSync(target.reportPath+'.usage.json',JSON.stringify({
+    ...target.metadata,recordedAt:'2026-11-09T21:05:31Z',
+    providerUsage:{httpStatus:200,inputTokens:891,outputTokens:99,requestId:'req_syntheticreceipt9'}
+  }));
+  const info=inspectAttempt(target);
+  assert.equal(info.status,'orphaned_unverified');
+  assert.equal(info.modelAttemptCount,1);
+  assert.equal(info.providerUsage.httpStatus,200);
+  assert.equal(info.providerUsage.inputTokens,891);
+  assert.equal(info.providerUsage.outputTokens,99);
+  assert.ok(!info.hasFindings);
+});
+
+test('orphan receipt for another SHA cannot be trusted as usage evidence', async t => {
+  const target=setup(t);
+  writeFileSync(target.lockPath,JSON.stringify({
+    ...target.metadata,status:'started_unverified',startedAt:'2026-11-09T21:05:05Z'
+  }));
+  writeFileSync(target.reportPath+'.usage.json',JSON.stringify({
+    ...target.metadata,headSha:'b'.repeat(40),
+    providerUsage:{httpStatus:200,inputTokens:20000,outputTokens:1000}
+  }));
+  const info=inspectAttempt(target);
+  assert.equal(info.status,'orphaned_unverified');
+  assert.equal(info.modelAttemptCount,null);
+  assert.equal(info.providerUsage,null);
+});
+
+test('journal flushes lock and output files before a possible provider request', async t => {
+  const {readFileSync}=await import('node:fs');
+  const source=readFileSync(new URL('./one-shot-journal.mjs',import.meta.url),'utf8');
+  assert.match(source,/writeFileSync\(lockPath,[\s\S]*?flush:\s*true/);
+  assert.match(source,/writeFileSync\(temp,[\s\S]*?flush:\s*true/);
+  assert.match(source,/syncParentDirectory\(lockPath\)/);
+  assert.match(source,/fsyncSync\(fd\)/);
+});
