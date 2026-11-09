@@ -286,7 +286,7 @@ test('orphan receipt for another SHA cannot be trusted as usage evidence', async
 
 test('journal flushes lock and output files before a possible provider request', async t => {
   const {readFileSync}=await import('node:fs');
-  const source=readFileSync(new URL('./one-shot-journal.mjs',import.meta.url),'utf8');
+  const source=readFileSync(new URL('../benchmarks/one-shot-journal.mjs',import.meta.url),'utf8');
   assert.match(source,/writeFileSync\(lockPath,[\s\S]*?flush:\s*true/);
   assert.match(source,/writeFileSync\(temp,[\s\S]*?flush:\s*true/);
   assert.match(source,/syncParentDirectory\(lockPath\)/);
