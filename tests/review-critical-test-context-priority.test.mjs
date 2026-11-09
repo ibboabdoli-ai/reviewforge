@@ -119,3 +119,26 @@ test('generic structural directories other than features/ cannot masquerade as c
       `${segment} must not create a false linked test that crowds out pricing`);
   }
 });
+
+test('same-domain security tests cannot hide source-adjacent regressions',()=>{
+  // Domain directory names such as "booking" and "pricing" are shared by
+  // unrelated security tests; they do not establish test-to-implementation
+  // linkage. Exact same-path source/test pairs are stronger evidence.
+  const sources=entries([
+    'src/features/booking/availability.ts',
+    'src/features/pricing/annual-rates.ts'
+  ]);
+  const tests=entries([
+    'src/features/booking/auth-session.test.ts',
+    'src/features/booking/security-guard.test.ts',
+    'src/features/pricing/payment-webhook.test.ts',
+    'src/features/booking/availability.test.ts',
+    'src/features/pricing/annual-rates.test.ts'
+  ]);
+  const selected=prioritizeBehaviorTests(tests,sources).slice(0,3).map(f=>f.filename);
+  assert.equal(selected.length,3,'Keep exactly three test-context slots');
+  assert.ok(selected.includes('src/features/booking/availability.test.ts'),
+    'Do not evict the booking source-adjacent test for a directory-only match');
+  assert.ok(selected.includes('src/features/pricing/annual-rates.test.ts'),
+    'Do not evict the pricing source-adjacent test for a directory-only match');
+});
