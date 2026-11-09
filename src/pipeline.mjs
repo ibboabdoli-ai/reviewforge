@@ -3,6 +3,7 @@ import { githubApi, installationToken, changedFiles, postReview } from './github
 import { planReviewBatches, coverageSummary, validateFindings, unverifiedModelSuggestions, reviewWithAI } from './reviewer.mjs';
 import { repositoryAllowed } from './review-policy.mjs';
 import { selectReviewModel } from './model-router.mjs';
+import { distinctFindings } from './finding-identity.mjs';
 
 /**
  * Review pipeline. All GitHub write operations are disabled by default.
@@ -97,8 +98,7 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   const summaries=batchResults.map(result=>result.value.summary);
   const rawFindings=batchResults.flatMap(result=>result.value.findings);
   const severityRank={critical:0,high:1,medium:2,low:3};
-  const findings=rawFindings.sort((a,b)=>(severityRank[a.severity]??4)-(severityRank[b.severity]??4)||b.confidence-a.confidence)
-    .filter((f,i,all)=>all.findIndex(g=>g.path===f.path&&g.line===f.line)===i).slice(0,8);
+  const findings=distinctFindings(rawFindings.sort((a,b)=>(severityRank[a.severity]??4)-(severityRank[b.severity]??4)||b.confidence-a.confidence),8);
   const review={summary:summaries.join(' ').slice(0,1200)||'No reviewable text patches were available.',findings};
   const summary=coverageSummary(coverage)+' '+review.summary;
   const latest=await api(pullPath,token);
