@@ -198,15 +198,18 @@ export function prioritizeBehaviorTests(testFiles,sourceFiles){
   // visible before convenience/demo tests. Stable ties use source overlap.
   const ranked=testFiles.map((f,i)=>({f,i,risk:risk(f),rank:score(f)}))
     .sort((a,b)=>b.risk-a.risk||b.rank-a.rank||a.i-b.i);
-  // A collection of unrelated security-named tests must not evict every
-  // regression explicitly tied to a changed implementation path. Preserve
-  // one such slot only if the three highest-ranked tests lack any overlap.
-  if(ranked.length>3 && ranked.slice(0,3).every(x=>x.rank===0)){
-    const linkedIndex=ranked.findIndex(x=>x.rank>0);
-    if(linkedIndex>=3){
-      const [linked]=ranked.splice(linkedIndex,1);
-      ranked.splice(2,0,linked);
-    }
+  // Keep up to two of the three slots linked to changed source paths.
+  // An unrelated security-named test may still occupy the remaining slot.
+  // Swapping, rather than inserting, preserves already-selected linked tests.
+  const linkedAvailable=ranked.filter(x=>x.rank>0).length;
+  const minimumLinked=Math.min(2,linkedAvailable);
+  let linkedSelected=ranked.slice(0,3).filter(x=>x.rank>0).length;
+  while(ranked.length>3 && linkedSelected<minimumLinked){
+    const nextLinked=ranked.findIndex((x,i)=>i>=3&&x.rank>0);
+    const evict=[2,1,0].find(i=>ranked[i]?.rank===0);
+    if(nextLinked<0||evict===undefined)break;
+    [ranked[evict],ranked[nextLinked]]=[ranked[nextLinked],ranked[evict]];
+    linkedSelected++;
   }
   return ranked.map(x=>x.f);
 }
