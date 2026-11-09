@@ -19,14 +19,14 @@ const moved=[
 const file=patch=>[{filename:'src/lib/verification.ts',status:'modified',patch}];
 const coverage=patch=>planReviewBatches(file(patch)).coverage;
 
-test('byte-identical guard moved earlier in the same function remains fully reviewable',()=>{
+test('byte-identical moved guard stays partial without verified enclosing scope',()=>{
   const planned=planReviewBatches(file(moved));
-  assert.equal(planned.coverage.complete,true);
-  assert.equal(planned.coverage.reviewed,1);
-  assert.equal(planned.coverage.unanchoredDeletions,0);
-  assert.equal(planned.batches.length,1);
-  assert.ok(addedLines(moved).size>=2,'Relocated code must have actual new-line anchors');
-  assert.equal(selectFilesForReview(file(moved)).coverage.complete,true);
+  assert.equal(planned.coverage.complete,false);
+  assert.equal(planned.coverage.reviewed,0);
+  assert.equal(planned.coverage.unanchoredDeletions,1);
+  assert.equal(planned.batches.length,0);
+  assert.ok(addedLines(moved).size>=2,'Added lines do not anchor the old deleted guard');
+  assert.equal(selectFilesForReview(file(moved)).coverage.complete,false);
 });
 
 test('pure deletion with no added anchor is still refused',()=>{
