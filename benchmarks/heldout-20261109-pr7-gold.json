@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "benchmarkId": "heldout-notification-lifecycle-20261109",
+  "preregistration": "Target and independent witness registered before Codex, CodeRabbit, or ReviewForge evaluate sandbox PR #7. Do not supply this document to a reviewer.",
+  "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
+  "targetPr": 7,
+  "targetBaseSha": "420bf122458eb298080bca9e94e6fcfb32339e59",
+  "targetHeadSha": "a628945d7533c7418aed344ed5f90a9a2ec8bc46",
+  "reviewForgeReferenceBuild": "9e7ebb04359e87915f8bcf10510dafe42957cee3",
+  "cases": [
+    {
+      "id": "notification-lock-held-unbounded",
+      "kind": "stability-concurrency",
+      "rating": "high",
+      "path": "src/lib/notification-lock.mjs",
+      "lineMin": 12,
+      "lineMax": 24,
+      "related": [
+        "src/services/booking-notice.mjs",
+        "src/lib/mock-transaction-pool.mjs"
+      ],
+      "witness": "After a request acquires transaction advisory lock, its booking repository lookup stalls indefinitely. SET LOCAL lock_timeout only limits acquisition wait, idle_in_transaction_session_timeout=0 removes the idle transaction backstop, and the lock remains held while the stalled callback is unresolved; a second notice times out acquiring the workspace lock. The code has no upper bound or cooperative cancellation.",
+      "expectedFix": "Bound the entire transaction/handler lifetime, including stalled DB queries and outbound provider calls. Coordinate abort, transaction cleanup and no further sends after lock loss; do not merely change acquisition lock_timeout."
+    },
+    {
+      "id": "deposit-reminder-stale-after-paid",
+      "kind": "cross-flow-atomicity",
+      "rating": "high",
+      "path": "src/services/deposit-updates.mjs",
+      "lineMin": 1,
+      "lineMax": 15,
+      "related": [
+        "src/services/deposit-reminder.mjs",
+        "src/lib/notification-lock.mjs"
+      ],
+      "witness": "sendDepositReminder reads pending while holding workspace lock and waits on the transport; confirmDeposit reads and marks paid without acquiring that lock. Payment becomes paid before the outbound reminder is actually delivered; email still requests a paid deposit.",
+      "expectedFix": "Serialize the payment-state transition and reminder eligibility using one consistent workspace lock or durable atomic send-claim protocol across processes, while explicitly handling provider timeouts/retries."
+    }
+  ],
+  "cleanControls": [
+    {
+      "path": "src/lib/workspace-capabilities.mjs",
+      "contract": "Only known permission names are accepted."
+    },
+    {
+      "path": "src/lib/notice-format.mjs",
+      "contract": "Notice data validation and simple recipient normalization."
+    },
+    {
+      "path": "tests/notice-lifecycle.integration.test.mjs",
+      "contract": "The entire file is syntactically complete with nested test callbacks closed. Do not infer EOF from truncated diff or preview excerpts."
+    }
+  ],
+  "scoring": {
+    "primary": "Exactly two code-executed independent defects. Count a hit only when the finding includes matching behavior, source path/cause, and a grounded fix; cosmetic or test-only findings do not satisfy the two primaries.",
+    "supplemental": "Adjudicate every novel CodeRabbit/ReviewForge/Codex finding against the frozen source separately rather than automatically calling it a false positive.",
+    "fairness": "Same frozen base and head, no answer key in sandbox repo, no hidden additional paid attempts, model must see the code without the gold file.",
+    "safety": "No merge, production data, email or Stripe provider calls, automatic review comments or approvals; only fake in-memory fixtures."
+  }
+}
