@@ -38,3 +38,18 @@ test('ordinary tests without security-significant names keep source-overlap and 
     ['tests/widget-grid.test.ts','tests/price-planner.test.ts','tests/unrelated.test.ts']
   );
 });
+
+
+test('risk-named but unrelated tests cannot crowd out every test tied to changed source',()=>{
+  const sources=entries(['src/components/widget-grid.tsx']);
+  const tests=entries([
+    'tests/auth-login.test.ts',
+    'tests/security-audit.test.ts',
+    'tests/token-refresh.test.ts',
+    'tests/widget-grid.test.ts'
+  ]);
+  const selected=prioritizeBehaviorTests(tests,sources).slice(0,3).map(f=>f.filename);
+  assert.ok(selected.includes('tests/widget-grid.test.ts'),
+    'At least one source-linked regression must survive the three-test context budget');
+  assert.equal(selected.length,3,'Do not increase the context or model budget');
+});
