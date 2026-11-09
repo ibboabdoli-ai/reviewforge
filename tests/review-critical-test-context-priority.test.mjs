@@ -93,3 +93,29 @@ test('generic shared features/ segment must not mislabel unrelated security test
   assert.ok(selected.includes('src/features/pricing/annual-rates.test.ts'),
     'Reserve changed-pricing regression rather than generic-folder security test');
 });
+
+
+test('generic structural directories other than features/ cannot masquerade as changed-source overlap',()=>{
+  // These are structural folders, not domain-specific implementation evidence.
+  // Before the fix, security-named tests from unrelated subfolders received
+  // false source-overlap credit and consumed all three bounded test slots.
+  for(const segment of ['services','shared','utils']){
+    const sources=entries([
+      `src/${segment}/booking/availability.ts`,
+      `src/${segment}/pricing/annual-rates.ts`
+    ]);
+    const tests=entries([
+      `src/${segment}/auth/login-security.test.ts`,
+      `src/${segment}/privacy/audit-security.test.ts`,
+      `src/${segment}/token/session-token.test.ts`,
+      `src/${segment}/booking/availability.test.ts`,
+      `src/${segment}/pricing/annual-rates.test.ts`
+    ]);
+    const selected=prioritizeBehaviorTests(tests,sources).slice(0,3).map(f=>f.filename);
+    assert.equal(selected.length,3,'The existing three-test budget must remain fixed');
+    assert.ok(selected.includes(`src/${segment}/booking/availability.test.ts`),
+      `${segment} must not create a false linked test that crowds out booking`);
+    assert.ok(selected.includes(`src/${segment}/pricing/annual-rates.test.ts`),
+      `${segment} must not create a false linked test that crowds out pricing`);
+  }
+});
