@@ -71,38 +71,78 @@ export function verifyFrozenBatch({files,reviewContext,metadata}) {
   return selected.batches[0];
 }
 
+// Closed-world mock: no caller-provided fetch, no forwarding function,
+// no real endpoint network access, and no real API key.
+function validateMockOutcome(mockOutcome) {
+  if(!mockOutcome || Object.getPrototypeOf(mockOutcome)!==Object.prototype ||
+      !['response','raw','timeout','network'].includes(mockOutcome.kind) ||
+      (mockOutcome.delayMs!==undefined &&
+       (!Number.isSafeInteger(mockOutcome.delayMs)||
+        mockOutcome.delayMs<0||mockOutcome.delayMs>500))) {
+    throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
+  }
+  if(mockOutcome.kind==='response' &&
+      (!mockOutcome.body || typeof mockOutcome.body!=='object' ||
+       !Number.isSafeInteger(mockOutcome.httpStatus??200) ||
+       (mockOutcome.httpStatus??200)<200 ||
+       (mockOutcome.httpStatus??200)>599)) {
+    throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
+  }
+  if(mockOutcome.kind==='raw' &&
+      (typeof mockOutcome.text!=='string'||mockOutcome.text.length>100000)) {
+    throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
+  }
+  return mockOutcome;
+}
+
 /**
- * Connect actual ReviewForge reviewWithAI to the durable one-shot journal using
- * an injected *synthetic* HTTP response. No live API key or fetch is accepted.
- * This tests the real validation/timeout/error/receipt path, NOT AI recall.
+ * Real ReviewForge reviewWithAI + PR #16 write-once journal.
+ * Synthetic response DATA is accepted instead of a caller's executable
+ * transport; this adapter makes no HTTP calls to OpenAI.
  */
 export async function runOfflineJournaledReview({
-  files,reviewContext,metadata,lockPath,reportPath,mockFetch
+  files,reviewContext,metadata,lockPath,reportPath,mockOutcome
 }) {
-  if(typeof mockFetch!=='function' || mockFetch===globalThis.fetch ||
-      process.env.OPENAI_API_KEY || process.env.OPENAI_TEST_API_KEY) {
+  if(process.env.OPENAI_API_KEY || process.env.OPENAI_TEST_API_KEY) {
     throw new Error('OFFLINE_ONLY_NO_REAL_KEY_OR_FETCH');
   }
+  const outcome=validateMockOutcome(mockOutcome);
   const batch=verifyFrozenBatch({files,reviewContext,metadata});
+  const syntheticFetch=async(url,opts)=>{
+    if(String(url)!=='https://api.openai.com/v1/responses'||opts?.method!=='POST')
+      throw new Error('UNEXPECTED_OFFLINE_REQUEST');
+    if(outcome.delayMs)
+      await new Promise(resolve=>setTimeout(resolve,outcome.delayMs));
+    if(outcome.kind==='timeout')
+      throw new DOMException('Synthetic timeout','TimeoutError');
+    if(outcome.kind==='network')
+      throw new TypeError('Synthetic network unavailable');
+    if(outcome.kind==='raw')
+      return new Response(outcome.text,{status:outcome.httpStatus??200});
+    return new Response(JSON.stringify(outcome.body),{
+      status:outcome.httpStatus??200,
+      headers:outcome.requestId?{'x-request-id':String(outcome.requestId)}:{}
+    });
+  };
   return runSingleAttempt({
     lockPath,reportPath,metadata,
     execute:async({markModelRequestStart,recordProviderUsage})=>{
       const result=await reviewWithAI(batch,{
         model:FROZEN_PR7.model,reasoningEffort:'high',reviewContext,
-        requestKey:'sk-LOCAL-SYNTHETIC-NOT-A-CREDENTIAL',requestFetch:mockFetch,
+        requestKey:'sk-LOCAL-SYNTHETIC-NOT-A-CREDENTIAL',
+        requestFetch:syntheticFetch,
         onBeforeRequest:({model,store,reasoningEffort,maxOutputTokens,requestBytes})=>{
-          if(model!==FROZEN_PR7.model || store!==false ||
-              reasoningEffort!=='high' || maxOutputTokens!==6000 ||
-              !Number.isSafeInteger(requestBytes) || requestBytes>50000) {
+          if(model!==FROZEN_PR7.model||store!==false||
+              reasoningEffort!=='high'||maxOutputTokens!==6000||
+              !Number.isSafeInteger(requestBytes)||requestBytes>50000) {
             throw new Error('OFFLINE_REQUEST_CAP_FAILED');
           }
           markModelRequestStart();
         },
         onProviderReceipt:recordProviderUsage
       });
-      if(result.diagnostics?.filteredFindings!==0) {
+      if(result.diagnostics?.filteredFindings!==0)
         throw new Error('UNVERIFIED_MODEL_SUGGESTIONS');
-      }
       return result;
     }
   });
