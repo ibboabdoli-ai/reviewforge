@@ -147,3 +147,157 @@ test('external production fetch and environment key are not accepted',async t=>{
   }),/OFFLINE_ONLY_NO_REAL_KEY_OR_FETCH/);
   assert.equal(existsSync(paths.lockPath),false);
 });
+
+
+test('offline network failure remains unverified with no unexpected retries',async t=>{
+  const paths=setup(t);let calls=0;
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockFetch:async()=>{
+      calls++;
+      throw new TypeError('Synthetic ENETUNREACH sk-proj-SYNTHETIC-SECRET-DO-NOT-STORE');
+    }
+  }),/REVIEW_NOT_COMPLETED/);
+  const report=read(paths.reportPath);
+  assert.equal(calls,1);
+  assert.equal(report.status,'error_unverified');
+  assert.equal(report.modelAttemptCount,1);
+  assert.equal(report.findings,null);
+  assert.equal(report.providerUsage,null);
+  assert.equal(report.independentQualityMeasured,false);
+  assert.ok(!readFileSync(paths.reportPath,'utf8').includes('SYNTHETIC-SECRET'));
+});
+
+test('two simultaneous identical-SHA attempts share one durable lock',async t=>{
+  const paths=setup(t);
+  let entered=0,release;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const args={...paths,files:makeFiles(),reviewContext:context(),metadata:meta()};
+  const first=runOfflineJournaledReview({
+    ...args,mockFetch:async()=>{
+      entered++;
+      await gate;
+      return successful();
+    }
+  });
+  await assert.rejects(runOfflineJournaledReview({
+    ...args,mockFetch:async()=>{
+      entered++;
+      throw new Error('Duplicate request must never be sent');
+    }
+  }),/PREVIOUS_ATTEMPT_EXISTS/);
+  release();
+  assert.equal((await first).status,'completed');
+  assert.equal(entered,1);
+  assert.equal(read(paths.reportPath).modelAttemptCount,1);
+});
+
+test('mocked provider result cannot leak synthetic credentials into private report',async t=>{
+  const paths=setup(t);
+  const secret='sk-proj-SYNTHETICMODELKEY1234567890';
+  const payload={
+    status:'completed',
+    output_text:JSON.stringify({
+      summary:'Model echoed '+secret,
+      findings:[{
+        path:'src/lib/notification-lock.mjs',line:1,severity:'high',
+        category:'correctness',title:'Unexpected '+secret,
+        body:'Synthetic evidence '+secret+' should never be persisted.',
+        confidence:0.99
+      }]
+    }),
+    usage:{input_tokens:421,output_tokens:52}
+  };
+  const report=await runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockFetch:async()=>new Response(JSON.stringify(payload),{
+      status:200,headers:{'x-request-id':'req_privatefixture42'}
+    })
+  });
+  assert.equal(report.status,'completed');
+  assert.equal(report.findings.length,1);
+  assert.equal(report.providerUsage.inputTokens,421);
+  const persisted=readFileSync(paths.reportPath,'utf8');
+  assert.ok(!persisted.includes('SYNTHETICMODELKEY1234567890'));
+  assert.ok(persisted.includes('[REDACTED_TOKEN]'));
+  assert.equal(report.independentQualityMeasured,false);
+});
+
+test('unanchored suggestions cannot masquerade as a clean AI verdict',async t=>{
+  const paths=setup(t);
+  const result={
+    status:'completed',output_text:JSON.stringify({
+      summary:'Synthetic, knowingly unanchored suggestion',
+      findings:[{path:'src/lib/notification-lock.mjs',line:99999,
+        severity:'high',category:'correctness',title:'Unanchored claim',
+        body:'This claim has no changed-line evidence.',confidence:0.98}]
+    }),usage:{input_tokens:100,output_tokens:30}
+  };
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockFetch:async()=>new Response(JSON.stringify(result),{status:200})
+  }),/REVIEW_NOT_COMPLETED/);
+  const report=read(paths.reportPath);
+  assert.equal(report.status,'error_unverified');
+  assert.equal(report.findings,null);
+  assert.equal(report.providerUsage.inputTokens,100);
+});
+
+test('abrupt process exit after start keeps orphan lock without a fake clean report',async t=>{
+  const {spawnSync}=await import('node:child_process');
+  const {pathToFileURL,fileURLToPath}=await import('node:url');
+  const paths=setup(t);
+  const journalUrl=pathToFileURL(fileURLToPath(new URL('../benchmarks/one-shot-journal.mjs',import.meta.url))).href;
+  const script=[
+    'const {runSingleAttempt}=await import(process.argv[1]);',
+    'const identity=JSON.parse(process.argv[4]);',
+    'await runSingleAttempt({lockPath:process.argv[2],reportPath:process.argv[3],',
+    'metadata:identity,execute:async({markModelRequestStart})=>{',
+    'markModelRequestStart();process.exit(43);}});'
+  ].join('');
+  const child=spawnSync(process.execPath,
+    ['--input-type=module','-e',script,journalUrl,paths.lockPath,paths.reportPath,JSON.stringify(meta())],
+    {encoding:'utf8',timeout:5000});
+  assert.equal(child.status,43,child.stderr);
+  assert.equal(existsSync(paths.lockPath),true);
+  assert.equal(existsSync(paths.reportPath),false);
+  const {inspectAttempt}=await import('../benchmarks/one-shot-journal.mjs');
+  const orphan=inspectAttempt(paths);
+  assert.equal(orphan.status,'orphaned_unverified');
+  assert.equal(orphan.modelAttemptCount,null);
+  let calls=0;
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockFetch:async()=>{calls++;return successful();}
+  }),/PREVIOUS_ATTEMPT_EXISTS/);
+  assert.equal(calls,0);
+});
+
+test('crash after mocked HTTP receipt recovers tokens without invented verdict',async t=>{
+  const {spawnSync}=await import('node:child_process');
+  const {pathToFileURL,fileURLToPath}=await import('node:url');
+  const paths=setup(t);
+  const journalUrl=pathToFileURL(fileURLToPath(new URL('../benchmarks/one-shot-journal.mjs',import.meta.url))).href;
+  const script=[
+    'const {runSingleAttempt}=await import(process.argv[1]);',
+    'const identity=JSON.parse(process.argv[4]);',
+    'await runSingleAttempt({lockPath:process.argv[2],reportPath:process.argv[3],',
+    'metadata:identity,execute:async({markModelRequestStart,recordProviderUsage})=>{',
+    'markModelRequestStart();',
+    'recordProviderUsage({httpStatus:200,inputTokens:897,outputTokens:114,requestId:"req_mockcrash99"});',
+    'process.exit(44);}});'
+  ].join('');
+  const child=spawnSync(process.execPath,
+    ['--input-type=module','-e',script,journalUrl,paths.lockPath,paths.reportPath,JSON.stringify(meta())],
+    {encoding:'utf8',timeout:5000});
+  assert.equal(child.status,44,child.stderr);
+  assert.equal(existsSync(paths.reportPath),false);
+  assert.equal(existsSync(paths.reportPath+'.usage.json'),true);
+  const {inspectAttempt}=await import('../benchmarks/one-shot-journal.mjs');
+  const recovered=inspectAttempt(paths);
+  assert.equal(recovered.status,'orphaned_unverified');
+  assert.equal(recovered.modelAttemptCount,1);
+  assert.equal(recovered.providerUsage.inputTokens,897);
+  assert.equal(recovered.providerUsage.outputTokens,114);
+  assert.equal(recovered.hasFindings??false,false);
+});
