@@ -336,3 +336,51 @@ test('asynchronous receipt persistence completes before the model verdict',async
   await pending;
   assert.equal(finished,true);
 });
+
+test('inherited toJSON hooks cannot execute a network-capable mock fixture',async t=>{
+  const paths=setup(t);let arbitraryHooks=0;
+  const inherited=Object.create({toJSON(){arbitraryHooks++;return {status:'completed'};}});
+  inherited.status='completed';
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockOutcome:{kind:'response',body:inherited}
+  }),/OFFLINE_ONLY_INERT_DATA_REQUIRED/);
+  assert.equal(arbitraryHooks,0);
+  assert.equal(existsSync(paths.lockPath),false);
+});
+
+test('accessor getters and own toJSON functions are rejected before any attempt lock',async t=>{
+  const paths=setup(t);let accessed=0;
+  const body={status:'completed',get output_text(){accessed++;return '{}';}};
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockOutcome:{kind:'response',body}
+  }),/OFFLINE_ONLY_INERT_DATA_REQUIRED/);
+  assert.equal(accessed,0);
+  assert.equal(existsSync(paths.lockPath),false);
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockOutcome:{kind:'response',body:{toJSON(){accessed++;return {};}}}
+  }),/OFFLINE_ONLY_INERT_DATA_REQUIRED/);
+  assert.equal(accessed,0);
+});
+
+test('oversized testLinks cannot bypass the exact emitted context budget',async t=>{
+  const paths=setup(t),ctx=context();
+  ctx.testLinks=[{test:'X'.repeat(12500),implementation:'src/lib/notification-lock.mjs'}];
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:ctx,metadata:meta(),
+    mockOutcome:successful()
+  }),/FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED/);
+  assert.equal(existsSync(paths.lockPath),false);
+});
+
+test('oversized snippet kind cannot escape the context accounting',async t=>{
+  const paths=setup(t),ctx=context();
+  ctx.snippets[0].kind='Z'.repeat(12500);
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:ctx,metadata:meta(),
+    mockOutcome:successful()
+  }),/FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED/);
+  assert.equal(existsSync(paths.lockPath),false);
+});
