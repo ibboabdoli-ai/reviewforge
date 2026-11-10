@@ -50,13 +50,22 @@ export function verifyFrozenBatch({files,reviewContext,metadata}) {
       IMPORTANT.some(path=>!selected.batches[0].some(f=>f.filename===path))) {
     throw new Error('FROZEN_PR7_COVERAGE_INCOMPLETE');
   }
-  if(reviewContext?.headSha!==FROZEN_PR7.headSha ||
+  // Never trust caller-supplied totalChars as a security boundary.
+  // collectReviewContext counts each snippet text plus 120 formatting chars.
+  const snippets=reviewContext?.snippets;
+  if(!Array.isArray(snippets) ||
+      typeof reviewContext?.projectRules!=='string' ||
+      snippets.some(s=>!s||typeof s.path!=='string'||typeof s.text!=='string')) {
+    throw new Error('FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED');
+  }
+  const actualChars=reviewContext.projectRules.length+
+    snippets.reduce((total,s)=>total+s.text.length+120,0);
+  if(reviewContext.headSha!==FROZEN_PR7.headSha ||
       !Number.isSafeInteger(reviewContext.totalChars) ||
-      reviewContext.totalChars<0 || reviewContext.totalChars>12000 ||
-      !Array.isArray(reviewContext.snippets) ||
-      !reviewContext.snippets.some(s=>s.path==='src/lib/notification-lock.mjs' &&
-        typeof s.text==='string' && s.text.length>0) ||
-      reviewContext.snippets.some(s=>/gold|answer.?key/i.test(s.path??''))) {
+      reviewContext.totalChars<actualChars || actualChars>12000 ||
+      reviewContext.totalChars>12000 ||
+      !snippets.some(s=>s.path==='src/lib/notification-lock.mjs' && s.text.length>0) ||
+      snippets.some(s=>/gold|answer.?key/i.test(s.path))) {
     throw new Error('FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED');
   }
   return selected.batches[0];
