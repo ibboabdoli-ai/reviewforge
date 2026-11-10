@@ -317,7 +317,7 @@ export async function reviewWithAI(files,{
       +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:''),
     input, text:{format:{type:'json_schema',name:'review_result',strict:true,schema}}});
   // No credentials, prompt text or source code are passed to instrumentation.
-  onBeforeRequest?.({model,store:false,reasoningEffort,
+  await onBeforeRequest?.({model,store:false,reasoningEffort,
     maxOutputTokens:reasoningEffort?6000:2000,
     requestBytes:Buffer.byteLength(requestBody,'utf8')});
   const res=await requestFetch('https://api.openai.com/v1/responses',{
@@ -327,12 +327,12 @@ export async function reviewWithAI(files,{
   let data;
   try { data=await res.json(); }
   catch(error) {
-    onProviderReceipt?.({httpStatus:res.status,
+    await onProviderReceipt?.({httpStatus:res.status,
       requestId:res.headers?.get?.('x-request-id')??null,
       inputTokens:null,outputTokens:null});
     throw error;
   }
-  onProviderReceipt?.({httpStatus:res.status,
+  await onProviderReceipt?.({httpStatus:res.status,
     requestId:res.headers?.get?.('x-request-id')??null,
     inputTokens:data?.usage?.input_tokens??null,
     outputTokens:data?.usage?.output_tokens??null});
