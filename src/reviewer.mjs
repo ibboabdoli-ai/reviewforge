@@ -311,7 +311,7 @@ export async function reviewWithAI(files,{
   model=config.openai.model,reasoningEffort=null,reviewContext=null,
   // Opt-in trusted instrumentation. Existing production callers are unchanged.
   requestFetch=fetch,requestKey=config.openai.apiKey,
-  onBeforeRequest=null,onProviderReceipt=null
+  requestTimeoutMs=85000,onBeforeRequest=null,onProviderReceipt=null
 }={}) {
   if(!requestKey)throw new Error('OPENAI_API_KEY is not configured; AI review was not run.');
   if(!files.length)return {summary:'No reviewable text changes found.',findings:[]};
@@ -326,9 +326,11 @@ export async function reviewWithAI(files,{
   await onBeforeRequest?.({model,store:false,reasoningEffort,
     maxOutputTokens:reasoningEffort?6000:2000,
     requestBytes:Buffer.byteLength(requestBody,'utf8')});
+  if(!Number.isSafeInteger(requestTimeoutMs)||requestTimeoutMs<1000||requestTimeoutMs>180000)
+    throw new RangeError('Invalid bounded request timeout');
   const res=await requestFetch('https://api.openai.com/v1/responses',{
     method:'POST',headers:{Authorization:`Bearer ${requestKey}`,'Content-Type':'application/json'},
-    body:requestBody,signal:AbortSignal.timeout(85000)
+    body:requestBody,signal:AbortSignal.timeout(requestTimeoutMs)
   });
   let data;
   try { data=await res.json(); }
