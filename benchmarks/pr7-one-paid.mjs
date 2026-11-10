@@ -118,8 +118,9 @@ export async function runApprovedOnce({prepared,paths,approval,key,
   };
   const result=await runSingleAttempt({metadata:prepared.metadata,
     lockPath:paths.lockPath,reportPath:paths.reportPath,
-    execute:async({markModelRequestStart,recordProviderUsage})=>
-      reviewWithAI(prepared.batch,{model:TRIAL.model,reasoningEffort:TRIAL.effort,
+    execute:async({markModelRequestStart,recordProviderUsage})=>{
+      const answer=await reviewWithAI(prepared.batch,{
+        model:TRIAL.model,reasoningEffort:TRIAL.effort,
         reviewContext:prepared.reviewContext,requestKey:key,
         requestTimeoutMs:TRIAL.timeoutMs,requestFetch:guardedFetch,
         onBeforeRequest:({model,store,maxOutputTokens,reasoningEffort,requestBytes})=>{
@@ -130,7 +131,12 @@ export async function runApprovedOnce({prepared,paths,approval,key,
             throw new Error('MODEL_REQUEST_CAP_REFUSED');
           markModelRequestStart();
         },onProviderReceipt:recordProviderUsage
-      })
+      });
+      // Filtered, unanchored suggestions must not become clean verdicts.
+      if(answer.diagnostics?.filteredFindings!==0)
+        throw new Error('UNVERIFIED_MODEL_SUGGESTIONS');
+      return answer;
+    }
   });
   return {status:result.status,attempt:TRIAL.id,providerUsage:result.providerUsage,
     estimatedUsd:calculateCost(result.providerUsage),findings:result.findings,

@@ -134,3 +134,27 @@ test('preflight does not touch any simulated legacy lock',async t=>{
   await preflightOnly(prepared());
   assert.equal(readFileSync(legacy,'utf8'),data);
 });
+
+test('unanchored model suggestions fail closed without a clean paid verdict',
+  {skip:process.env.GITHUB_ACTIONS!=='true'},async t=>{
+  const paths=withTemp(t);let requests=0;
+  const reply=()=>new Response(JSON.stringify({
+    status:'completed',output_text:JSON.stringify({
+      summary:'Synthetic candidate with invalid changed-line anchor',
+      findings:[{path:'src/lib/notification-lock.mjs',line:99999,
+        severity:'high',category:'correctness',title:'Synthetic wrong anchor',
+        body:'Not on an added line; must not be called clean.',confidence:0.96}]
+    }),usage:{input_tokens:160,output_tokens:30}
+  }),{status:200});
+  const args={prepared:prepared(),paths,approval:TRIAL.id,
+    key:'sk-proj-LOCALTESTKEY123456789',
+    fetchOnce:async()=>{requests++;return reply();}};
+  await assert.rejects(runApprovedOnce(args),/REVIEW_NOT_COMPLETED/);
+  assert.equal(requests,1);
+  const report=JSON.parse(readFileSync(paths.reportPath,'utf8'));
+  assert.notEqual(report.status,'completed');
+  assert.equal(report.findings,null);
+  assert.equal(report.providerUsage.inputTokens,160);
+  await assert.rejects(runApprovedOnce(args),/ONE_SHOT_ATTEMPT_ALREADY_USED/);
+  assert.equal(requests,1);
+});
