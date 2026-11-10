@@ -113,6 +113,8 @@ function snapshotInert(value,depth=0) {
   return copy;
 }
 function validateMockOutcome(mockOutcome) {
+  if(mockOutcome===undefined || mockOutcome===null)
+    throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
   const data=snapshotInert(mockOutcome);
   if(!data || !['response','raw','timeout','network'].includes(data.kind) ||
       (data.delayMs!==undefined &&
