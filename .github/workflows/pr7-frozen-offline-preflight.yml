@@ -1,0 +1,62 @@
+name: Frozen PR7 offline end-to-end preflight
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/pr7-one-paid.mjs'
+      - 'src/reviewer.mjs'
+      - 'benchmarks/offline-journaled-review.mjs'
+      - 'tests/pr7-one-paid.test.mjs'
+      - '.github/workflows/pr7-frozen-offline-preflight.yml'
+  push:
+    branches:
+      - quality/pr7-one-paid-readiness-20261110
+permissions:
+  contents: read
+jobs:
+  frozen-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      OPENAI_API_KEY: ''
+      OPENAI_TEST_API_KEY: ''
+      RF_APPROVED_PAID_ATTEMPT: ''
+      DATABASE_URL: ''
+      STRIPE_SECRET_KEY: ''
+      GITHUB_TOKEN: ''
+      GITHUB_PRIVATE_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Get frozen public sandbox commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/rf-frozen-sandbox-pr7"
+          git init -q "$target"
+          git -C "$target" remote add origin https://github.com/ibboabdoli-ai/reviewforge-sandbox.git
+          git -C "$target" fetch -q --no-tags --depth=1 origin \
+            420bf122458eb298080bca9e94e6fcfb32339e59 \
+            a628945d7533c7418aed344ed5f90a9a2ec8bc46
+          git -C "$target" checkout -q --detach a628945d7533c7418aed344ed5f90a9a2ec8bc46
+          test "$(git -C "$target" rev-parse HEAD)" = a628945d7533c7418aed344ed5f90a9a2ec8bc46
+      - name: Run offline preflight without provider credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          node benchmarks/pr7-one-paid.mjs --preflight "$RUNNER_TEMP/rf-frozen-sandbox-pr7" \
+            > "$RUNNER_TEMP/rf-pr7-preflight-result.json"
+          cat "$RUNNER_TEMP/rf-pr7-preflight-result.json"
+          node --input-type=module -e '
+            import {readFileSync} from "node:fs";
+            const p=JSON.parse(readFileSync(process.argv[1],"utf8"));
+            if(p.coverage?.totalChanged!==15 || p.coverage?.reviewed!==15 ||
+               p.coverage?.complete!==true || p.coverage?.batches!==1 ||
+               p.head!=="a628945d7533c7418aed344ed5f90a9a2ec8bc46" ||
+               p.contextChars>12000 || p.networkCalls!==0 || p.modelCalls!==0 ||
+               p.oldLockUntouched!==true) process.exit(2);
+          ' "$RUNNER_TEMP/rf-pr7-preflight-result.json"
