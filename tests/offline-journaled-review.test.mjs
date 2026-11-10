@@ -32,7 +32,7 @@ const setup=t=>{
   return {lockPath:join(root,'attempt.lock'),reportPath:join(root,'result.json')};
 };
 const read=path=>JSON.parse(readFileSync(path,'utf8'));
-const successful=()=>({
+const successful=()=>JSON.stringify({
   kind:'response',httpStatus:200,requestId:'req_mocked12345',
   body:{status:'completed',output_text:JSON.stringify({
     summary:'Mocked engine response; no actual AI review',findings:[]}),
@@ -72,7 +72,7 @@ test('a model TimeoutError records unverified with no replay',async t=>{
   const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockOutcome:{kind:'timeout'}
+    mockOutcome:JSON.stringify({kind:'timeout'})
   }),/REVIEW_NOT_COMPLETED/);
   assert.equal(read(paths.reportPath).status,'timeout_unverified');
   assert.equal(read(paths.reportPath).modelAttemptCount,1);
@@ -83,7 +83,7 @@ test('HTTP 503 is persisted but never treated as a clean review',async t=>{
   const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockOutcome:{kind:'response',httpStatus:503,body:{error:{message:'synthetic unavailable'}}}
+    mockOutcome:JSON.stringify({kind:'response',httpStatus:503,body:{error:{message:'synthetic unavailable'}}})
   }),/REVIEW_NOT_COMPLETED/);
   assert.equal(read(paths.reportPath).status,'error_unverified');
   assert.equal(read(paths.reportPath).providerUsage.httpStatus,503);
@@ -94,7 +94,7 @@ test('invalid JSON still captures observed HTTP response metadata',async t=>{
   const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockOutcome:{kind:'raw',text:'not json'}
+    mockOutcome:JSON.stringify({kind:'raw',text:'not json'})
   }),/REVIEW_NOT_COMPLETED/);
   const report=read(paths.reportPath);
   assert.equal(report.status,'invalid_response_unverified');
@@ -135,7 +135,7 @@ test('offline network failure remains unverified without retry',async t=>{
   const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockOutcome:{kind:'network'}
+    mockOutcome:JSON.stringify({kind:'network'})
   }),/REVIEW_NOT_COMPLETED/);
   const report=read(paths.reportPath);
   assert.equal(report.status,'error_unverified');
@@ -147,7 +147,7 @@ test('offline network failure remains unverified without retry',async t=>{
 
 test('two simultaneous same-SHA requests share one durable lock',async t=>{
   const paths=setup(t),args={...paths,files:makeFiles(),reviewContext:context(),metadata:meta()};
-  const first=runOfflineJournaledReview({...args,mockOutcome:{...successful(),delayMs:70}});
+  const first=runOfflineJournaledReview({...args,mockOutcome:JSON.stringify({...JSON.parse(successful()),delayMs:70})});
   await assert.rejects(runOfflineJournaledReview({...args,mockOutcome:successful()}),
     /PREVIOUS_ATTEMPT_EXISTS/);
   assert.equal((await first).status,'completed');
@@ -172,7 +172,7 @@ test('mocked provider result cannot leak synthetic credentials into private repo
   };
   const report=await runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockOutcome:{kind:'response',httpStatus:200,body:payload,requestId:'req_privatefixture42'}
+    mockOutcome:JSON.stringify({kind:'response',httpStatus:200,body:payload,requestId:'req_privatefixture42'})
   });
   assert.equal(report.status,'completed');
   assert.equal(report.findings.length,1);
@@ -195,7 +195,7 @@ test('unanchored suggestions cannot masquerade as a clean AI verdict',async t=>{
   };
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockOutcome:{kind:'response',httpStatus:200,body:result}
+    mockOutcome:JSON.stringify({kind:'response',httpStatus:200,body:result})
   }),/REVIEW_NOT_COMPLETED/);
   const report=read(paths.reportPath);
   assert.equal(report.status,'error_unverified');
@@ -344,7 +344,7 @@ test('inherited toJSON hooks cannot execute a network-capable mock fixture',asyn
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
     mockOutcome:{kind:'response',body:inherited}
-  }),/OFFLINE_ONLY_INERT_DATA_REQUIRED/);
+  }),/OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED/);
   assert.equal(arbitraryHooks,0);
   assert.equal(existsSync(paths.lockPath),false);
 });
@@ -355,13 +355,13 @@ test('accessor getters and own toJSON functions are rejected before any attempt 
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
     mockOutcome:{kind:'response',body}
-  }),/OFFLINE_ONLY_INERT_DATA_REQUIRED/);
+  }),/OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED/);
   assert.equal(accessed,0);
   assert.equal(existsSync(paths.lockPath),false);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
     mockOutcome:{kind:'response',body:{toJSON(){accessed++;return {};}}}
-  }),/OFFLINE_ONLY_INERT_DATA_REQUIRED/);
+  }),/OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED/);
   assert.equal(accessed,0);
 });
 
@@ -383,4 +383,39 @@ test('oversized snippet kind cannot escape the context accounting',async t=>{
     mockOutcome:successful()
   }),/FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED/);
   assert.equal(existsSync(paths.lockPath),false);
+});
+
+
+test('Proxy fixtures are rejected without triggering executable traps',async t=>{
+  const paths=setup(t);
+  let arbitraryHooks=0;
+  const proxy=new Proxy({kind:'response',body:{status:'completed'}},{
+    getPrototypeOf(target){arbitraryHooks++;return Object.getPrototypeOf(target);},
+    get(target,key){arbitraryHooks++;return Reflect.get(target,key);},
+    ownKeys(target){arbitraryHooks++;return Reflect.ownKeys(target);}
+  });
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockOutcome:proxy
+  }),/OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED/);
+  assert.equal(arbitraryHooks,0,'Fixture inspection must not invoke Proxy traps');
+  assert.equal(existsSync(paths.lockPath),false,'No attempt was started');
+});
+
+test('literal JSON fixture strings are accepted with no user-defined JS hooks',async t=>{
+  const paths=setup(t);
+  const fixture=JSON.stringify({
+    kind:'response',body:{
+      status:'completed',output_text:JSON.stringify({summary:'no findings from synthetic response',findings:[]}),
+      usage:{input_tokens:77,output_tokens:8}
+    }
+  });
+  const result=await runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockOutcome:fixture
+  });
+  assert.equal(result.status,'completed');
+  assert.equal(result.providerUsage.inputTokens,77);
+  assert.equal(result.providerUsage.outputTokens,8);
+  assert.equal(result.independentQualityMeasured,false);
 });
