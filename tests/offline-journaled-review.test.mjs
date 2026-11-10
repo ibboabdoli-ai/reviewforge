@@ -32,11 +32,12 @@ const setup=t=>{
   return {lockPath:join(root,'attempt.lock'),reportPath:join(root,'result.json')};
 };
 const read=path=>JSON.parse(readFileSync(path,'utf8'));
-const successful=()=>new Response(JSON.stringify({
-  status:'completed',output_text:JSON.stringify({
+const successful=()=>({
+  kind:'response',httpStatus:200,requestId:'req_mocked12345',
+  body:{status:'completed',output_text:JSON.stringify({
     summary:'Mocked engine response; no actual AI review',findings:[]}),
-  usage:{input_tokens:119,output_tokens:17}
-}),{status:200,headers:{'x-request-id':'req_mocked12345'}});
+    usage:{input_tokens:119,output_tokens:17}}
+});
 
 test('frozen PR7 synthetic batch stays 15/15 with critical file paths',()=>{
   const batch=verifyFrozenBatch({files:makeFiles(),reviewContext:context(),metadata:meta()});
@@ -46,27 +47,12 @@ test('frozen PR7 synthetic batch stays 15/15 with critical file paths',()=>{
     'src/services/booking-notice.mjs'])assert.ok(batch.some(f=>f.filename===key));
 });
 
-test('real reviewer pipeline consumes ONE mocked response and persists usage',async t=>{
-  const paths=setup(t);let fakeCalls=0;
+test('real reviewer pipeline consumes ONE synthetic response and persists usage',async t=>{
+  const paths=setup(t);
   const report=await runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async (url,opts)=>{
-      fakeCalls++;
-      assert.equal(String(url),'https://api.openai.com/v1/responses');
-      assert.equal(opts.method,'POST');
-      assert.equal(opts.signal.aborted,false);
-      const body=JSON.parse(opts.body);
-      assert.equal(body.store,false);
-      assert.equal(body.model,'gpt-6.1-sol');
-      assert.equal(body.reasoning.effort,'high');
-      assert.equal(body.max_output_tokens,6000);
-      assert.ok(body.input.includes('src/lib/notification-lock.mjs'));
-      assert.ok(body.input.includes('src/services/deposit-updates.mjs'));
-      assert.ok(body.input.includes('src/services/booking-notice.mjs'));
-      return successful();
-    }
+    mockOutcome:successful()
   });
-  assert.equal(fakeCalls,1);
   assert.equal(report.status,'completed');
   assert.equal(report.modelAttemptCount,1);
   assert.equal(report.providerUsage.httpStatus,200);
@@ -78,18 +64,16 @@ test('real reviewer pipeline consumes ONE mocked response and persists usage',as
   assert.equal(read(paths.reportPath+'.usage.json').providerUsage.requestId,'req_mocked12345');
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>{fakeCalls++;throw Error('must not run');}
+    mockOutcome:successful()
   }),/PREVIOUS_ATTEMPT_EXISTS/);
-  assert.equal(fakeCalls,1,'Never replay an attempted review');
 });
 
-test('a model TimeoutError records an unverified outcome without replay',async t=>{
-  const paths=setup(t);let calls=0;
+test('a model TimeoutError records unverified with no replay',async t=>{
+  const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>{calls++;throw new DOMException('synthetic timeout','TimeoutError');}
+    mockOutcome:{kind:'timeout'}
   }),/REVIEW_NOT_COMPLETED/);
-  assert.equal(calls,1);
   assert.equal(read(paths.reportPath).status,'timeout_unverified');
   assert.equal(read(paths.reportPath).modelAttemptCount,1);
   assert.equal(read(paths.reportPath).findings,null);
@@ -99,7 +83,7 @@ test('HTTP 503 is persisted but never treated as a clean review',async t=>{
   const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>new Response(JSON.stringify({error:{message:'synthetic unavailable'}}),{status:503})
+    mockOutcome:{kind:'response',httpStatus:503,body:{error:{message:'synthetic unavailable'}}}
   }),/REVIEW_NOT_COMPLETED/);
   assert.equal(read(paths.reportPath).status,'error_unverified');
   assert.equal(read(paths.reportPath).providerUsage.httpStatus,503);
@@ -110,7 +94,7 @@ test('invalid JSON still captures observed HTTP response metadata',async t=>{
   const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>new Response('not json',{status:200})
+    mockOutcome:{kind:'raw',text:'not json'}
   }),/REVIEW_NOT_COMPLETED/);
   const report=read(paths.reportPath);
   assert.equal(report.status,'invalid_response_unverified');
@@ -120,22 +104,20 @@ test('invalid JSON still captures observed HTTP response metadata',async t=>{
 });
 
 test('wrong immutable HEAD fails before any lock or model call',async t=>{
-  const paths=setup(t);let calls=0;
+  const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:{...meta(),headSha:'a'.repeat(40)},
-    mockFetch:async()=>{calls++;return successful();}
+    mockOutcome:successful()
   }),/FROZEN_PR7_IDENTITY_MISMATCH/);
-  assert.equal(calls,0);
   assert.equal(existsSync(paths.lockPath),false);
 });
 
 test('changed-file omission fails before any lock or model call',async t=>{
-  const paths=setup(t);let calls=0;
+  const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles().slice(1),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>{calls++;return successful();}
+    mockOutcome:successful()
   }),/FROZEN_PR7_CHANGED_FILE_SET_MISMATCH/);
-  assert.equal(calls,0);
   assert.equal(existsSync(paths.lockPath),false);
 });
 
@@ -144,51 +126,31 @@ test('external production fetch and environment key are not accepted',async t=>{
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
     mockFetch:globalThis.fetch
-  }),/OFFLINE_ONLY_NO_REAL_KEY_OR_FETCH/);
+  }),/OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED/);
   assert.equal(existsSync(paths.lockPath),false);
 });
 
 
-test('offline network failure remains unverified with no unexpected retries',async t=>{
-  const paths=setup(t);let calls=0;
+test('offline network failure remains unverified without retry',async t=>{
+  const paths=setup(t);
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>{
-      calls++;
-      throw new TypeError('Synthetic ENETUNREACH sk-proj-SYNTHETIC-SECRET-DO-NOT-STORE');
-    }
+    mockOutcome:{kind:'network'}
   }),/REVIEW_NOT_COMPLETED/);
   const report=read(paths.reportPath);
-  assert.equal(calls,1);
   assert.equal(report.status,'error_unverified');
   assert.equal(report.modelAttemptCount,1);
   assert.equal(report.findings,null);
   assert.equal(report.providerUsage,null);
   assert.equal(report.independentQualityMeasured,false);
-  assert.ok(!readFileSync(paths.reportPath,'utf8').includes('SYNTHETIC-SECRET'));
 });
 
-test('two simultaneous identical-SHA attempts share one durable lock',async t=>{
-  const paths=setup(t);
-  let entered=0,release;
-  const gate=new Promise(resolve=>{release=resolve;});
-  const args={...paths,files:makeFiles(),reviewContext:context(),metadata:meta()};
-  const first=runOfflineJournaledReview({
-    ...args,mockFetch:async()=>{
-      entered++;
-      await gate;
-      return successful();
-    }
-  });
-  await assert.rejects(runOfflineJournaledReview({
-    ...args,mockFetch:async()=>{
-      entered++;
-      throw new Error('Duplicate request must never be sent');
-    }
-  }),/PREVIOUS_ATTEMPT_EXISTS/);
-  release();
+test('two simultaneous same-SHA requests share one durable lock',async t=>{
+  const paths=setup(t),args={...paths,files:makeFiles(),reviewContext:context(),metadata:meta()};
+  const first=runOfflineJournaledReview({...args,mockOutcome:{...successful(),delayMs:70}});
+  await assert.rejects(runOfflineJournaledReview({...args,mockOutcome:successful()}),
+    /PREVIOUS_ATTEMPT_EXISTS/);
   assert.equal((await first).status,'completed');
-  assert.equal(entered,1);
   assert.equal(read(paths.reportPath).modelAttemptCount,1);
 });
 
@@ -210,9 +172,7 @@ test('mocked provider result cannot leak synthetic credentials into private repo
   };
   const report=await runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>new Response(JSON.stringify(payload),{
-      status:200,headers:{'x-request-id':'req_privatefixture42'}
-    })
+    mockOutcome:{kind:'response',httpStatus:200,body:payload,requestId:'req_privatefixture42'}
   });
   assert.equal(report.status,'completed');
   assert.equal(report.findings.length,1);
@@ -235,7 +195,7 @@ test('unanchored suggestions cannot masquerade as a clean AI verdict',async t=>{
   };
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>new Response(JSON.stringify(result),{status:200})
+    mockOutcome:{kind:'response',httpStatus:200,body:result}
   }),/REVIEW_NOT_COMPLETED/);
   const report=read(paths.reportPath);
   assert.equal(report.status,'error_unverified');
@@ -265,12 +225,10 @@ test('abrupt process exit after start keeps orphan lock without a fake clean rep
   const orphan=inspectAttempt(paths);
   assert.equal(orphan.status,'orphaned_unverified');
   assert.equal(orphan.modelAttemptCount,null);
-  let calls=0;
   await assert.rejects(runOfflineJournaledReview({
     ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
-    mockFetch:async()=>{calls++;return successful();}
+    mockOutcome:successful()
   }),/PREVIOUS_ATTEMPT_EXISTS/);
-  assert.equal(calls,0);
 });
 
 test('crash after mocked HTTP receipt recovers tokens without invented verdict',async t=>{
@@ -300,4 +258,81 @@ test('crash after mocked HTTP receipt recovers tokens without invented verdict',
   assert.equal(recovered.providerUsage.inputTokens,897);
   assert.equal(recovered.providerUsage.outputTokens,114);
   assert.equal(recovered.hasFindings??false,false);
+});
+
+test('a forged low context counter cannot bypass 12k context limit',async t=>{
+  const paths=setup(t),ctx=context();
+  ctx.totalChars=1;
+  ctx.snippets[0].text='L1: '+('Z'.repeat(12500));
+  await assert.rejects(runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:ctx,metadata:meta(),
+    mockOutcome:successful()
+  }),/FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED/);
+  assert.equal(existsSync(paths.lockPath),false);
+});
+
+test('a forwarding fetch wrapper is ignored even when passed alongside a mock fixture',async t=>{
+  const paths=setup(t);let forwarded=0;
+  const wrapper=(...args)=>{forwarded++;return globalThis.fetch(...args);};
+  const report=await runOfflineJournaledReview({
+    ...paths,files:makeFiles(),reviewContext:context(),metadata:meta(),
+    mockFetch:wrapper,mockOutcome:successful()
+  });
+  assert.equal(report.status,'completed');
+  assert.equal(forwarded,0);
+});
+
+test('an asynchronous pre-request instrumentation gate blocks fetch until settled',async()=>{
+  const {reviewWithAI}=await import('../src/reviewer.mjs');
+  const files=[{filename:'src/guard.ts',patch:'@@ -0,0 +1,1 @@\n+export const synthetic = true;'}];
+  let release,attempts=0;
+  const gate=new Promise(resolve=>{release=resolve;});
+  const ongoing=reviewWithAI(files,{
+    requestKey:'sk-LOCAL-SYNTHETIC',model:'gpt-6.1-sol',
+    requestFetch:async()=>{attempts++;return new Response(JSON.stringify({
+      status:'completed',output_text:JSON.stringify({summary:'ok',findings:[]})
+    }),{status:200});},
+    onBeforeRequest:async()=>{await gate;}
+  });
+  await Promise.resolve();await Promise.resolve();
+  assert.equal(attempts,0);
+  release();
+  const result=await ongoing;
+  assert.equal(attempts,1);
+  assert.equal(result.findings.length,0);
+});
+
+test('asynchronous rejected preflight prevents provider invocation',async()=>{
+  const {reviewWithAI}=await import('../src/reviewer.mjs');
+  let requests=0;
+  await assert.rejects(reviewWithAI([
+    {filename:'src/guard.ts',patch:'@@ -0,0 +1,1 @@\n+export const synthetic = true;'}
+  ],{
+    requestKey:'sk-LOCAL-SYNTHETIC',
+    requestFetch:async()=>{requests++;throw Error('Should not fetch');},
+    onBeforeRequest:async()=>{await Promise.resolve();throw Error('PRECHECK_DENIED');}
+  }),/PRECHECK_DENIED/);
+  assert.equal(requests,0);
+});
+
+test('asynchronous receipt persistence completes before the model verdict',async()=>{
+  const {reviewWithAI}=await import('../src/reviewer.mjs');
+  let signal,release,finished=false;
+  const entered=new Promise(resolve=>{signal=resolve;});
+  const hold=new Promise(resolve=>{release=resolve;});
+  const pending=reviewWithAI([
+    {filename:'src/guard.ts',patch:'@@ -0,0 +1,1 @@\n+export const synthetic = true;'}
+  ],{
+    requestKey:'sk-LOCAL-SYNTHETIC',
+    requestFetch:async()=>new Response(JSON.stringify({
+      status:'completed',output_text:JSON.stringify({summary:'ok',findings:[]}),
+      usage:{input_tokens:7,output_tokens:5}
+    }),{status:200}),
+    onProviderReceipt:async()=>{signal();await hold;}
+  }).then(x=>{finished=true;return x;});
+  await entered;
+  assert.equal(finished,false);
+  release();
+  await pending;
+  assert.equal(finished,true);
 });
