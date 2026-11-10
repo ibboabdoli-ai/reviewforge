@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer';
-import { planReviewBatches, reviewWithAI } from '../src/reviewer.mjs';
+import { planReviewBatches, reviewWithAI, renderReviewContext } from '../src/reviewer.mjs';
 import { runSingleAttempt } from './one-shot-journal.mjs';
 
 // Fixed public sandbox fixture. No gold evidence or answer key is loaded.
@@ -58,12 +58,20 @@ export function verifyFrozenBatch({files,reviewContext,metadata}) {
       snippets.some(s=>!s||typeof s.path!=='string'||typeof s.text!=='string')) {
     throw new Error('FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED');
   }
+  if(snippets.some(s=>typeof s.kind!=='string') ||
+      (reviewContext.testLinks!==undefined &&
+       (!Array.isArray(reviewContext.testLinks) ||
+        reviewContext.testLinks.some(l=>!l||typeof l.test!=='string' ||
+          typeof l.implementation!=='string')))) {
+    throw new Error('FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED');
+  }
   const actualChars=reviewContext.projectRules.length+
     snippets.reduce((total,s)=>total+s.text.length+120,0);
+  const transmittedContextChars=renderReviewContext(reviewContext).length;
   if(reviewContext.headSha!==FROZEN_PR7.headSha ||
       !Number.isSafeInteger(reviewContext.totalChars) ||
       reviewContext.totalChars<actualChars || actualChars>12000 ||
-      reviewContext.totalChars>12000 ||
+      reviewContext.totalChars>12000 || transmittedContextChars>12000 ||
       !snippets.some(s=>s.path==='src/lib/notification-lock.mjs' && s.text.length>0) ||
       snippets.some(s=>/gold|answer.?key/i.test(s.path))) {
     throw new Error('FROZEN_PR7_CONTEXT_MISSING_OR_UNTRUSTED');
@@ -73,26 +81,53 @@ export function verifyFrozenBatch({files,reviewContext,metadata}) {
 
 // Closed-world mock: no caller-provided fetch, no forwarding function,
 // no real endpoint network access, and no real API key.
+// Snapshot plain JSON data without invoking custom getters or toJSON hooks.
+// Use null-prototype object clones so inherited serialization callbacks
+// cannot run when producing the synthetic Response body.
+function snapshotInert(value,depth=0) {
+  if(depth>20)throw new Error('OFFLINE_ONLY_INERT_DATA_REQUIRED');
+  if(value===null||typeof value==='string'||typeof value==='boolean')return value;
+  if(typeof value==='number'&&Number.isFinite(value))return value;
+  if(Array.isArray(value)){
+    if(Object.getPrototypeOf(value)!==Array.prototype||value.length>5000)
+      throw new Error('OFFLINE_ONLY_INERT_DATA_REQUIRED');
+    const array=[];
+    for(let i=0;i<value.length;i++){
+      const descriptor=Object.getOwnPropertyDescriptor(value,String(i));
+      if(!descriptor||!('value' in descriptor))
+        throw new Error('OFFLINE_ONLY_INERT_DATA_REQUIRED');
+      array.push(snapshotInert(descriptor.value,depth+1));
+    }
+    // Never invoke a mutated Array.prototype.toJSON during serialization.
+    Object.defineProperty(array,'toJSON',{value:null,enumerable:false});
+    return array;
+  }
+  if(typeof value!=='object'||Object.getPrototypeOf(value)!==Object.prototype)
+    throw new Error('OFFLINE_ONLY_INERT_DATA_REQUIRED');
+  const copy=Object.create(null);
+  for(const [key,desc] of Object.entries(Object.getOwnPropertyDescriptors(value))){
+    if(!('value' in desc)||['toJSON','__proto__','constructor','prototype'].includes(key))
+      throw new Error('OFFLINE_ONLY_INERT_DATA_REQUIRED');
+    copy[key]=snapshotInert(desc.value,depth+1);
+  }
+  return copy;
+}
 function validateMockOutcome(mockOutcome) {
-  if(!mockOutcome || Object.getPrototypeOf(mockOutcome)!==Object.prototype ||
-      !['response','raw','timeout','network'].includes(mockOutcome.kind) ||
-      (mockOutcome.delayMs!==undefined &&
-       (!Number.isSafeInteger(mockOutcome.delayMs)||
-        mockOutcome.delayMs<0||mockOutcome.delayMs>500))) {
+  const data=snapshotInert(mockOutcome);
+  if(!data || !['response','raw','timeout','network'].includes(data.kind) ||
+      (data.delayMs!==undefined &&
+       (!Number.isSafeInteger(data.delayMs)||data.delayMs<0||data.delayMs>500))) {
     throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
   }
-  if(mockOutcome.kind==='response' &&
-      (!mockOutcome.body || typeof mockOutcome.body!=='object' ||
-       !Number.isSafeInteger(mockOutcome.httpStatus??200) ||
-       (mockOutcome.httpStatus??200)<200 ||
-       (mockOutcome.httpStatus??200)>599)) {
+  if(data.kind==='response' &&
+      (!data.body || typeof data.body!=='object' ||
+       !Number.isSafeInteger(data.httpStatus??200) ||
+       (data.httpStatus??200)<200 || (data.httpStatus??200)>599)) {
     throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
   }
-  if(mockOutcome.kind==='raw' &&
-      (typeof mockOutcome.text!=='string'||mockOutcome.text.length>100000)) {
+  if(data.kind==='raw' && (typeof data.text!=='string'||data.text.length>100000))
     throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
-  }
-  return mockOutcome;
+  return data;
 }
 
 /**
