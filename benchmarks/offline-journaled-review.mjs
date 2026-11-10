@@ -113,9 +113,17 @@ function snapshotInert(value,depth=0) {
   return copy;
 }
 function validateMockOutcome(mockOutcome) {
-  if(mockOutcome===undefined || mockOutcome===null)
+  // A JavaScript object can be a Proxy: even checking its prototype or
+  // descriptors can execute arbitrary traps. Never inspect caller-owned
+  // objects. JSON.parse on a *primitive string* constructs inert data without
+  // invoking user-supplied getters, toJSON or Proxy traps.
+  if(typeof mockOutcome!=='string'||mockOutcome.length<2||
+      mockOutcome.length>100000)
     throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED');
-  const data=snapshotInert(mockOutcome);
+  let decoded;
+  try { decoded=JSON.parse(mockOutcome); }
+  catch { throw new Error('OFFLINE_ONLY_MOCK_FIXTURE_REQUIRED'); }
+  const data=snapshotInert(decoded);
   if(!data || !['response','raw','timeout','network'].includes(data.kind) ||
       (data.delayMs!==undefined &&
        (!Number.isSafeInteger(data.delayMs)||data.delayMs<0||data.delayMs>500))) {
