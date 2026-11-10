@@ -1,8 +1,8 @@
 import {execFileSync} from 'node:child_process';
 import {Buffer} from 'node:buffer';
-import {mkdtempSync,rmSync,existsSync} from 'node:fs';
-import {resolve,join} from 'node:path';
-import {tmpdir} from 'node:os';
+import {mkdtempSync,rmSync,existsSync,mkdirSync} from 'node:fs';
+import {resolve,join,dirname,isAbsolute} from 'node:path';
+import {tmpdir,userInfo} from 'node:os';
 import {pathToFileURL} from 'node:url';
 import {planReviewBatches,reviewWithAI} from '../src/reviewer.mjs';
 import {collectReviewContext} from '../src/review-context.mjs';
@@ -20,9 +20,17 @@ export const TRIAL=Object.freeze({
 });
 const oldLock='rf-heldout-pr7-paid-once-20261109.lock';
 const newStem='rf-pr7-independent-once-20261110-v2';
-export const trialPaths=(root=tmpdir())=>({
-  oldLockPath:join(root,oldLock),lockPath:join(root,newStem+'.lock'),
-  reportPath:join(root,newStem+'.result.json')
+// Fixed per-OS-account path, independent of TEMP/TMPDIR/HOME changes.
+export const stableJournalRoot=()=>{
+  const home=userInfo().homedir;
+  if(typeof home!=='string'||!isAbsolute(home))
+    throw new Error('STABLE_OS_USER_HOME_REQUIRED');
+  return join(home,'.reviewforge','benchmark-journal');
+};
+export const trialPaths=()=>({
+  oldLockPath:join(tmpdir(),oldLock),
+  lockPath:join(stableJournalRoot(),newStem+'.lock'),
+  reportPath:join(stableJournalRoot(),newStem+'.result.json')
 });
 const git=(target,...args)=>execFileSync('git',['-C',target,...args],{
   encoding:'utf8',maxBuffer:5000000,stdio:['ignore','pipe','ignore']});
@@ -99,6 +107,9 @@ export async function runApprovedOnce({prepared,paths,approval,key,
       prepared?.metadata?.model!==TRIAL.model||
       prepared?.coverage?.reviewed!==15||!prepared?.coverage?.complete)
     throw new Error('PREPARED_TRIAL_MISMATCH');
+  // A stable user-owned directory prevents TEMP variation or cleanup from
+  // erasing the paid-attempt lock. Create it only AFTER fresh authorization.
+  mkdirSync(dirname(paths.lockPath),{recursive:true,mode:0o700});
   let posts=0;
   const guardedFetch=async(url,options)=>{
     if(++posts!==1||String(url)!=='https://api.openai.com/v1/responses'||

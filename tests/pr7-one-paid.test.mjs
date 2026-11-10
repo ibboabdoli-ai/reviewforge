@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync,readFileSync,existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {TRIAL,trialPaths,calculateCost,verifyAuthorization,
+import {TRIAL,trialPaths,stableJournalRoot,calculateCost,verifyAuthorization,
   preflightOnly,runApprovedOnce} from '../benchmarks/pr7-one-paid.mjs';
 import {FROZEN_PR7,verifyFrozenBatch} from '../benchmarks/offline-journaled-review.mjs';
 const names=[
@@ -32,14 +32,21 @@ const fakeSuccess=()=>new Response(JSON.stringify({status:'completed',
   output_text:JSON.stringify({summary:'MOCK ONLY',findings:[]}),
   usage:{input_tokens:921,output_tokens:103}}),{status:200,
   headers:{'x-request-id':'req_testmock42'}});
+// Only CI can exercise the paid-like synthetic path under a disposable
+// OS user. On a real technician laptop never touch the durable attempt lock.
 const withTemp=t=>{
-  const path=mkdtempSync(join(tmpdir(),'rf-independent-attempt-test-'));
-  const original=process.env.TMPDIR;
-  process.env.TMPDIR=path;
-  t.after(()=>{if(original===undefined)delete process.env.TMPDIR;
-    else process.env.TMPDIR=original;
-    rmSync(path,{recursive:true,force:true});});
-  return trialPaths(path);
+  if(process.env.GITHUB_ACTIONS!=='true'||process.env.CI!=='true')
+    throw new Error('SYNTHETIC_PAID_TEST_REQUIRES_EPHEMERAL_CI');
+  const paths=trialPaths();
+  assert.equal(existsSync(paths.lockPath),false,'Existing attempts must never be removed');
+  assert.equal(existsSync(paths.reportPath),false,'Existing reports must never be removed');
+  t.after(async()=>{
+    const {rmSync}=await import('node:fs');
+    rmSync(paths.lockPath,{force:true});
+    rmSync(paths.reportPath,{force:true});
+    rmSync(paths.reportPath+'.usage.json',{force:true});
+  });
+  return paths;
 };
 test('immutable target, single batch, model caps',()=>{
   assert.equal(TRIAL.head,'a628945d7533c7418aed344ed5f90a9a2ec8bc46');
@@ -55,7 +62,7 @@ test('cost estimated from actual receipt values, not guessed tokens',()=>{
   assert.equal(calculateCost({inputTokens:null,outputTokens:100}),null);
   assert.equal(calculateCost({inputTokens:-1,outputTokens:100}),null);
 });
-test('missing fresh authorization blocks any provider request',async t=>{
+test('missing fresh authorization blocks any provider request',{skip:process.env.GITHUB_ACTIONS!=='true'},async t=>{
   const paths=withTemp(t);let fetches=0;
   await assert.rejects(runApprovedOnce({prepared:prepared(),paths,
     key:'sk-proj-LOCALTESTKEY123456789',approval:'wrong',
@@ -63,8 +70,7 @@ test('missing fresh authorization blocks any provider request',async t=>{
   /FRESH_PAID_APPROVAL_REQUIRED/);
   assert.equal(fetches,0);assert.equal(existsSync(paths.lockPath),false);
 });
-test('preflight never uses a real fetch or model',async t=>{
-  withTemp(t);const original=globalThis.fetch;let outgoing=0;
+test('preflight never uses a real fetch or model',async t=>{const original=globalThis.fetch;let outgoing=0;
   globalThis.fetch=async()=>{outgoing++;throw Error('Network forbidden');};
   try{
     const result=await preflightOnly(prepared());
@@ -72,7 +78,7 @@ test('preflight never uses a real fetch or model',async t=>{
     assert.equal(result.modelCalls,0);assert.equal(result.coverage.reviewed,15);
   }finally{globalThis.fetch=original;}
 });
-test('single synthetic POST records tokens and rejects rerun',async t=>{
+test('single synthetic POST records tokens and rejects rerun',{skip:process.env.GITHUB_ACTIONS!=='true'},async t=>{
   const paths=withTemp(t);let calls=0;
   const args={prepared:prepared(),paths,approval:TRIAL.id,
     key:'sk-proj-LOCALTESTKEY123456789',
@@ -86,7 +92,7 @@ test('single synthetic POST records tokens and rejects rerun',async t=>{
   await assert.rejects(runApprovedOnce(args),/ONE_SHOT_ATTEMPT_ALREADY_USED/);
   assert.equal(calls,1);
 });
-test('HTTP 503 saves failed receipt without a retry',async t=>{
+test('HTTP 503 saves failed receipt without a retry',{skip:process.env.GITHUB_ACTIONS!=='true'},async t=>{
   const paths=withTemp(t);let calls=0;
   const args={prepared:prepared(),paths,approval:TRIAL.id,
     key:'sk-proj-LOCALTESTKEY123456789',
@@ -100,10 +106,31 @@ test('HTTP 503 saves failed receipt without a retry',async t=>{
   await assert.rejects(runApprovedOnce(args),/ONE_SHOT_ATTEMPT_ALREADY_USED/);
   assert.equal(calls,1);
 });
-test('historical lock remains untouched',async t=>{
-  const paths=withTemp(t),{writeFileSync}=await import('node:fs');
-  const original='{"old":true,"status":"unknown"}';
-  writeFileSync(paths.oldLockPath,original);
+test('durable journal path is unchanged by TEMP TMP or TMPDIR variations',()=>{
+  const before=trialPaths();
+  const original={TEMP:process.env.TEMP,TMP:process.env.TMP,
+    TMPDIR:process.env.TMPDIR,HOME:process.env.HOME};
+  try{
+    for(const key of Object.keys(original))
+      process.env[key]='/tmp/changed-for-synthetic-test';
+    const after=trialPaths();
+    assert.equal(before.lockPath,after.lockPath);
+    assert.equal(before.reportPath,after.reportPath);
+    assert.notEqual(before.lockPath,before.oldLockPath);
+    assert.ok(stableJournalRoot().length>4);
+  }finally{
+    for(const [key,value] of Object.entries(original))
+      if(value===undefined)delete process.env[key];
+      else process.env[key]=value;
+  }
+});
+test('preflight does not touch any simulated legacy lock',async t=>{
+  const root=mkdtempSync(join(tmpdir(),'rf-legacy-simulated-'));
+  t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const {writeFileSync}=await import('node:fs');
+  const legacy=join(root,'rf-heldout-pr7-paid-once-20261109.lock');
+  const data='{"legacy":true,"providerOutcome":"unknown"}';
+  writeFileSync(legacy,data);
   await preflightOnly(prepared());
-  assert.equal(readFileSync(paths.oldLockPath,'utf8'),original);
+  assert.equal(readFileSync(legacy,'utf8'),data);
 });
