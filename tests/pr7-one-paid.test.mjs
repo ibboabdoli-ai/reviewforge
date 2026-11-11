@@ -40,11 +40,16 @@ const withTemp=t=>{
   const paths=trialPaths();
   assert.equal(existsSync(paths.lockPath),false,'Existing attempts must never be removed');
   assert.equal(existsSync(paths.reportPath),false,'Existing reports must never be removed');
+  assert.equal(existsSync(paths.reportPath+'.usage.json'),false,'Existing usage must never be removed');
+  assert.equal(existsSync(paths.reportPath+'.dispatch.json'),false,'Existing dispatch markers must never be removed');
   t.after(async()=>{
+    // GitHub Actions runs under a disposable account; these are exclusively
+    // synthetic artifacts created by this CI test, never a customer's lock.
     const {rmSync}=await import('node:fs');
     rmSync(paths.lockPath,{force:true});
     rmSync(paths.reportPath,{force:true});
     rmSync(paths.reportPath+'.usage.json',{force:true});
+    rmSync(paths.reportPath+'.dispatch.json',{force:true});
   });
   return paths;
 };
@@ -157,4 +162,22 @@ test('unanchored model suggestions fail closed without a clean paid verdict',
   assert.equal(report.providerUsage.inputTokens,160);
   await assert.rejects(runApprovedOnce(args),/ONE_SHOT_ATTEMPT_ALREADY_USED/);
   assert.equal(requests,1);
+});
+
+
+test('a dispatch marker without the main lock prevents any paid-like retry',
+  {skip:process.env.GITHUB_ACTIONS!=='true'},async t=>{
+  const paths=withTemp(t);let calls=0;
+  const {writeFileSync}=await import('node:fs');
+  writeFileSync(paths.reportPath+'.dispatch.json',JSON.stringify({
+    repository:'ibboabdoli-ai/reviewforge-sandbox',pr:7,
+    headSha:TRIAL.head,engineSha:'f'.repeat(40),model:TRIAL.model,
+    stage:'before_fetch'
+  }));
+  await assert.rejects(runApprovedOnce({
+    prepared:prepared(),paths,approval:TRIAL.id,
+    key:'sk-proj-LOCALTESTKEY123456789',
+    fetchOnce:async()=>{calls++;return fakeSuccess();}
+  }),/ONE_SHOT_ATTEMPT_ALREADY_USED/);
+  assert.equal(calls,0);
 });
