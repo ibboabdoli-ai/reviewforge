@@ -4,9 +4,10 @@ import {mkdtempSync,mkdirSync,existsSync,writeFileSync,readFileSync,rmSync} from
 import {tmpdir} from 'node:os';
 import {join,dirname} from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {FROZEN_PR7,verifyFrozenBatch} from '../benchmarks/offline-journaled-review.mjs';
 import {NEW_ATTEMPT_ID,attemptFiles,assertNewAttemptUnused,
-  getStageNames,verifyOneShotApproval,runApprovedV3,preflightV3}
+  getStageNames,verifyOneShotApproval,runApprovedV3,preflightV3,executingEngineSha}
   from '../benchmarks/pr7-v3-one-shot.mjs';
 import {inspectAttempt} from '../benchmarks/one-shot-journal.mjs';
 
@@ -43,17 +44,26 @@ const artifactList=paths=>[
   paths.lockPath,paths.reportPath,paths.reportPath+'.usage.json',
   paths.reportPath+'.dispatch.json',paths.nodeStages,paths.shellStages
 ];
-function ciFixture(t){
+function ciFixture(t,{parentPid=process.ppid}={}){
   if(process.env.GITHUB_ACTIONS!=='true'||process.env.CI!=='true')
     throw new Error('REQUIRES_DISPOSABLE_HOSTED_CI');
   const paths=attemptFiles();
   for(const f of artifactList(paths))
     assert.equal(existsSync(f),false,'Never touch pre-existing one-shot evidence');
   mkdirSync(dirname(paths.shellStages),{recursive:true,mode:0o700});
-  writeFileSync(paths.shellStages,JSON.stringify({
-    schema:1,attempt:NEW_ATTEMPT_ID,stage:'node_launching'
-  })+'\n',{flag:'wx',mode:0o600,flush:true});
+  const previous=process.env.RF_V3_LAUNCH_NONCE;
+  const nonce='1234567890abcdef1234567890abcdef';
+  process.env.RF_V3_LAUNCH_NONCE=nonce;
+  const freshLaunch={
+    schema:1,attempt:NEW_ATTEMPT_ID,stage:'node_launching',
+    utc:new Date().toISOString(),shellPid:parentPid,
+    launchSha256:createHash('sha256').update(nonce).digest('hex')
+  };
+  writeFileSync(paths.shellStages,JSON.stringify(freshLaunch)+'\n',
+    {flag:'wx',mode:0o600,flush:true});
   t.after(()=>{
+    if(previous===undefined)delete process.env.RF_V3_LAUNCH_NONCE;
+    else process.env.RF_V3_LAUNCH_NONCE=previous;
     // Only the fixed V3 synthetic paths on disposable GitHub runners.
     if(process.env.GITHUB_ACTIONS!=='true'||process.env.CI!=='true')return;
     for(const file of artifactList(paths))
@@ -168,7 +178,7 @@ test('failed final report persistence retains lock, receipt and safe stage',{
 test('force-crashed synthetic Node cannot clear a journal or replay',{
   skip:process.env.GITHUB_ACTIONS!=='true',timeout:12000
 },async t=>{
-  const paths=ciFixture(t);
+  const paths=ciFixture(t,{parentPid:process.pid});
   const script=[
     "import {runApprovedV3,NEW_ATTEMPT_ID} from ",
     JSON.stringify(new URL('../benchmarks/pr7-v3-one-shot.mjs',import.meta.url).href),
@@ -191,4 +201,57 @@ test('force-crashed synthetic Node cannot clear a journal or replay',{
     requestFetch:async()=>{second++;return answer();}
   }),/NEW_ATTEMPT_ALREADY_HAS_EVIDENCE/);
   assert.equal(second,0);
+});
+
+
+test('a terminated shell trace never authorizes a direct paid-like call',{
+  skip:process.env.GITHUB_ACTIONS!=='true'
+},async t=>{
+  const paths=ciFixture(t);
+  const {appendFileSync}=await import('node:fs');
+  appendFileSync(paths.shellStages,JSON.stringify({
+    attempt:NEW_ATTEMPT_ID,stage:'shell_terminal_failure',
+    utc:new Date().toISOString()
+  })+'\n');
+  let requests=0;
+  await assert.rejects(runApprovedV3({
+    prepared:prepared(),paths,approval:NEW_ATTEMPT_ID,key,
+    requestFetch:async()=>{requests++;return answer();}
+  }),/STALE_OR_UNRELATED_POWERSHELL_LAUNCH/);
+  assert.equal(requests,0);
+  assert.equal(existsSync(paths.nodeStages),false);
+});
+test('wrong parent PID prevents using historical launch evidence',{
+  skip:process.env.GITHUB_ACTIONS!=='true'
+},async t=>{
+  const paths=ciFixture(t,{parentPid:999999});
+  await assert.rejects(runApprovedV3({
+    prepared:prepared(),paths,approval:NEW_ATTEMPT_ID,key,
+    requestFetch:async()=>{throw Error('should never reach provider');}
+  }),/STALE_OR_UNRELATED_POWERSHELL_LAUNCH/);
+  assert.equal(existsSync(paths.nodeStages),false);
+});
+test('incorrect ephemeral launch nonce blocks provider work',{
+  skip:process.env.GITHUB_ACTIONS!=='true'
+},async t=>{
+  const paths=ciFixture(t);
+  process.env.RF_V3_LAUNCH_NONCE='abcdefabcdefabcdefabcdefabcdefab';
+  await assert.rejects(runApprovedV3({
+    prepared:prepared(),paths,approval:NEW_ATTEMPT_ID,key,
+    requestFetch:async()=>{throw Error('should never reach provider');}
+  }),/LAUNCH_PROOF_MISMATCH/);
+  assert.equal(existsSync(paths.nodeStages),false);
+});
+test('engine SHA always describes executing checkout rather than cwd',t=>{
+  const sourceSha=executingEngineSha();
+  assert.match(sourceSha,/^[a-f0-9]{40}$/i);
+  const current=process.cwd();
+  const other=mkdtempSync(join(tmpdir(),'rf-v3-different-cwd-'));
+  try{
+    process.chdir(other);
+    assert.equal(executingEngineSha(),sourceSha);
+  }finally{
+    process.chdir(current);
+    rmSync(other,{recursive:true,force:true});
+  }
 });
