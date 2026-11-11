@@ -1,9 +1,9 @@
 // New, independent one-shot PR7 attempt; NEVER automatically replay old ids.
 // Default mode is OFFLINE preflight. Paid path needs a separate user approval.
 import {existsSync,mkdirSync,writeFileSync,appendFileSync,readFileSync} from 'node:fs';
-import {join,dirname} from 'node:path';
-import {pathToFileURL} from 'node:url';
-import {resolve} from 'node:path';
+import {join,dirname,resolve} from 'node:path';
+import {pathToFileURL,fileURLToPath} from 'node:url';
+import {createHash,timingSafeEqual} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {prepareTrial,preflightOnly,stableJournalRoot,TRIAL,calculateCost,checkEnvironment}
   from './pr7-one-paid.mjs';
@@ -11,6 +11,12 @@ import {runSingleAttempt} from './one-shot-journal.mjs';
 import {reviewWithAI} from '../src/reviewer.mjs';
 
 export const NEW_ATTEMPT_ID='rf-pr7-audited-once-20261111-v3';
+const ENGINE_ROOT=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+export function executingEngineSha(){
+  // Pin the repository containing the running module, not process.cwd().
+  return execFileSync('git',['-C',ENGINE_ROOT,'rev-parse','HEAD'],
+    {encoding:'utf8',stdio:['ignore','pipe','ignore']}).trim();
+}
 const APPROVED_STAGES=new Set([
   'node_started','preflight_verified','lock_request_begin','fetch_intent_persisted',
   'dispatch_persisted','fetch_invoked','usage_persisted','report_persisted','failed_unverified'
@@ -69,12 +75,30 @@ export function verifyOneShotApproval({approval,key,paths}){
   if(typeof key!=='string'||!/^sk-(?:proj-)?[A-Za-z0-9_-]{15,}$/.test(key))
     throw new Error('PRIVATE_TEST_KEY_REQUIRED');
   assertNewAttemptUnused(paths);
-  // The only allowed source is the independently approved PowerShell wrapper.
+  // A stale, completed or failed shell trace is never reusable.
+  // Bind a fresh launch to this process's actual parent and a one-time
+  // ephemeral nonce; an atomic node-stage create-new consumes the attempt.
   if(!existsSync(paths.shellStages))throw new Error('POWERSHELL_STAGE_REQUIRED');
-  const text=readFileSync(paths.shellStages,'utf8');
-  if(!text.includes('"stage":"node_launching"') ||
-     !text.includes('"attempt":"'+NEW_ATTEMPT_ID+'"'))
-    throw new Error('POWERSHELL_LAUNCH_EVIDENCE_REQUIRED');
+  let last;
+  try {
+    const lines=readFileSync(paths.shellStages,'utf8')
+      .split(/\r?\n/).filter(Boolean);
+    last=JSON.parse(lines.at(-1)??'null');
+  }catch {throw new Error('POWERSHELL_LAUNCH_EVIDENCE_INVALID');}
+  if(last?.attempt!==NEW_ATTEMPT_ID || last?.stage!=='node_launching' ||
+      !Number.isSafeInteger(last?.shellPid) ||
+      last.shellPid!==process.ppid ||
+      !Number.isFinite(Date.parse(last?.utc)) ||
+      Math.abs(Date.now()-Date.parse(last.utc))>300000)
+    throw new Error('STALE_OR_UNRELATED_POWERSHELL_LAUNCH');
+  const nonce=process.env.RF_V3_LAUNCH_NONCE;
+  if(typeof nonce!=='string'||!/^[a-f0-9]{32}$/i.test(nonce)||
+      typeof last.launchSha256!=='string'||
+      !/^[a-f0-9]{64}$/i.test(last.launchSha256))
+    throw new Error('FRESH_LAUNCH_PROOF_REQUIRED');
+  const hash=createHash('sha256').update(nonce,'utf8').digest();
+  if(!timingSafeEqual(hash,Buffer.from(last.launchSha256,'hex')))
+    throw new Error('LAUNCH_PROOF_MISMATCH');
 }
 export async function runApprovedV3({
   prepared,paths=attemptFiles(),approval,key,requestFetch=globalThis.fetch
@@ -85,7 +109,6 @@ export async function runApprovedV3({
   mkdirSync(dirname(paths.lockPath),{recursive:true,mode:0o700});
   emitPhase(paths.nodeStages,'node_started',{create:true});
   let posts=0;
-  let providerSeen=false;
   try {
     emitPhase(paths.nodeStages,'preflight_verified');
     emitPhase(paths.nodeStages,'lock_request_begin');
@@ -116,7 +139,6 @@ export async function runApprovedV3({
             // After HTTP: a narrow atomically published receipt contains only
             // status, request id and usage numbers; not raw response or key.
             recordProviderUsage(receipt);
-            providerSeen=true;
             emitPhase(paths.nodeStages,'usage_persisted');
           }
         });
@@ -160,7 +182,7 @@ async function main(){
   const mode=args[0],target=args[1];
   if(!['--preflight','--execute-paid'].includes(mode)||!target)
     throw new Error('USE_EXPLICIT_OFFLINE_PREFLIGHT');
-  const engine=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+  const engine=executingEngineSha();
   if(process.env.RF_V3_PINNED_ENGINE &&
       process.env.RF_V3_PINNED_ENGINE!==engine)
     throw new Error('ENGINE_COMMIT_CHANGED');
