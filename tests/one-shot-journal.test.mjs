@@ -317,8 +317,8 @@ test('a private pre-fetch marker is persisted before synthetic provider work', a
 test('abrupt exit after pre-fetch mark leaves recoverable evidence, not a verdict', async t => {
   const target=setup(t);
   const {spawnSync}=await import('node:child_process');
-  const {pathToFileURL}=await import('node:url');
-  const entry=pathToFileURL(new URL('../benchmarks/one-shot-journal.mjs',import.meta.url).pathname).href;
+  // A file URL works on both POSIX and Windows drive-letter paths.
+  const entry=new URL('../benchmarks/one-shot-journal.mjs',import.meta.url).href;
   const program=[
     'const {runSingleAttempt}=await import(process.argv[1]);',
     'await runSingleAttempt({lockPath:process.argv[2],reportPath:process.argv[3],',
