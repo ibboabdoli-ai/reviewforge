@@ -1,0 +1,76 @@
+name: PR7 V3 offline mock validation
+on:
+  pull_request:
+    branches:
+      - diagnostic/pr7-powershell-exit-mock-20261111
+    paths:
+      - 'benchmarks/pr7-v3-one-shot.mjs'
+      - 'benchmarks/pr7-v3-launch.ps1'
+      - 'tests/pr7-v3-one-shot.test.mjs'
+      - 'tests/pr7-v3-shell-windows.test.mjs'
+      - '.github/workflows/pr7-v3-offline-mock.yml'
+permissions:
+  contents: read
+env:
+  OPENAI_API_KEY: ''
+  OPENAI_TEST_API_KEY: ''
+  RF_APPROVED_PAID_ATTEMPT: ''
+  RF_V3_PINNED_ENGINE: ''
+  DATABASE_URL: ''
+  STRIPE_SECRET_KEY: ''
+  GITHUB_TOKEN: ''
+jobs:
+  windows-mock:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Mock PowerShell wrapper stages with no provider
+        shell: pwsh
+        run: node --test tests/pr7-v3-shell-windows.test.mjs
+  frozen-new-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Load only frozen public sandbox PR7 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          sandbox="$RUNNER_TEMP/pr7-v3-frozen"
+          git init -q "$sandbox"
+          git -C "$sandbox" remote add origin https://github.com/ibboabdoli-ai/reviewforge-sandbox.git
+          git -C "$sandbox" fetch -q --no-tags --depth=1 origin \
+            420bf122458eb298080bca9e94e6fcfb32339e59 \
+            a628945d7533c7418aed344ed5f90a9a2ec8bc46
+          git -C "$sandbox" checkout -q --detach a628945d7533c7418aed344ed5f90a9a2ec8bc46
+          test "$(git -C "$sandbox" rev-parse HEAD)" = a628945d7533c7418aed344ed5f90a9a2ec8bc46
+      - name: Run new isolated OFFLINE preflight (no OpenAI network)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node benchmarks/pr7-v3-one-shot.mjs --preflight "$RUNNER_TEMP/pr7-v3-frozen" \
+            > "$RUNNER_TEMP/v3-preflight.json"
+          node --input-type=module -e '
+            import {readFileSync} from "node:fs";
+            const p=JSON.parse(readFileSync(process.argv[1],"utf8"));
+            if(p.mode!=="OFFLINE_ONLY" ||
+               p.target!=="a628945d7533c7418aed344ed5f90a9a2ec8bc46" ||
+               p.coverage?.totalChanged!==15 || p.coverage?.reviewed!==15 ||
+               p.coverage?.complete!==true || p.coverage?.batches!==1 ||
+               p.contextChars>12000 || p.providerCalls!==0) process.exit(5);
+            console.log(JSON.stringify({mode:p.mode,
+              filesReviewed:p.coverage.reviewed,batches:p.coverage.batches,
+              contextChars:p.contextChars,providerCalls:p.providerCalls,
+              target:p.target}));
+          ' "$RUNNER_TEMP/v3-preflight.json"
