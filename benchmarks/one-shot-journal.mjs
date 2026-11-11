@@ -115,6 +115,21 @@ export function inspectAttempt({ lockPath, reportPath }) {
   }
   if (!existsSync(lockPath)) return { status: 'not_started', modelAttemptCount: 0 };
   const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  // This marker is written BEFORE the outbound fetch is invoked. It records
+  // local progress only; it does NOT prove OpenAI received or billed a call.
+  let requestStartRecorded = null;
+  if (existsSync(reportPath + '.dispatch.json')) {
+    try {
+      const stage = JSON.parse(readFileSync(reportPath + '.dispatch.json','utf8'));
+      if (stage.repository === lock.repository && stage.pr === lock.pr &&
+          stage.headSha === lock.headSha && stage.engineSha === lock.engineSha &&
+          stage.model === lock.model && stage.stage === 'before_fetch') {
+        requestStartRecorded = true;
+      }
+    } catch {
+      // Corrupt or wrong-identity stage markers are not trusted.
+    }
+  }
   // A narrow receipt may survive a process crash after HTTP 200 but before
   // the final model result could be validated. Match the same immutable
   // repository/PR/head/engine/model identity before exposing token evidence.
@@ -136,6 +151,7 @@ export function inspectAttempt({ lockPath, reportPath }) {
     status: 'orphaned_unverified',
     modelAttemptCount: receipt ? 1 : null,
     providerUsage: receipt,
+    requestStartRecorded,
     startedAt: lock.startedAt || null,
     reason: 'A started attempt has no persisted model verdict; do not retry'
   };
@@ -153,8 +169,11 @@ export async function runSingleAttempt({ lockPath, reportPath, metadata, execute
     throw new TypeError('Safe absolute journal paths and execute callback required');
   }
   const identity = safeMetadata(metadata);
-  if (existsSync(lockPath) || existsSync(reportPath))
+  if (existsSync(lockPath) || existsSync(reportPath) ||
+      existsSync(reportPath + '.dispatch.json') ||
+      existsSync(reportPath + '.usage.json')) {
     throw new Error('PREVIOUS_ATTEMPT_EXISTS: no automatic replay allowed');
+  }
   const startedAt = new Date().toISOString(), startedMs = Date.now();
   writeFileSync(lockPath, JSON.stringify({
     ...identity, status: 'started_unverified', startedAt, maximumAttempts: 1,
@@ -168,6 +187,12 @@ export async function runSingleAttempt({ lockPath, reportPath, metadata, execute
   const markModelRequestStart = () => {
     if (modelAttemptCount !== 0)
       throw new Error('ONE_MODEL_REQUEST_ONLY');
+    // Fail closed before outbound HTTP if this small write-ahead record
+    // cannot be safely published. Never include keys, prompts or diffs.
+    atomicCreate(reportPath + '.dispatch.json', {
+      ...identity, stage: 'before_fetch', recordedAt: new Date().toISOString(),
+      maximumRequests: 1
+    });
     modelAttemptCount = 1;
   };
   const recordProviderUsage = info => {

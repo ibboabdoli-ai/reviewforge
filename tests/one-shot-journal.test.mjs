@@ -292,3 +292,79 @@ test('journal flushes lock and output files before a possible provider request',
   assert.match(source,/syncParentDirectory\(lockPath\)/);
   assert.match(source,/fsyncSync\(fd\)/);
 });
+
+test('a private pre-fetch marker is persisted before synthetic provider work', async t => {
+  const target=setup(t);let calls=0;
+  await assert.rejects(runSingleAttempt({
+    ...target,execute:async({markModelRequestStart})=>{
+      markModelRequestStart();
+      const marker=read(target.reportPath+'.dispatch.json');
+      assert.equal(marker.stage,'before_fetch');
+      assert.equal(marker.headSha,metadata.headSha);
+      assert.equal(marker.maximumRequests,1);
+      calls++;
+      throw new DOMException('synthetic', 'TimeoutError');
+    }
+  }),/REVIEW_NOT_COMPLETED/);
+  assert.equal(calls,1);
+  assert.equal(read(target.reportPath).status,'timeout_unverified');
+  assert.ok(!readFileSync(target.reportPath+'.dispatch.json','utf8').includes('sk-'));
+  await assert.rejects(runSingleAttempt({...target,execute:async()=>{calls++;}}),
+    /PREVIOUS_ATTEMPT_EXISTS/);
+  assert.equal(calls,1);
+});
+
+test('abrupt exit after pre-fetch mark leaves recoverable evidence, not a verdict', async t => {
+  const target=setup(t);
+  const {spawnSync}=await import('node:child_process');
+  const {pathToFileURL}=await import('node:url');
+  const entry=pathToFileURL(new URL('../benchmarks/one-shot-journal.mjs',import.meta.url).pathname).href;
+  const program=[
+    'const {runSingleAttempt}=await import(process.argv[1]);',
+    'await runSingleAttempt({lockPath:process.argv[2],reportPath:process.argv[3],',
+    'metadata:JSON.parse(process.argv[4]),execute:async({markModelRequestStart})=>{',
+    'markModelRequestStart();process.exit(73);}});'
+  ].join('');
+  const child=spawnSync(process.execPath,['--input-type=module','-e',program,
+    entry,target.lockPath,target.reportPath,JSON.stringify(metadata)],
+    {encoding:'utf8',timeout:5000});
+  assert.equal(child.status,73,child.stderr);
+  assert.equal(existsSync(target.lockPath),true);
+  assert.equal(existsSync(target.reportPath),false);
+  const recovered=inspectAttempt(target);
+  assert.equal(recovered.status,'orphaned_unverified');
+  assert.equal(recovered.requestStartRecorded,true);
+  assert.equal(recovered.providerUsage,null);
+  assert.equal(recovered.modelAttemptCount,null);
+});
+
+test('legacy orphan without stage marker cannot prove a model request', async t => {
+  const target=setup(t);
+  writeFileSync(target.lockPath,JSON.stringify({...metadata,
+    status:'started_unverified',startedAt:'2026-11-11T08:10:00Z'}));
+  const recovered=inspectAttempt(target);
+  assert.equal(recovered.status,'orphaned_unverified');
+  assert.equal(recovered.requestStartRecorded,null);
+  assert.equal(recovered.providerUsage,null);
+});
+
+test('wrong SHA dispatch marker is not accepted as matching evidence', async t => {
+  const target=setup(t);
+  writeFileSync(target.lockPath,JSON.stringify({...metadata,
+    status:'started_unverified',startedAt:'2026-11-11T08:10:00Z'}));
+  writeFileSync(target.reportPath+'.dispatch.json',JSON.stringify({
+    ...metadata,headSha:'e'.repeat(40),stage:'before_fetch'
+  }));
+  assert.equal(inspectAttempt(target).requestStartRecorded,null);
+});
+
+test('orphaned dispatch marker alone prevents replay even without lock', async t => {
+  const target=setup(t);let calls=0;
+  writeFileSync(target.reportPath+'.dispatch.json',JSON.stringify({
+    ...metadata,stage:'before_fetch'
+  }));
+  await assert.rejects(runSingleAttempt({...target,
+    execute:async()=>{calls++;}}),/PREVIOUS_ATTEMPT_EXISTS/);
+  assert.equal(calls,0);
+  assert.equal(existsSync(target.lockPath),false);
+});
