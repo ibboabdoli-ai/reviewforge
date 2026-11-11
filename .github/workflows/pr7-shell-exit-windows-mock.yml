@@ -1,0 +1,33 @@
+name: PowerShell exit diagnostic — MOCK ONLY
+on:
+  push:
+    branches:
+      - diagnostic/pr7-powershell-exit-mock-20261111
+  pull_request:
+    paths:
+      - 'benchmarks/pr7-shell-exit-mock.ps1'
+      - 'tests/pr7-shell-exit-windows.test.mjs'
+      - '.github/workflows/pr7-shell-exit-windows-mock.yml'
+permissions:
+  contents: read
+jobs:
+  windows-mock-termination:
+    runs-on: windows-latest
+    timeout-minutes: 6
+    env:
+      OPENAI_API_KEY: ''
+      OPENAI_TEST_API_KEY: ''
+      RF_APPROVED_PAID_ATTEMPT: ''
+      DATABASE_URL: ''
+      GITHUB_TOKEN: ''
+      STRIPE_SECRET_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Test PowerShell process outcomes only (no network/API)
+        shell: pwsh
+        run: node --test tests/pr7-shell-exit-windows.test.mjs
