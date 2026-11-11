@@ -41,9 +41,12 @@ function Emit-SafeStage([string]$Stage,[int]$ShellPid=0,[string]$LaunchHash=''){
 }
 function Check-Unused([string]$Folder){
   foreach($name in @(
-    ($id+'.lock'),($id+'.result.json'),
-    ($id+'.result.json.usage.json'),($id+'.result.json.dispatch.json'),
-    ($id+'.node-stages.jsonl'),($id+'.shell-stages.jsonl')
+    ($id + '.lock'),
+    ($id + '.result.json'),
+    ($id + '.result.json.usage.json'),
+    ($id + '.result.json.dispatch.json'),
+    ($id + '.node-stages.jsonl'),
+    ($id + '.shell-stages.jsonl')
   )){
     if(Test-Path -LiteralPath (Join-Path $Folder $name)){
       throw 'V3_ATTEMPT_ALREADY_HAS_EVIDENCE_DO_NOT_RETRY'
