@@ -126,13 +126,22 @@ if(scenario==='node-timeout'){
           throw 'INVALID_PRIVATE_TEST_KEY'
         }
         Emit-SafeStage 'key_obtained'
-        Emit-SafeStage 'node_launching'
+        $nonce=[Guid]::NewGuid().ToString('N')
+        $sha256=[Security.Cryptography.SHA256]::Create()
+        try{
+          $bytes=[Text.Encoding]::UTF8.GetBytes($nonce)
+          $hashBytes=$sha256.ComputeHash($bytes)
+          $launchHash=[BitConverter]::ToString($hashBytes).Replace('-','').ToLowerInvariant()
+        }finally{$sha256.Dispose()}
+        Emit-SafeStage 'node_launching' -ShellPid $PID -LaunchHash $launchHash
+        $env:RF_V3_LAUNCH_NONCE=$nonce
         $env:RF_APPROVED_PAID_ATTEMPT=$id
         $env:RF_V3_PINNED_ENGINE=$engine
         $env:OPENAI_TEST_API_KEY=$plain
         & node $runner --execute-paid $SandboxCheckout 1>$null 2>$null
         $script:NodeExit=$LASTEXITCODE
       }finally{
+        Remove-Item Env:\RF_V3_LAUNCH_NONCE -ErrorAction SilentlyContinue
         Remove-Item Env:\OPENAI_TEST_API_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:\RF_APPROVED_PAID_ATTEMPT -ErrorAction SilentlyContinue
         Remove-Item Env:\RF_V3_PINNED_ENGINE -ErrorAction SilentlyContinue
