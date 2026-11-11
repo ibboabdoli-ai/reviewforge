@@ -96,7 +96,8 @@ export function verifyAuthorization({approval,key,paths}){
   if(paths?.lockPath!==expected.lockPath||paths?.reportPath!==expected.reportPath)
     throw new Error('FIXED_ONE_SHOT_LOCK_PATH_REQUIRED');
   if(existsSync(paths.lockPath)||existsSync(paths.reportPath)||
-      existsSync(paths.reportPath+'.usage.json'))
+      existsSync(paths.reportPath+'.usage.json')||
+      existsSync(paths.reportPath+'.dispatch.json'))
     throw new Error('ONE_SHOT_ATTEMPT_ALREADY_USED');
 }
 export async function runApprovedOnce({prepared,paths,approval,key,
