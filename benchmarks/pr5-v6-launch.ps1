@@ -47,9 +47,17 @@ function Emit-SafeStage([string]$Stage,[int]$ShellPid=0,[string]$LaunchHash=''){
 }
 
 function Check-Unused([string]$Folder){
+  try{
+    foreach($entry in [IO.Directory]::EnumerateFileSystemEntries($Folder)){
+      if([IO.Path]::GetFileName($entry).StartsWith($id,[StringComparison]::Ordinal)){
+        throw 'V6_ATTEMPT_ALREADY_HAS_EVIDENCE_DO_NOT_RETRY'
+      }
+    }
+  }catch [IO.DirectoryNotFoundException]{}
   foreach($name in @(
     ($id + '.lock'),($id + '.result.json'),
     ($id + '.result.json.usage.json'),($id + '.result.json.dispatch.json'),
+    ($id + '.request-manifest.json'),
     ($id + '.node-stages.jsonl'),($id + '.shell-stages.jsonl')
   )){
     if(Test-Path -LiteralPath (Join-Path $Folder $name)){
