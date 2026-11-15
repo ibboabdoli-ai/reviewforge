@@ -1,6 +1,6 @@
 import {Buffer} from 'node:buffer';
 import {execFileSync} from 'node:child_process';
-import {mkdtempSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,rmSync,existsSync,lstatSync,realpathSync} from 'node:fs';
 import {userInfo,tmpdir} from 'node:os';
 import {basename,dirname,join,resolve} from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -101,6 +101,10 @@ function requireDisposableJournal(dir){
   const full=resolve(dir),temp=resolve(tmpdir());
   if(dirname(full)!==temp || !/^rf-pr5-offline-[a-z0-9-]+$/i.test(basename(full)) ||
      !existsSync(full))throw new Error('OFFLINE_DISPOSABLE_JOURNAL_REQUIRED');
+  const stat=lstatSync(full);
+  if(stat.isSymbolicLink() || !stat.isDirectory() ||
+     dirname(realpathSync(full))!==realpathSync(temp))
+    throw new Error('OFFLINE_DISPOSABLE_JOURNAL_REQUIRED');
   return full;
 }
 
@@ -138,9 +142,16 @@ export async function runMockPr5(prepared,journalDir,{scenario='success',
     throw new Error('OFFLINE_REQUEST_CAP_INVALID');
   if(prepared?.metadata?.repository!==PR5.repository ||
      prepared.metadata.pr!==PR5.pr || prepared.metadata.headSha!==PR5.headSha ||
+     prepared.metadata.engineSha!==executingEngineSha() ||
      prepared.metadata.model!==PR5.model ||
      prepared.coverage?.complete!==true || prepared.coverage.reviewed!==8 ||
-     prepared.batch?.length!==8)
+     prepared.batch?.length!==8 ||
+     new Set(prepared.batch.map(f=>f.filename)).size!==8 ||
+     prepared.batch.some(f=>!EXPECTED.has(f.filename)) ||
+     prepared.reviewContext?.headSha!==PR5.headSha ||
+     prepared.reviewContext.projectRules!=='' ||
+     !Array.isArray(prepared.reviewContext.snippets) ||
+     prepared.reviewContext?.snippets?.some(s=>!EXPECTED.has(s.path)))
     throw new Error('FROZEN_PR5_PREPARED_IDENTITY_REQUIRED');
   const root=requireDisposableJournal(journalDir);
   const lockPath=join(root,'attempt.lock'),reportPath=join(root,'result.json');

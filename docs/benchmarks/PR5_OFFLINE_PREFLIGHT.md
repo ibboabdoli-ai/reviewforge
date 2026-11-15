@@ -6,7 +6,7 @@ Date: 2026-11-15. This is an **offline mock preflight**, not an AI review or an 
 
 - Target: [sandbox PR #5](https://github.com/ibboabdoli-ai/reviewforge-sandbox/pull/5), base `420bf122458eb298080bca9e94e6fcfb32339e59`, head `c4054f5e247514c80b76344eb1854e2345aa8037`. The sandbox PR remained draft and unchanged.
 - Engine base: [ReviewForge draft PR #22](https://github.com/ibboabdoli-ai/reviewforge/pull/22) at `6460d37e01e176ba727888f1c9864c904dde1106`. The final preflight CI pins the head of the new stacked draft PR and prints that exact engine SHA. It uses the existing `planReviewBatches`, `collectReviewContext`, `reviewWithAI` and `runSingleAttempt` implementations; no review-engine behavior was changed.
-- The [earlier PR #5 status](https://github.com/ibboabdoli-ai/reviewforge/blob/6460d37e01e176ba727888f1c9864c904dde1106/benchmarks/HELDOUT_PR5_20261107_STATUS.md) already recorded 8/8 offline coverage on an older engine `e6fd806c53a8aa119af42c373dc363dced071066`. This checkpoint tests the newer PR #22 engine and its journal, request and fail-closed controls. The earlier behavioral witnesses and model attempts were not rerun.
+- An earlier PR #5 checkpoint already recorded 8/8 offline coverage on an older engine `e6fd806c53a8aa119af42c373dc363dced071066`. This checkpoint tests the newer PR #22 engine and its journal, request and fail-closed controls. The earlier behavioral witnesses and model attempts were not rerun.
 
 ## Frozen source inventory
 

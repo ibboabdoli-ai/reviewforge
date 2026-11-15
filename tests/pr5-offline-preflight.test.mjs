@@ -71,6 +71,8 @@ frozenTest('wrong frozen identity cannot start a journal',async t=>{
   const p=await preparePr5(target),root=journal(t);
   await assert.rejects(runMockPr5({...p,metadata:{...p.metadata,
     headSha:'a'.repeat(40)}},root),/FROZEN_PR5_PREPARED_IDENTITY_REQUIRED/);
+  await assert.rejects(runMockPr5({...p,metadata:{...p.metadata,
+    engineSha:'b'.repeat(40)}},root),/FROZEN_PR5_PREPARED_IDENTITY_REQUIRED/);
   assert.equal(existsSync(join(root,'attempt.lock')),false);
 });
 
