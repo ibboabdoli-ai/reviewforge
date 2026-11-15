@@ -1,0 +1,109 @@
+name: PR5 V6 offline one-shot validation
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/pr5-v6-one-shot.mjs'
+      - 'benchmarks/pr5-v6-launch.ps1'
+      - 'benchmarks/pr5-offline-preflight.mjs'
+      - 'tests/pr5-v6-one-shot.test.mjs'
+      - 'docs/benchmarks/PR5_V6_ONE_SHOT_HANDOFF.md'
+      - '.github/workflows/pr5-v6-offline-mock.yml'
+permissions:
+  contents: read
+jobs:
+  node-mock:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      OPENAI_API_KEY: ''
+      OPENAI_TEST_API_KEY: ''
+      DATABASE_URL: ''
+      STRIPE_SECRET_KEY: ''
+      GITHUB_TOKEN: ''
+      GITHUB_PRIVATE_KEY: ''
+      RF_V6_DISPOSABLE_CI: 'true'
+      RF_V6_ENGINE_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Get frozen public sandbox source
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$RUNNER_TEMP/rf-pr5-v6-target"
+          git init -q "$target"
+          git -C "$target" remote add origin https://github.com/ibboabdoli-ai/reviewforge-sandbox.git
+          git -C "$target" fetch -q --no-tags --depth=1 origin \
+            420bf122458eb298080bca9e94e6fcfb32339e59 \
+            c4054f5e247514c80b76344eb1854e2345aa8037
+          git -C "$target" checkout -q --detach c4054f5e247514c80b76344eb1854e2345aa8037
+          test "$(git -C "$target" rev-parse HEAD)" = c4054f5e247514c80b76344eb1854e2345aa8037
+      - name: Run isolated mock one-shot and source preflight
+        shell: bash
+        env:
+          RF_PR5_TARGET: ${{ runner.temp }}/rf-pr5-v6-target
+        run: |
+          set -euo pipefail
+          node --test tests/pr5-v6-one-shot.test.mjs tests/pr5-offline-preflight.test.mjs
+          node benchmarks/pr5-v6-one-shot.mjs --preflight "$RF_PR5_TARGET" > "$RUNNER_TEMP/rf-pr5-v6-preflight.json"
+          cat "$RUNNER_TEMP/rf-pr5-v6-preflight.json"
+          node --input-type=module -e '
+            import {readFileSync} from "node:fs";
+            const p=JSON.parse(readFileSync(process.argv[1],"utf8"));
+            if(p.attempt!=="rf-pr5-audited-once-20261115-v6" ||
+               p.engineSha!==process.env.RF_V6_ENGINE_SHA ||
+               p.coverage?.totalChanged!==8 || p.coverage?.reviewed!==8 ||
+               p.coverage?.complete!==true || p.coverage?.batches!==1 ||
+               p.requestBytes>50000 || p.realProviderRequests!==0 ||
+               p.githubWrites!==0 || p.quality!=="NOT_MEASURED")process.exit(2);
+          ' "$RUNNER_TEMP/rf-pr5-v6-preflight.json"
+  windows-shell-mock:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    env:
+      OPENAI_API_KEY: ''
+      OPENAI_TEST_API_KEY: ''
+      DATABASE_URL: ''
+      STRIPE_SECRET_KEY: ''
+      GITHUB_TOKEN: ''
+      GITHUB_PRIVATE_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Get frozen public sandbox source
+        shell: pwsh
+        run: |
+          $target=Join-Path $env:RUNNER_TEMP 'rf-pr5-v6-target'
+          git init -q $target
+          git -C $target remote add origin https://github.com/ibboabdoli-ai/reviewforge-sandbox.git
+          git -C $target fetch -q --no-tags --depth=1 origin 420bf122458eb298080bca9e94e6fcfb32339e59 c4054f5e247514c80b76344eb1854e2345aa8037
+          if($LASTEXITCODE -ne 0){throw 'FROZEN_FETCH_FAILED'}
+          git -C $target checkout -q --detach c4054f5e247514c80b76344eb1854e2345aa8037
+          if($LASTEXITCODE -ne 0){throw 'FROZEN_CHECKOUT_FAILED'}
+      - name: Test PowerShell preflight and isolated shell mocks
+        shell: pwsh
+        run: |
+          $target=Join-Path $env:RUNNER_TEMP 'rf-pr5-v6-target'
+          & pwsh -NoProfile -File benchmarks/pr5-v6-launch.ps1 -Mode Preflight -SandboxCheckout $target
+          if($LASTEXITCODE -ne 0){throw 'V6_PREFLIGHT_FAILED'}
+          foreach($scenario in @('node-ok','node-exit','powershell-error')){
+            $folder=Join-Path $env:RUNNER_TEMP ('rf-v6-mock-'+[guid]::NewGuid().ToString('N'))
+            & pwsh -NoProfile -File benchmarks/pr5-v6-launch.ps1 -Mode Mock -MockScenario $scenario -MockEvidenceDirectory $folder
+            $exit=$LASTEXITCODE
+            if($scenario -eq 'node-ok' -and $exit -ne 0){throw 'V6_MOCK_SUCCESS_FAILED'}
+            if($scenario -ne 'node-ok' -and $exit -eq 0){throw 'V6_MOCK_FAILURE_NOT_RECORDED'}
+            $trace=Join-Path $folder 'shell-stages.jsonl'
+            if(-not (Test-Path -LiteralPath $trace)){throw 'V6_SHELL_TRACE_MISSING'}
+            if(-not ([IO.Path]::GetFullPath($folder).StartsWith([IO.Path]::GetFullPath($env:RUNNER_TEMP),[StringComparison]::OrdinalIgnoreCase))){throw 'UNSAFE_MOCK_FOLDER'}
+            Remove-Item -LiteralPath $folder -Recurse -Force
+          }
