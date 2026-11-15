@@ -1,6 +1,6 @@
 // Frozen PR5 V6: offline by default. The paid path requires separate future
 // authorization and must never replay an existing attempt.
-import {existsSync,mkdirSync,writeFileSync,appendFileSync,readFileSync} from 'node:fs';
+import {existsSync,mkdirSync,writeFileSync,appendFileSync,readFileSync,readdirSync} from 'node:fs';
 import {join,dirname,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createHash,timingSafeEqual} from 'node:crypto';
@@ -24,6 +24,7 @@ export function attemptFiles(root=futureJournalRoot()){
   return Object.freeze({
     lockPath:join(root,V6.id+'.lock'),
     reportPath:join(root,V6.id+'.result.json'),
+    manifestPath:join(root,V6.id+'.request-manifest.json'),
     nodeStages:join(root,V6.id+'.node-stages.jsonl'),
     shellStages:join(root,V6.id+'.shell-stages.jsonl')
   });
@@ -33,8 +34,38 @@ export function assertAttemptUnused(paths=attemptFiles()){
   if(Object.keys(fixed).some(key=>paths?.[key]!==fixed[key]))
     throw new Error('V6_FIXED_OS_USER_JOURNAL_REQUIRED');
   if([paths.lockPath,paths.reportPath,paths.reportPath+'.usage.json',
-      paths.reportPath+'.dispatch.json',paths.nodeStages].some(existsSync))
+      paths.reportPath+'.dispatch.json',paths.manifestPath,
+      paths.nodeStages].some(existsSync))
     throw new Error('V6_ATTEMPT_HAS_EVIDENCE_DO_NOT_RETRY');
+  let names=[];
+  try{names=readdirSync(dirname(paths.lockPath));}
+  catch(error){if(error.code!=='ENOENT')throw error;}
+  if(names.some(name=>name.startsWith(V6.id) &&
+       name!==V6.id+'.shell-stages.jsonl'))
+    throw new Error('V6_ATTEMPT_HAS_EVIDENCE_DO_NOT_RETRY');
+}
+const sha256=value=>createHash('sha256').update(value,'utf8').digest('hex');
+function persistRequestManifest(path,prepared,body){
+  assertPreparedPr5Provenance(prepared);
+  const requestBytes=Buffer.byteLength(body,'utf8');
+  if(requestBytes>V6.maxRequestBytes || prepared.pinnedReads!==8 ||
+     prepared.transmittedContextChars>12000)
+    throw new Error('V6_MANIFEST_SOURCE_BOUNDS_FAILED');
+  const manifest={schema:1,attempt:V6.id,
+    repository:PR5.repository,pr:PR5.pr,baseSha:PR5.baseSha,
+    headSha:PR5.headSha,engineSha:prepared.metadata.engineSha,
+    model:V6.model,changedFiles:prepared.batch.map(file=>({
+      path:file.filename,patchSha256:sha256(file.patch??'')})),
+    coverage:{totalChanged:prepared.coverage.totalChanged,
+      reviewed:prepared.coverage.reviewed,batches:prepared.coverage.batches,
+      complete:prepared.coverage.complete,
+      missingPatch:prepared.coverage.missingPatch,
+      limitedSegments:prepared.coverage.limitedSegments},
+    pinnedReads:prepared.pinnedReads,
+    contextChars:prepared.transmittedContextChars,
+    requestBytes,requestSha256:sha256(body)};
+  writeFileSync(path,JSON.stringify(manifest,null,2),
+    {flag:'wx',mode:0o600,flush:true});
 }
 function emitStage(path,stage,{create=false}={}){
   if(!STAGES.has(stage))throw new Error('INVALID_V6_STAGE');
@@ -130,6 +161,7 @@ export async function runApprovedV6({prepared,paths=attemptFiles(),approval,key,
                options?.method!=='POST')throw new Error('ONE_POST_ONLY');
             // Fail before network if the source input is not the frozen blind PR5.
             assertBlindedPr5Request(options.body);
+            persistRequestManifest(paths.manifestPath,prepared,options.body);
             emitStage(paths.nodeStages,'fetch_invoked');
             return requestFetch(url,options);
           },

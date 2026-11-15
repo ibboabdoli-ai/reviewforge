@@ -15,7 +15,7 @@ const hosted=process.env.GITHUB_ACTIONS==='true' &&
 const hostedTest=(name,fn)=>test(name,{skip:!hosted},fn);
 const key='sk-proj-SYNTHETICLOCALTESTONLY123456';
 const artifacts=p=>[p.lockPath,p.reportPath,p.reportPath+'.usage.json',
-  p.reportPath+'.dispatch.json',p.nodeStages,p.shellStages];
+  p.reportPath+'.dispatch.json',p.manifestPath,p.nodeStages,p.shellStages];
 const answer=()=>Response.json({status:'completed',
   output_text:JSON.stringify({summary:'Offline synthetic response only',findings:[]}),
   usage:{input_tokens:120,output_tokens:30}});
@@ -96,15 +96,47 @@ hostedTest('one synthetic response records one request and blocks replay',async 
   assert.equal(result.providerUsage.inputTokens,120);
   assert.equal(calls,1);
   assert.equal(saved(paths.reportPath).githubWrites,0);
+  const manifest=saved(paths.manifestPath);
+  assert.equal(manifest.engineSha,process.env.RF_V6_ENGINE_SHA);
+  assert.equal(manifest.headSha,PR5.headSha);
+  assert.equal(manifest.coverage.reviewed,8);
+  assert.equal(manifest.coverage.batches,1);
+  assert.equal(manifest.pinnedReads,8);
+  assert.equal(manifest.requestBytes,19603);
+  assert.match(manifest.requestSha256,/^[a-f0-9]{64}$/);
+  assert.deepEqual(new Set(manifest.changedFiles.map(f=>f.path)),
+    new Set(p.batch.map(f=>f.filename)));
+  assert.ok(manifest.changedFiles.every(f=>/^[a-f0-9]{64}$/.test(f.patchSha256)));
   assert.equal(inspectAttempt(paths).status,'completed');
   for(const stage of ['node_started','dispatch_persisted','fetch_invoked',
     'usage_persisted','report_persisted'])assert.ok(stageNames(paths.nodeStages).includes(stage));
   const persisted=readFileSync(paths.reportPath,'utf8')+
-    readFileSync(paths.nodeStages,'utf8');
+    readFileSync(paths.nodeStages,'utf8')+readFileSync(paths.manifestPath,'utf8');
   assert.ok(!persisted.includes('SYNTHETICLOCALTESTONLY'));
   assert.ok(!persisted.includes('FILE:'));
   await assert.rejects(runApprovedV6(opts),/V6_ATTEMPT_HAS_EVIDENCE/);
   assert.equal(calls,1);
+});
+
+hostedTest('an orphaned request manifest alone prevents a second request',async t=>{
+  const p=await prepared(),paths=fixture(t);let calls=0;
+  writeFileSync(paths.manifestPath,'{}',{flag:'wx',mode:0o600,flush:true});
+  await assert.rejects(runApprovedV6({prepared:p,paths,approval:V6.id,key,
+    requestFetch:async()=>{calls++;return answer();}
+  }),/V6_ATTEMPT_HAS_EVIDENCE/);
+  assert.equal(calls,0);
+  assert.equal(existsSync(paths.nodeStages),false);
+});
+
+hostedTest('an unknown V6 partial file also blocks a new request',async t=>{
+  const p=await prepared(),paths=fixture(t);let calls=0;
+  const partial=paths.reportPath+'.partial-synthetic';
+  writeFileSync(partial,'synthetic',{flag:'wx'});
+  t.after(()=>rmSync(partial,{force:true}));
+  await assert.rejects(runApprovedV6({prepared:p,paths,approval:V6.id,key,
+    requestFetch:async()=>{calls++;return answer();}
+  }),/V6_ATTEMPT_HAS_EVIDENCE/);
+  assert.equal(calls,0);
 });
 
 hostedTest('timeout stays unverified with durable dispatch and no retry',async t=>{
