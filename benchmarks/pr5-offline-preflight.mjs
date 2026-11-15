@@ -1,4 +1,5 @@
 import {Buffer} from 'node:buffer';
+import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {mkdtempSync,rmSync,existsSync,lstatSync,realpathSync} from 'node:fs';
 import {userInfo,tmpdir} from 'node:os';
@@ -24,10 +25,28 @@ export const EXPECTED_PATHS=Object.freeze([
 ]);
 const EXPECTED=new Set(EXPECTED_PATHS);
 const ENGINE_ROOT=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const preparedFingerprints=new WeakMap();
+function fingerprint(prepared){
+  return createHash('sha256').update(JSON.stringify({
+    files:prepared.files,batch:prepared.batch,coverage:prepared.coverage,
+    reviewContext:prepared.reviewContext,metadata:prepared.metadata
+  })).digest('hex');
+}
+export function assertPreparedPr5Provenance(prepared){
+  if(!prepared||preparedFingerprints.get(prepared)!==fingerprint(prepared))
+    throw new Error('FROZEN_PR5_PREPARED_PROVENANCE_REQUIRED');
+}
 const git=(dir,...args)=>execFileSync('git',['-c','safe.directory='+dir,'-C',dir,...args],{
   encoding:'utf8',maxBuffer:5_000_000,stdio:['ignore','pipe','ignore']
 });
 export const executingEngineSha=()=>git(ENGINE_ROOT,'rev-parse','HEAD').trim();
+export function assertCleanExecutingEngine(){
+  const sha=executingEngineSha();
+  if(!/^[a-f0-9]{40}$/i.test(sha) ||
+     git(ENGINE_ROOT,'status','--porcelain=v1','--untracked-files=all').trim())
+    throw new Error('CLEAN_ENGINE_CHECKOUT_REQUIRED');
+  return sha;
+}
 export const futureJournalRoot=()=>join(userInfo().homedir,'.reviewforge','benchmark-journal');
 
 function noRealCredentials(){
@@ -38,8 +57,11 @@ function noRealCredentials(){
   }
 }
 
-export async function preparePr5(targetDir,engineSha=executingEngineSha()){
-  noRealCredentials();
+// Read-only source preparation is shared with V6. Offline callers keep the
+// credential guard; V6 authorizes its separately supplied TEST key itself.
+export async function preparePr5(targetDir,engineSha=executingEngineSha(),
+  {allowTestKey=false}={}){
+  if(!allowTestKey)noRealCredentials();
   if(!/^[a-f0-9]{40}$/i.test(engineSha))throw new Error('PINNED_ENGINE_REQUIRED');
   const target=resolve(targetDir);
   if(git(target,'rev-parse','HEAD').trim()!==PR5.headSha ||
@@ -91,10 +113,12 @@ export async function preparePr5(targetDir,engineSha=executingEngineSha()){
      reviewContext.projectRules ||
      reviewContext.snippets.some(s=>!EXPECTED.has(s.path)))
     throw new Error('FROZEN_PR5_CONTEXT_UNTRUSTED');
-  return {files,batch:selected.batches[0],coverage:selected.coverage,
+  const prepared={files,batch:selected.batches[0],coverage:selected.coverage,
     reviewContext,pinnedReads,transmittedContextChars,
     metadata:{repository:PR5.repository,pr:PR5.pr,headSha:PR5.headSha,
       engineSha,model:PR5.model}};
+  preparedFingerprints.set(prepared,fingerprint(prepared));
+  return prepared;
 }
 
 function requireDisposableJournal(dir){
@@ -133,6 +157,17 @@ function syntheticResponse(scenario){
   throw new Error('UNKNOWN_OFFLINE_SCENARIO');
 }
 
+export function assertBlindedPr5Request(body){
+  const payload=JSON.parse(body);
+  const paths=[...payload.input.matchAll(/^FILE: ([^\n]+)\nDIFF:/gm)]
+    .map(match=>match[1]);
+  if(paths.length!==8 || new Set(paths).size!==8 ||
+     paths.some(path=>!EXPECTED.has(path)) ||
+     /heldout-20261107-pr5-gold|verify-heldout-pr5|benchmarks\/|coderabbit.*finding/i
+       .test(body))throw new Error('PR5_REQUEST_IS_NOT_BLINDED');
+  return payload;
+}
+
 export async function runMockPr5(prepared,journalDir,{scenario='success',
   maxRequestBytes=50000}={}){
   noRealCredentials();
@@ -153,6 +188,7 @@ export async function runMockPr5(prepared,journalDir,{scenario='success',
      !Array.isArray(prepared.reviewContext.snippets) ||
      prepared.reviewContext?.snippets?.some(s=>!EXPECTED.has(s.path)))
     throw new Error('FROZEN_PR5_PREPARED_IDENTITY_REQUIRED');
+  assertPreparedPr5Provenance(prepared);
   const root=requireDisposableJournal(journalDir);
   const lockPath=join(root,'attempt.lock'),reportPath=join(root,'result.json');
   let syntheticRequests=0,requestBytes=0;
@@ -164,11 +200,7 @@ export async function runMockPr5(prepared,journalDir,{scenario='success',
         requestFetch:async(url,options)=>{
           if(++syntheticRequests!==1 || String(url)!=='https://api.openai.com/v1/responses' ||
              options?.method!=='POST')throw new Error('OFFLINE_ONE_SYNTHETIC_POST_ONLY');
-          const payload=JSON.parse(options.body);
-          if(!EXPECTED_PATHS.every(path=>payload.input.includes('FILE: '+path+'\nDIFF:')) ||
-             /heldout-20261107-pr5-gold|verify-heldout-pr5|benchmarks\/|coderabbit.*finding/i
-               .test(options.body))
-            throw new Error('OFFLINE_INPUT_IS_NOT_BLINDED');
+          assertBlindedPr5Request(options.body);
           return syntheticResponse(scenario);
         },
         onBeforeRequest:({model,store,reasoningEffort,maxOutputTokens,
