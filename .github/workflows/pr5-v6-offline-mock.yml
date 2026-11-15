@@ -62,6 +62,24 @@ jobs:
                p.requestBytes>50000 || p.realProviderRequests!==0 ||
                p.githubWrites!==0 || p.quality!=="NOT_MEASURED")process.exit(2);
           ' "$RUNNER_TEMP/rf-pr5-v6-preflight.json"
+          probe="$GITHUB_WORKSPACE/.rf-v6-engine-dirty-probe"
+          trap 'rm -f "$probe"' EXIT
+          printf 'synthetic dirty checkout probe\n' > "$probe"
+          node --input-type=module -e '
+            import {verifyFreshApproval,V6} from "./benchmarks/pr5-v6-one-shot.mjs";
+            try {
+              verifyFreshApproval({approval:V6.id,key:"sk-proj-SYNTHETICLOCALTESTONLY123456"});
+            } catch(error) {
+              if(error.message==="CLEAN_ENGINE_CHECKOUT_REQUIRED")process.exit(0);
+            }
+            process.exit(2);
+          '
+          if node benchmarks/pr5-v6-one-shot.mjs --preflight "$RF_PR5_TARGET" > /dev/null 2>&1; then
+            echo 'Dirty engine passed V6 preflight' >&2
+            exit 2
+          fi
+          rm -f "$probe"
+          trap - EXIT
   windows-shell-mock:
     runs-on: windows-latest
     timeout-minutes: 8
@@ -106,6 +124,14 @@ jobs:
             if(-not (Test-Path -LiteralPath $trace)){throw 'V6_SHELL_TRACE_MISSING'}
             if(-not ([IO.Path]::GetFullPath($folder).StartsWith([IO.Path]::GetFullPath($env:RUNNER_TEMP),[StringComparison]::OrdinalIgnoreCase))){throw 'UNSAFE_MOCK_FOLDER'}
             Remove-Item -LiteralPath $folder -Recurse -Force
+          }
+          $probe=Join-Path $env:GITHUB_WORKSPACE '.rf-v6-engine-dirty-probe'
+          try{
+            Set-Content -LiteralPath $probe -Value 'synthetic dirty checkout probe'
+            & pwsh -NoProfile -File benchmarks/pr5-v6-launch.ps1 -Mode Preflight -SandboxCheckout $target
+            if($LASTEXITCODE -eq 0){throw 'DIRTY_ENGINE_PASSED_POWERSHELL_PREFLIGHT'}
+          }finally{
+            Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
           }
           # The last mock deliberately exits nonzero. All expected outcomes
           # were asserted above, so end this test step successfully.

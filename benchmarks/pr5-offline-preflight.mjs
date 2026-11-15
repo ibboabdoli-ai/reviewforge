@@ -40,6 +40,13 @@ const git=(dir,...args)=>execFileSync('git',['-c','safe.directory='+dir,'-C',dir
   encoding:'utf8',maxBuffer:5_000_000,stdio:['ignore','pipe','ignore']
 });
 export const executingEngineSha=()=>git(ENGINE_ROOT,'rev-parse','HEAD').trim();
+export function assertCleanExecutingEngine(){
+  const sha=executingEngineSha();
+  if(!/^[a-f0-9]{40}$/i.test(sha) ||
+     git(ENGINE_ROOT,'status','--porcelain=v1','--untracked-files=all').trim())
+    throw new Error('CLEAN_ENGINE_CHECKOUT_REQUIRED');
+  return sha;
+}
 export const futureJournalRoot=()=>join(userInfo().homedir,'.reviewforge','benchmark-journal');
 
 function noRealCredentials(){

@@ -5,7 +5,8 @@ import {join,dirname,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {createHash,timingSafeEqual} from 'node:crypto';
 import {preparePr5,preflightPr5,PR5,EXPECTED_PATHS,executingEngineSha,
-  futureJournalRoot,assertBlindedPr5Request,assertPreparedPr5Provenance}
+  futureJournalRoot,assertBlindedPr5Request,assertPreparedPr5Provenance,
+  assertCleanExecutingEngine}
   from './pr5-offline-preflight.mjs';
 import {runSingleAttempt} from './one-shot-journal.mjs';
 import {reviewWithAI} from '../src/reviewer.mjs';
@@ -76,6 +77,7 @@ function safePrepared(prepared){
   assertPreparedPr5Provenance(prepared);
 }
 export function verifyFreshApproval({approval,key,paths=attemptFiles()}){
+  assertCleanExecutingEngine();
   checkPaidEnvironment();
   if(approval!==V6.id)throw new Error('FRESH_V6_APPROVAL_REQUIRED');
   if(process.env.RF_APPROVED_PAID_ATTEMPT!==V6.id ||
@@ -167,6 +169,7 @@ export async function runApprovedV6({prepared,paths=attemptFiles(),approval,key,
   }
 }
 export async function preflightV6(target){
+  assertCleanExecutingEngine();
   const result=await preflightPr5(target);
   return {...result,attempt:V6.id,note:'Future stable journal not created'};
 }
@@ -174,7 +177,7 @@ async function main(){
   const [mode,target]=process.argv.slice(2);
   if(!['--preflight','--execute-paid'].includes(mode)||!target)
     throw new Error('EXPLICIT_PREFLIGHT_OR_PAID_MODE_REQUIRED');
-  const engine=executingEngineSha();
+  const engine=assertCleanExecutingEngine();
   if(mode==='--preflight'){
     if(process.env.RF_V6_PINNED_ENGINE && process.env.RF_V6_PINNED_ENGINE!==engine)
       throw new Error('ENGINE_COMMIT_CHANGED');

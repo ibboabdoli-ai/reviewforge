@@ -100,6 +100,10 @@ if(scenario==='node-timeout'){
     if($LASTEXITCODE -ne 0 -or $engine -notmatch '^[a-f0-9]{40}$'){
       throw 'ENGINE_REPOSITORY_NOT_PINNED'
     }
+    $engineChanges=@(& git -c "safe.directory=$repo" -C $repo status --porcelain=v1 --untracked-files=all)
+    if($LASTEXITCODE -ne 0 -or $engineChanges.Count -ne 0){
+      throw 'CLEAN_ENGINE_CHECKOUT_REQUIRED'
+    }
     if($Mode -eq 'Paid' -and $ExpectedEngineSha -cne $engine){
       throw 'FRESH_ENGINE_COMMIT_APPROVAL_REQUIRED'
     }
