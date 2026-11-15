@@ -107,3 +107,6 @@ jobs:
             if(-not ([IO.Path]::GetFullPath($folder).StartsWith([IO.Path]::GetFullPath($env:RUNNER_TEMP),[StringComparison]::OrdinalIgnoreCase))){throw 'UNSAFE_MOCK_FOLDER'}
             Remove-Item -LiteralPath $folder -Recurse -Force
           }
+          # The last mock deliberately exits nonzero. All expected outcomes
+          # were asserted above, so end this test step successfully.
+          exit 0
