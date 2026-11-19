@@ -37,6 +37,7 @@ test('fallback-only webhook path is present and protected by exact allowlists',a
  assert.match(server,/repositoryAllowed\(payload\.repository\?\.full_name,config\.aiFallbackOnlyRepositories\)/);
  assert.match(server,/currentHeadReviewRequest\(comments,head,payload\.comment\)/);
  assert.match(server,/alreadyReviewedExactHead\(reviews,inline,head,request\.created_at\)/);
- assert.match(server,/!repositoryAllowed\(payload\.repository\?\.full_name,config\.aiFallbackOnlyRepositories\)/);
+ assert.match(server,/automaticShadowReviewDecision\(/);
+ assert.match(server,/fallbackOnly:config\.aiFallbackOnlyRepositories/);
  assert.match(server,/db\.reserveReview\(\{installationId:inst\.id,repositoryId:repo\.id,prNumber:prNo,/);
 });

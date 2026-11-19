@@ -12,6 +12,8 @@ export const config = {
   aiReviewEnabled: process.env.AI_REVIEW_ENABLED === 'true',
   aiAllowedRepositories: allowedRepositories(process.env.AI_ALLOWED_REPOSITORIES),
   aiShadowRepositories: allowedRepositories(process.env.AI_SHADOW_REPOSITORIES),
+  // Off by default. Exact allowlist must also appear in AI_ALLOWED and AI_SHADOW.
+  aiAutoShadowRepositories: allowedRepositories(process.env.AI_AUTO_SHADOW_REPOSITORIES),
   aiUnlimitedRepositories: allowedRepositories(process.env.AI_UNLIMITED_REPOSITORIES),
   aiAutoModelRepositories: allowedRepositories(process.env.AI_AUTO_MODEL_REPOSITORIES),
   // Opt-in to bounded, SHA-pinned context fetching; default is deny all.

@@ -184,7 +184,20 @@ export function openDatabase(file) {
       if(!repo)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
       const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=? AND r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(installationId,repositoryId,prNumber,headSha);
       let result;
-      if(existing)result={id:existing.id,created:false,manual:!!existing.manual_id};
+      if(existing){
+        let isManual=!!existing.manual_id;
+        // An auto-shadow opt-in may arrive after a regular review was queued
+        // for this exact SHA. Upgrade only a still-queued job atomically; a
+        // running/completed job cannot safely be relabeled retroactively.
+        if(manual && !isManual){
+          const pending=locked.prepare("SELECT id FROM jobs WHERE review_id=? AND status='queued'").get(existing.id);
+          if(pending){
+            locked.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(existing.id);
+            isManual=true;
+          }
+        }
+        result={id:existing.id,created:false,manual:isManual};
+      }
       else{
         const status=locked.prepare('SELECT status FROM subscriptions WHERE user_id=?').get(repo.owner_user_id)?.status;
         const limit=status==='active'||status==='trialing'?500:10;

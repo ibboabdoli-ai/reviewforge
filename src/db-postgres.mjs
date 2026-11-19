@@ -95,7 +95,21 @@ export async function openPostgres(url){
         await client.query('SELECT id FROM users WHERE id=$1 FOR UPDATE',[owner.rows[0].owner_user_id]);
         const existing=await client.query('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=$1 AND r.repository_id=$2 AND r.pr_number=$3 AND r.head_sha=$4',[installationId,repositoryId,prNumber,headSha]);
         let result;
-        if(existing.rows.length)result={id:Number(existing.rows[0].id),created:false,manual:!!existing.rows[0].manual_id};
+        if(existing.rows.length){
+          const id=Number(existing.rows[0].id);
+          let isManual=!!existing.rows[0].manual_id;
+          if(manual && !isManual){
+            // Serialize against claimJob's FOR UPDATE OF jobs lock. Never
+            // retrofit a running or completed review: its post mode may
+            // already have been chosen by an in-flight worker.
+            const pending=await client.query('SELECT status FROM jobs WHERE review_id=$1 FOR UPDATE',[id]);
+            if(pending.rows[0]?.status==='queued'){
+              await client.query('INSERT INTO manual_review_requests(review_id) VALUES($1) ON CONFLICT DO NOTHING',[id]);
+              isManual=true;
+            }
+          }
+          result={id,created:false,manual:isManual};
+        }
         else{
           const plan=await client.query('SELECT status FROM subscriptions WHERE user_id=$1 FOR UPDATE',[owner.rows[0].owner_user_id]);
           const status=plan.rows[0]?.status,limit=status==='active'||status==='trialing'?500:10;

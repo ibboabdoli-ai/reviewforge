@@ -14,7 +14,7 @@ import { analyzePullRequestStep } from './incremental-review.mjs';
 import { startCheckout,portal,processStripeEvent,stripeFailureCategory } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository, automaticShadowReviewDecision } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 
 assertConfig();
@@ -81,12 +81,18 @@ async function webhookGithub(req,res){
   if(exists){send(res,200,'Duplicate delivery','text/plain');return;}
   const payload=JSON.parse(raw),event=req.headers['x-github-event'];
   let queued=false;
-  if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)
-     && !repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories)) {
+  const autoPolicy=automaticShadowReviewDecision({
+    event,action:payload.action,repository:payload.repository?.full_name,
+    draft:payload.pull_request?.draft
+  },{
+    allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
+    automatic:config.aiAutoShadowRepositories,fallbackOnly:config.aiFallbackOnlyRepositories
+  });
+  if(autoPolicy.queue) {
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
-    if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
+    if(installed && integrations().ai){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
       await upsertInstalledRepository(db,inst.id,repo);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
@@ -97,7 +103,10 @@ async function webhookGithub(req,res){
       if(rr){
         try{
           const row=await db.reserveReview({installationId:inst.id,repositoryId:repo.id,prNumber:pr.number,
-            title:pr.title?.slice(0,250)||'',author:pr.user?.login||'',headSha:pr.head?.sha||'',unlimited:shadowUnlimited});
+            title:pr.title?.slice(0,250)||'',author:pr.user?.login||'',headSha:pr.head?.sha||'',
+             // Reuse the durable no-post marker. It also permits Draft and
+             // overrides a later change of global GitHub posting settings.
+             manual:autoPolicy.automatic,unlimited:shadowUnlimited});
           queued=row.created;
         }catch(error){if(error.status!==429)throw error;}
       }
@@ -202,10 +211,6 @@ export async function processQueue(reviewId=null){
       await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
       return 'skipped';
     }
-    const shadowUnlimited=isUnlimitedShadowRepository(job.full_name,{
-      allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
-      unlimited:config.aiUnlimitedRepositories
-    });
     const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
     // Durable no-post marker wins over any future global or fallback approval setting.
     const result=await analyzePullRequestStep({
@@ -233,9 +238,8 @@ export async function processQueue(reviewId=null){
       },
       onModelStart:()=>{modelCallsMayHaveStarted=true;},
       reserveModelCalls:async count=>{
-        // Explicitly approved shadow repositories bypass only daily attempts.
-        // Each PR remains deduplicated by SHA and limited to four batches.
-        if(shadowUnlimited){modelCallsMayHaveStarted=true;return {allowed:true};}
+        // Count exemptions never bypass the atomic paid-model request budget.
+        // Every model batch must reserve quota before network use.
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
         const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
         if(allowed)modelCallsMayHaveStarted=true;
