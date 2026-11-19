@@ -211,10 +211,6 @@ export async function processQueue(reviewId=null){
       await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
       return 'skipped';
     }
-    const shadowUnlimited=isUnlimitedShadowRepository(job.full_name,{
-      allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
-      unlimited:config.aiUnlimitedRepositories
-    });
     const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
     // Durable no-post marker wins over any future global or fallback approval setting.
     const result=await analyzePullRequestStep({
@@ -242,9 +238,8 @@ export async function processQueue(reviewId=null){
       },
       onModelStart:()=>{modelCallsMayHaveStarted=true;},
       reserveModelCalls:async count=>{
-        // Explicitly approved shadow repositories bypass only daily attempts.
-        // Each PR remains deduplicated by SHA and limited to four batches.
-        if(shadowUnlimited){modelCallsMayHaveStarted=true;return {allowed:true};}
+        // Count exemptions never bypass the atomic paid-model request budget.
+        // Every model batch must reserve quota before network use.
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
         const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
         if(allowed)modelCallsMayHaveStarted=true;
