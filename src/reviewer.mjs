@@ -1,4 +1,5 @@
 import { config } from './config.mjs';
+import { findingIdentity } from './finding-identity.mjs';
 import { reviewSkillInstructions } from './review-skills.mjs';
 import { BEHAVIOR_TEST_REVIEW_METHOD } from './review-method.mjs';
 
@@ -253,12 +254,12 @@ export function validateFindings(raw,files) {
     if(!f||!byPath.has(f.path)||!byPath.get(f.path).has(f.line)||!severity.includes(f.severity))continue;
     if(!Number.isFinite(f.confidence)||f.confidence<0.75||f.confidence>1)continue;
     if(typeof f.title!=='string'||typeof f.body!=='string'||f.body.length<8)continue;
-    const key=f.path+':'+f.line;
     const normalized={path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
       title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence};
+    const key=findingIdentity(normalized);
     const priorIndex=seen.get(key);
     if(priorIndex!==undefined){
-      // Keep the most serious validated finding at a shared changed-line anchor.
+      // Keep the most serious copy of the same cause, preserving independent issues on the same line.
       // Identical severity retains the earliest candidate as before.
       if(severity.indexOf(normalized.severity)<severity.indexOf(output[priorIndex].severity))
         output[priorIndex]=normalized;

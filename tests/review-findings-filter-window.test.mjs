@@ -47,17 +47,17 @@ test('a later critical finding must not be crowded out by eight low-risk suggest
   assert.equal(accepted.filter(f=>f.severity==='low').length,7);
 });
 
-test('duplicate anchors keep the highest-severity validated finding before output cap',()=>{
+test('duplicate causes keep the highest-severity validated finding before output cap',()=>{
   // Repro: a low finding on one changed line previously shadowed a critical
   // finding on that SAME line before the severity sorting pass.
   const twoLinePatch='@@ -0,0 +1,2 @@\n+guard();\n+verify();';
-  const low={...valid,line:1,severity:'low',title:'Early minor issue'};
-  const critical={...valid,line:1,severity:'critical',title:'Later critical bypass'};
+  const low={...valid,line:1,severity:'low',title:'Shared guard regression'};
+  const critical={...valid,line:1,severity:'critical',title:'Shared guard regression'};
   const high={...valid,line:2,severity:'high',title:'Different anchor'};
-  const sameSeverity={...valid,line:2,severity:'high',title:'Same-severity duplicate'};
+  const sameSeverity={...valid,line:2,severity:'high',title:'  different   anchor  '};
   const actual=validateFindings([low,high,critical,sameSeverity],[{filename,patch:twoLinePatch}]);
   assert.deepEqual(actual.map(f=>[f.line,f.severity,f.title]),[
-    [1,'critical','Later critical bypass'],
+    [1,'critical','Shared guard regression'],
     [2,'high','Different anchor']
   ]);
 });
