@@ -24,10 +24,11 @@ export function effectiveReviewPostMode(repository,globalMode,shadowRepositories
   }
   return globalMode;
 }
-// Daily/monthly review-count exemptions apply only to explicitly approved
-// shadow repositories, never to arbitrary tenants or repositories.
+// The owner authorized a monthly review-count exception for Proffera only.
+// Other repositories retain their quotas even if all three lists include them.
 export function isUnlimitedShadowRepository(repository,{allowed=[],shadow=[],unlimited=[]}={}){
-  return repositoryAllowed(repository,allowed)
+  return repositoryAllowed(repository,['ibboabdoli-ai/proffera'])
+    && repositoryAllowed(repository,allowed)
     && repositoryAllowed(repository,shadow)
     && repositoryAllowed(repository,unlimited);
 }

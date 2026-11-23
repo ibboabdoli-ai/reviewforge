@@ -105,3 +105,12 @@ test('fallback publishing is disabled by default even for allowed shadow reposit
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'fallback');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/other','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'dry-run');
 });
+
+test('Proffera-only count exception cannot be widened by misconfigured allowlists',()=>{
+ const args={allowed:allowedRepositories('ibboabdoli-ai/proffera,ibboabdoli-ai/other,other/proffera'),
+   shadow:allowedRepositories('ibboabdoli-ai/proffera,ibboabdoli-ai/other,other/proffera'),
+   unlimited:allowedRepositories('ibboabdoli-ai/proffera,ibboabdoli-ai/other,other/proffera')};
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/Proffera',args),true);
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/other',args),false);
+ assert.equal(isUnlimitedShadowRepository('other/proffera',args),false);
+});
