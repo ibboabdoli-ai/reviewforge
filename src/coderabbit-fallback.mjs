@@ -15,6 +15,12 @@ export function isCodeRabbitQuotaEvent(payload){
 export function currentHeadReviewRequest(comments,headSha,botComment){
   if(!/^[0-9a-f]{40}$/.test(headSha||'')||!Array.isArray(comments))return null;
   const marker='<!-- proffera-coderabbit-final-review-request:'+headSha+' -->\n@coderabbitai review';
+  // A delayed authentic quota notice for a previous SHA can arrive after a
+  // newer exact-head review request. Time order alone is not correlation.
+  // Current CodeRabbit quota notices lack this marker: fail closed until
+  // a real bot-emitted exact-head format is verified end-to-end.
+  const quotaHeadMarker='<!-- CodeRabbit quota exact-head: '+headSha+' -->';
+  if(!String(botComment?.body||'').split(/\r?\n/).includes(quotaHeadMarker))return null;
   const botAt=Date.parse(botComment?.created_at||'');
   if(!Number.isFinite(botAt))return null;
   const requests=comments.filter(c=>
