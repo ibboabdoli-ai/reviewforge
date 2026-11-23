@@ -8,7 +8,8 @@ import {openDatabase} from '../src/db.mjs';
 import {enqueueManualReview} from '../src/manual-review.mjs';
 
 const repo='example/private',sha='a'.repeat(40);
-function fixture(){
+function fixture(repoName=repo){
+  const repo=repoName;
   const dir=mkdtempSync(join(tmpdir(),'rf-monthly-quota-'));
   const db=openDatabase(join(dir,'db.sqlite'));
   db.prepare("INSERT INTO users(id,login,name) VALUES(1,'owner','Owner')").run();
@@ -99,7 +100,7 @@ test('two concurrent SQLite connections cannot both take the final slot',async()
     assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,1);
   }finally{await Promise.allSettled(workers.map(w=>w.terminate()));f.dispose();}
 });
-test('pro limit and exact shadow exception apply to billing owner',async()=>{
+test('pro limit and Proffera-only shadow exception apply to billing owner',async()=>{
   const f=fixture();try{
     f.used(10);
     f.db.prepare("INSERT INTO subscriptions(user_id,stripe_customer_id,stripe_subscription_id,status) VALUES(1,'cus_test','sub_test','active')").run();
@@ -107,10 +108,17 @@ test('pro limit and exact shadow exception apply to billing owner',async()=>{
     assert.equal(created.created,true);
     f.db.prepare("UPDATE subscriptions SET status='canceled' WHERE user_id=1").run();
     const other={...f.input,prNumber:'103',policy:{...f.input.policy,aiUnlimitedRepositories:[repo]}};
-    const exempt=await enqueueManualReview(f.db,other);
-    assert.equal(exempt.created,true);
-    await assert.rejects(enqueueManualReview(f.db,{...other,prNumber:'104',policy:{...other.policy,aiShadowRepositories:[]}}),/not enabled/);
+    await assert.rejects(enqueueManualReview(f.db,other),/monthly review limit/i);
+    assert.equal(f.db.prepare('SELECT count(*) n FROM jobs').get().n,1);
   }finally{f.dispose();}
+  const target='ibboabdoli-ai/proffera',p=fixture(target);try{
+    p.used(10);
+    const request={...p.input,prNumber:'103',policy:{...p.input.policy,aiUnlimitedRepositories:[target]}};
+    const exempt=await enqueueManualReview(p.db,request);
+    assert.equal(exempt.created,true);
+    assert.equal(p.db.prepare('SELECT count(*) n FROM jobs').get().n,1);
+    await assert.rejects(enqueueManualReview(p.db,{...request,prNumber:'104',policy:{...request.policy,aiShadowRepositories:[]}}),/not enabled/);
+  }finally{p.dispose();}
 });
 test('automatic reservations share the same owner limit across installations',async()=>{
   const f=fixture();try{
