@@ -175,9 +175,13 @@ export function openDatabase(file) {
         WHERE id=(SELECT j.id FROM jobs j JOIN reviews r ON r.id=j.review_id
           JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
           JOIN installations i ON i.id=r.installation_id
-          WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
+          WHERE j.status='queued' AND r.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
             AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1)
         AND status='queued' RETURNING id AS job_id,review_id,attempts`).get(Date.now(),reviewId,reviewId);
+      if(winner){
+        const marked=db.prepare("UPDATE reviews SET status='running' WHERE id=? AND status='queued'").run(winner.review_id);
+        if(marked.changes!==1)throw new Error('Claimed review is not queued');
+      }
       const review=winner?db.prepare(`SELECT r.*,p.full_name FROM reviews r
         JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=?`).get(winner.review_id):null;
       if(winner&&!review)throw new Error('Claimed review is not accessible');
