@@ -201,8 +201,10 @@ export async function processQueue(reviewId=null){
       WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
         AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now(),reviewId,reviewId);
   if(!job)return 'idle';busy=true;
-  if(!db.claimJob) await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
-  await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
+  if(!db.claimJob){
+    await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
+    await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
+  }
   let modelCallsMayHaveStarted=false;
   try {
     if(!repositoryAllowed(job.full_name,config.aiAllowedRepositories)){

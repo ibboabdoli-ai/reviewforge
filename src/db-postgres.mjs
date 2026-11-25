@@ -45,6 +45,40 @@ export function sqlForPostgres(sql){
   }
   return out;
 }
+// Keep the job and review claim in one transaction on a single connection.
+export async function claimPostgresJob(pool,reviewId=null){
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    const now=Date.now();
+    const {rows}=await client.query(`WITH candidate AS (
+      SELECT j.id FROM jobs j
+      JOIN reviews r ON r.id=j.review_id
+      JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
+      JOIN installations i ON i.id=r.installation_id
+      WHERE j.status='queued' AND r.status='queued' AND j.next_attempt_at<=$1
+        AND ($3::bigint IS NULL OR j.review_id=$3)
+        AND i.status='active' AND p.enabled=1
+      ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED
+    )
+    UPDATE jobs j SET status='running', attempts=j.attempts+1, next_attempt_at=$2
+    FROM candidate WHERE j.id=candidate.id
+    RETURNING j.id AS job_id, j.review_id, j.attempts`,[now,now+5*60*1000,reviewId]);
+    let result=null;
+    if(rows.length){
+      const winner=rows[0];
+      const marked=await client.query("UPDATE reviews SET status='running' WHERE id=$1 AND status='queued'",[winner.review_id]);
+      if(marked.rowCount!==1)throw new Error('Claimed review is not queued');
+      const job=await client.query(`SELECT r.*,p.full_name FROM reviews r
+        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=$1`,[winner.review_id]);
+      if(job.rows.length!==1)throw new Error('Claimed review is not accessible');
+      result={...job.rows[0],job_id:winner.job_id,attempts:winner.attempts};
+    }
+    await client.query('COMMIT');
+    return result;
+  }catch(error){await client.query('ROLLBACK');throw error;}
+  finally{client.release();}
+}
 export async function openPostgres(url){
   if(!url || !/^postgres(?:ql)?:\/\//i.test(url))throw new Error('Invalid DATABASE_URL');
   if(!sharedPool){
@@ -135,25 +169,7 @@ export async function openPostgres(url){
       if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
         throw new Error('Invalid review ID');
       await reconcileExpiredJobs();
-      // Row locking prevents concurrent claims; worker can target one review.
-      const sql=`WITH candidate AS (
-        SELECT j.id FROM jobs j
-        JOIN reviews r ON r.id=j.review_id
-        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
-        JOIN installations i ON i.id=r.installation_id
-        WHERE j.status='queued' AND j.next_attempt_at<=$1
-          AND ($3::bigint IS NULL OR j.review_id=$3)
-          AND i.status='active' AND p.enabled=1
-        ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED
-      )
-      UPDATE jobs j SET status='running', attempts=j.attempts+1, next_attempt_at=$2
-      FROM candidate WHERE j.id=candidate.id
-      RETURNING j.id AS job_id, j.review_id, j.attempts`;
-      const {rows}=await sharedPool.query(sql,[Date.now(),Date.now()+5*60*1000,reviewId]);
-      if(!rows.length)return null;
-      const job=await query(`SELECT r.*,p.full_name FROM reviews r
-        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=$1`,[rows[0].review_id]);
-      return {...job.rows[0],job_id:rows[0].job_id,attempts:rows[0].attempts};
+      return claimPostgresJob(sharedPool,reviewId);
     },
     prepare(sql){return {
       async get(...args){const {rows}=await query(sql,args);return rows[0];},
