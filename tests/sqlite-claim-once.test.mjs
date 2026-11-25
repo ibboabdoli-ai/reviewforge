@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {openDatabase} from '../src/db.mjs';
+import {claimWork,setClaimPhase,finishClaim} from '../src/claim-fence.mjs';
 
 test('SQLite claims a queued review once, even across two worker connections',async()=>{
   const dir=mkdtempSync(join(tmpdir(),'rf-claim-once-'));
@@ -84,4 +85,40 @@ test('SQLite server startup must not requeue an active or interrupted claim',asy
     assert.equal(db.prepare('SELECT attempts FROM jobs WHERE review_id=?').get(interrupted.id).attempts,1);
     assert.equal(db.claimJob(continuation.id).id,continuation.id);
   }finally{db.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('SQLite real adapter rejects old claim identity, atomically releases saved progress, and fails expired claims',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'rf-fenced-claim-'));
+  const path=join(dir,'fixture.sqlite');
+  const db=openDatabase(path);let other;
+  try{
+    db.prepare("INSERT INTO users(id,github_id,login) VALUES(1,101,'owner')").run();
+    db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(17,1,'owner','active')").run();
+    db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,enabled) VALUES(27,17,'Proffera','ibboabdoli-ai/Proffera','https://example.invalid/repo',1)").run();
+    const props={installationId:17,repositoryId:27,prNumber:971,title:'Synthetic',author:'owner',headSha:'b'.repeat(40)};
+    const {id}=await db.reserveReview(props);other=openDatabase(path);
+    const first=db.claimJob(id);
+    const finish=(claim,phases,status,decrement=false)=>finishClaim(db,claim,phases,{status,decrement},'UPDATE reviews SET status=? WHERE id=?',[status]);
+    await finish(first,['ready'],'queued',true);
+    const second=other.claimJob(id);
+    assert.equal(first.attempts,second.attempts);
+    assert.notEqual(first.claim_token,second.claim_token);
+    await assert.rejects(()=>finish(first,['ready'],'queued'),/expired or changed/);
+    await claimWork(db,second,['ready'],tx=>setClaimPhase(tx,second,'model_started'));
+    await assert.rejects(()=>finish(second,['ready'],'queued'),/Unexpected worker claim phase/);
+    await claimWork(db,second,['model_started'],tx=>setClaimPhase(tx,second,'model_saved'));
+    other.exec("CREATE TRIGGER reject_pair BEFORE UPDATE OF status ON reviews BEGIN SELECT RAISE(ABORT,'synthetic pair failure'); END");
+    await assert.rejects(()=>finish(second,['model_saved'],'queued'),/synthetic pair failure/);
+    assert.equal(other.prepare('SELECT status FROM jobs WHERE review_id=?').get(id).status,'running');
+    assert.equal(other.prepare('SELECT status FROM reviews WHERE id=?').get(id).status,'running');
+    other.exec('DROP TRIGGER reject_pair');
+    await finish(second,['model_saved'],'queued');
+    const third=other.claimJob(id);
+    assert.notEqual(third.claim_token,second.claim_token);
+    other.prepare('UPDATE jobs SET next_attempt_at=? WHERE review_id=?').run(Date.now()-1,id);
+    await assert.rejects(()=>claimWork(db,third,['ready'],tx=>setClaimPhase(tx,third,'post_started')),/expired or changed/);
+    assert.equal(db.reconcileExpiredJobs(),1);
+    assert.equal(other.prepare('SELECT status FROM reviews WHERE id=?').get(id).status,'failed');
+    assert.equal(other.claimJob(id),null);
+  }finally{other?.close();db.close();rmSync(dir,{recursive:true,force:true});}
 });

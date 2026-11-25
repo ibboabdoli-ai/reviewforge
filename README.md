@@ -28,7 +28,7 @@ The app starts at `http://localhost:3000`. The local demo uses a deterministic r
 
 ## Production checklist
 
-1. Use an isolated database. Apply `migrations/001_initial.sql` through `migrations/008_stripe_checkout_reservations.sql` in numeric order, or verify each schema change already exists. In particular, apply `006_stripe_checkout_proofs.sql` and `008_stripe_checkout_reservations.sql` **before** enabling Stripe webhooks, and `007_review_installation_identity.sql` before deploying installation-scoped review deduplication. Test migrations on a disposable database first; this checklist does not assert that production has been migrated.
+1. Use an isolated database. Apply `migrations/001_initial.sql` through `migrations/009_queue_claim_fencing.sql` in numeric order, or verify each schema change already exists. In particular, apply `006_stripe_checkout_proofs.sql` and `008_stripe_checkout_reservations.sql` **before** enabling Stripe webhooks, and `007_review_installation_identity.sql` before deploying installation-scoped review deduplication. Test migrations on a disposable database first; this checklist does not assert that production has been migrated. Before deploying the claim-fenced worker, stop/drain old workers and apply migration 009; never requeue an interrupted legacy claim. A durable phase authorizes at most one model/publication attempt per claim, but remote outcomes can remain ambiguous and must not be retried.
 2. Deploy with `DATABASE_URL` (pooled), `SESSION_SECRET`, and `REVIEW_POST_MODE=dry-run`.
 3. Verify `/healthz` on the intended deployment, without logging any environment variable values.
 4. Register a GitHub App in your own GitHub account with minimal permissions and configure OAuth/webhook secrets directly in Vercel.

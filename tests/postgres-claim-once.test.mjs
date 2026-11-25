@@ -4,7 +4,8 @@ import {execFileSync} from 'node:child_process';
 import {existsSync,mkdtempSync,readdirSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {claimPostgresJob} from '../src/db-postgres.mjs';
+import {claimPostgresJob,withPostgresClaim} from '../src/db-postgres.mjs';
+import {claimWork,setClaimPhase,finishClaim} from '../src/claim-fence.mjs';
 
 function fixture(mode){
   let job='queued',review=mode==='terminal'?'failed':'queued',snapshot=null,released=false,commands=[];
@@ -65,11 +66,11 @@ test('Postgres claim is atomic across real connections on an isolated local clus
     await pool.query(`CREATE TABLE installations(id bigint PRIMARY KEY,status text);
       CREATE TABLE repositories(id bigint PRIMARY KEY,installation_id bigint,enabled int,full_name text);
       CREATE TABLE reviews(id bigint PRIMARY KEY,repository_id bigint,installation_id bigint,status text);
-      CREATE TABLE jobs(id bigint PRIMARY KEY,review_id bigint UNIQUE,status text,attempts int,next_attempt_at bigint);
+      CREATE TABLE jobs(id bigint PRIMARY KEY,review_id bigint UNIQUE,status text,attempts int,next_attempt_at bigint,claim_token text,claim_phase text);
       INSERT INTO installations VALUES(17,'active');
       INSERT INTO repositories VALUES(27,17,1,'fixture/repo');
       INSERT INTO reviews VALUES(1,27,17,'queued'),(2,27,17,'failed'),(3,27,17,'queued');
-      INSERT INTO jobs VALUES(11,1,'queued',0,0),(12,2,'queued',0,0),(13,3,'queued',0,0);`);
+      INSERT INTO jobs(id,review_id,status,attempts,next_attempt_at) VALUES(11,1,'queued',0,0),(12,2,'queued',0,0),(13,3,'queued',0,0);`);
     const pair=async id=>(await pool.query('SELECT j.status AS job,r.status AS review,j.attempts FROM jobs j JOIN reviews r ON r.id=j.review_id WHERE r.id=$1',[id])).rows[0];
     const results=await Promise.all([claimPostgresJob(pool,1),claimPostgresJob(pool,1)]);
     const winners=results.filter(Boolean);
@@ -86,6 +87,27 @@ test('Postgres claim is atomic across real connections on an isolated local clus
     await pool.query('DROP TRIGGER reject_claim ON reviews');
     assert.equal((await claimPostgresJob(pool,3)).status,'running');
     assert.deepEqual(await pair(3),{job:'running',review:'running',attempts:1});
+    const adapter={withClaim:(job,work)=>withPostgresClaim(pool,job,work)};
+    const first=winners[0];
+    const finish=(claim,phases,status,decrement=false)=>finishClaim(adapter,claim,phases,{status,decrement},'UPDATE reviews SET status=? WHERE id=?',[status]);
+    await finish(first,['ready'],'queued',true);
+    const second=await claimPostgresJob(pool,1);
+    assert.equal(first.attempts,second.attempts);
+    assert.notEqual(first.claim_token,second.claim_token);
+    await assert.rejects(()=>finish(first,['ready'],'queued'),/expired or changed/);
+    await claimWork(adapter,second,['ready'],tx=>setClaimPhase(tx,second,'model_started'));
+    await assert.rejects(()=>finish(second,['ready'],'queued'),/Unexpected worker claim phase/);
+    await claimWork(adapter,second,['model_started'],tx=>setClaimPhase(tx,second,'model_saved'));
+    await pool.query("CREATE TRIGGER reject_pair BEFORE UPDATE OF status ON reviews FOR EACH ROW WHEN (NEW.id=1) EXECUTE FUNCTION reject_claim()");
+    // A trigger that rejects this specific pair, independent of the earlier claim test.
+    await pool.query("CREATE OR REPLACE FUNCTION reject_claim() RETURNS trigger LANGUAGE plpgsql AS $ BEGIN IF NEW.id=1 THEN RAISE EXCEPTION 'synthetic pair failure'; END IF; RETURN NEW; END; $");
+    await assert.rejects(()=>finish(second,['model_saved'],'queued'),/synthetic pair failure/);
+    assert.deepEqual(await pair(1),{job:'running',review:'running',attempts:1});
+    await pool.query('DROP TRIGGER reject_pair ON reviews');
+    await finish(second,['model_saved'],'queued');
+    const third=await claimPostgresJob(pool,1);
+    await pool.query('UPDATE jobs SET next_attempt_at=$1 WHERE review_id=1',[Date.now()-1]);
+    await assert.rejects(()=>claimWork(adapter,third,['ready'],tx=>setClaimPhase(tx,third,'post_started')),/expired or changed/);
   }finally{
     try{await pool?.end();}
     finally{

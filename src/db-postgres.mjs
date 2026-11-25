@@ -1,6 +1,8 @@
 // PostgreSQL adapter for Vercel/Neon. It keeps the minimal SQLite prepare/get/all/run API
 // while making every operation explicitly asynchronous.
 // A pooled connection URL (DATABASE_URL) is expected for serverless traffic.
+import {randomUUID} from 'node:crypto';
+import {activeClaim} from './claim-fence.mjs';
 let sharedPool;
 let activeStripeTransactions=0;
 const ownerReservationQueues=new Map();
@@ -61,9 +63,9 @@ export async function claimPostgresJob(pool,reviewId=null){
         AND i.status='active' AND p.enabled=1
       ORDER BY j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED
     )
-    UPDATE jobs j SET status='running', attempts=j.attempts+1, next_attempt_at=$2
+    UPDATE jobs j SET status='running', attempts=j.attempts+1, next_attempt_at=$2, claim_token=$4, claim_phase='ready'
     FROM candidate WHERE j.id=candidate.id
-    RETURNING j.id AS job_id, j.review_id, j.attempts`,[now,now+5*60*1000,reviewId]);
+    RETURNING j.id AS job_id, j.review_id, j.attempts,j.claim_token`,[now,now+5*60*1000,reviewId,randomUUID()]);
     let result=null;
     if(rows.length){
       const winner=rows[0];
@@ -72,11 +74,32 @@ export async function claimPostgresJob(pool,reviewId=null){
       const job=await client.query(`SELECT r.*,p.full_name FROM reviews r
         JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=$1`,[winner.review_id]);
       if(job.rows.length!==1)throw new Error('Claimed review is not accessible');
-      result={...job.rows[0],job_id:winner.job_id,attempts:winner.attempts};
+      result={...job.rows[0],job_id:winner.job_id,attempts:winner.attempts,claim_token:winner.claim_token};
     }
     await client.query('COMMIT');
     return result;
   }catch(error){await client.query('ROLLBACK');throw error;}
+  finally{client.release();}
+}
+// Lock the claim before checking identity, phase and lease. The callback may
+// use only the same database connection; no remote operations belong here.
+export async function withPostgresClaim(pool,job,work){
+  const client=await pool.connect();
+  let started=false;
+  try{
+    await client.query('BEGIN');started=true;
+    const {rows}=await client.query(`SELECT j.claim_token,j.claim_phase,j.next_attempt_at,
+      j.status AS job_status,r.status AS review_status FROM jobs j
+      JOIN reviews r ON r.id=j.review_id WHERE j.id=$1 AND j.review_id=$2 FOR UPDATE OF j,r`,[job.job_id,job.id]);
+    if(!activeClaim(rows[0],job)){await client.query('ROLLBACK');started=false;return null;}
+    const locked={prepare(sql){return {
+      async get(...args){const result=await client.query(sqlForPostgres(sql),args);return result.rows[0];},
+      async all(...args){const result=await client.query(sqlForPostgres(sql),args);return result.rows;},
+      async run(...args){const result=await client.query(sqlForPostgres(sql),args);return {changes:result.rowCount||0};}
+    };}};
+    const value=await work(locked,rows[0].claim_phase);
+    await client.query('COMMIT');started=false;return {value};
+  }catch(error){if(started)await client.query('ROLLBACK');throw error;}
   finally{client.release();}
 }
 export async function openPostgres(url){
@@ -88,7 +111,7 @@ export async function openPostgres(url){
   const query=async (sql,params)=>sharedPool.query(sqlForPostgres(sql),params);
   // Reconcile expired workers independently, without starting any paid model.
   const reconcileExpiredJobs=async()=>query(`WITH expired AS (
-    UPDATE jobs SET status='failed' WHERE status='running'
+    UPDATE jobs SET status='failed',claim_token=NULL WHERE status='running'
       AND next_attempt_at>0 AND next_attempt_at<$1 RETURNING review_id
   ) UPDATE reviews SET status='failed', finished_at=CURRENT_TIMESTAMP,
       summary='Review worker exceeded its execution lease. No clean review verdict was produced.',
@@ -165,6 +188,7 @@ export async function openPostgres(url){
       const result=await reconcileExpiredJobs();
       return result.rowCount||0;
     },
+    async withClaim(job,work){return withPostgresClaim(sharedPool,job,work);},
     async claimJob(reviewId=null){
       if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
         throw new Error('Invalid review ID');

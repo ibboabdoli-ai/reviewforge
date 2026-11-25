@@ -16,13 +16,14 @@ import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
 import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository, automaticShadowReviewDecision } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
+import {claimWork,setClaimPhase,finishClaim} from './claim-fence.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
 // Do not reset SQLite running jobs at startup: another process may still own
 // the claim, and a stopped process may have made an uncheckpointed paid call.
-// Leave interrupted claims quarantined for explicit reconciliation until a
-// durable lease-fenced recovery protocol exists. Queued continuations remain runnable.
+// Expired claims with durable identities fail closed during reconciliation.
+// Legacy interrupted claims without a token remain quarantined; no paid replay.
 // Explicit URL-relative static imports keep public assets bundled with Vercel Functions.
 const staticFiles = {
   '/styles.css':['text/css; charset=utf-8', readFileSync(new URL('../public/styles.css', import.meta.url))],
@@ -197,24 +198,18 @@ export async function processQueue(reviewId=null){
   if(!integrations().github||!integrations().ai)return 'disabled';
   if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
     throw new Error('Invalid review ID');
-  const job=db.claimJob
-    ? await db.claimJob(reviewId)
-    : await db.prepare(`SELECT j.id job_id,j.attempts,r.*,p.full_name FROM jobs j JOIN reviews r ON r.id=j.review_id
-      JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id
-      WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
-        AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now(),reviewId,reviewId);
+  const job=await db.claimJob(reviewId);
   if(!job)return 'idle';busy=true;
-  if(!db.claimJob){
-    await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
-    await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
-  }
+  const allPhases=['ready','model_started','model_saved','post_started'];
+  const guarded=(phases,work)=>claimWork(db,job,phases,work);
+  const finish=(phases,state,sql,args)=>finishClaim(db,job,phases,state,sql,args);
   let modelCallsMayHaveStarted=false;
   let githubPostMayHaveStarted=false;
   try {
     if(!repositoryAllowed(job.full_name,config.aiAllowedRepositories)){
-      await db.prepare('UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?')
-        .run('skipped','Repository not approved for AI review.',job.id);
-      await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
+      await finish(['ready'],{status:'completed'},
+        'UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['skipped','Repository not approved for AI review.']);
       return 'skipped';
     }
     const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
@@ -231,63 +226,74 @@ export async function processQueue(reviewId=null){
       }),
       allowDraft:!!manual
     },{
-      loadProgress:async id=>db.prepare('SELECT * FROM review_progress WHERE review_id=?').get(id),
-      initProgress:async({reviewId,planHash,totalBatches})=>{
-        const saved=await db.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches,results_json) VALUES(?,?,?,0,'[]') ON CONFLICT(review_id) DO NOTHING")
+      loadProgress:async id=>guarded(['ready'],tx=>tx.prepare('SELECT * FROM review_progress WHERE review_id=?').get(id)),
+      initProgress:async({reviewId,planHash,totalBatches})=>guarded(['ready'],async tx=>{
+        const saved=await tx.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches,results_json) VALUES(?,?,?,0,'[]') ON CONFLICT(review_id) DO NOTHING")
           .run(reviewId,planHash,totalBatches);
         return saved.changes===1;
-      },
-      saveProgress:async({reviewId,planHash,previousBatches,completedBatches,results})=>{
-        const saved=await db.prepare('UPDATE review_progress SET completed_batches=?,results_json=?,updated_at=CURRENT_TIMESTAMP WHERE review_id=? AND plan_hash=? AND completed_batches=?')
+      }),
+      saveProgress:async({reviewId,planHash,previousBatches,completedBatches,results})=>guarded(['model_started'],async tx=>{
+        const saved=await tx.prepare('UPDATE review_progress SET completed_batches=?,results_json=?,updated_at=CURRENT_TIMESTAMP WHERE review_id=? AND plan_hash=? AND completed_batches=?')
           .run(completedBatches,JSON.stringify(results),reviewId,planHash,previousBatches);
-        return saved.changes===1;
+        if(saved.changes!==1)return false;
+        await setClaimPhase(tx,job,'model_saved');
+        return true;
+      }),
+      onModelStart:async()=>{
+        modelCallsMayHaveStarted=true;
+        await guarded(['ready'],tx=>setClaimPhase(tx,job,'model_started'));
       },
-      onModelStart:()=>{modelCallsMayHaveStarted=true;},
-      onPostStart:()=>{githubPostMayHaveStarted=true;},
+      onPostStart:async()=>{
+        githubPostMayHaveStarted=true;
+        await guarded(['ready','model_saved'],tx=>setClaimPhase(tx,job,'post_started'));
+      },
       reserveModelCalls:async count=>{
         // Count exemptions never bypass the atomic paid-model request budget.
         // Every model batch must reserve quota before network use.
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
-        const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
+        let allowed;
+        try{
+          allowed=await guarded(['ready'],tx=>reserveDailyReview(tx,config.aiDailyRequestLimit,Date.now(),count));
+        }catch(error){modelCallsMayHaveStarted=true;throw error;}
         if(allowed)modelCallsMayHaveStarted=true;
         return allowed?{allowed:true}:{allowed:false,reason:'daily-used'};
       }
     });
     if(result.status==='deferred'){
-      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=?,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE id=?")
-        .run(nextUtcDay(),job.job_id);
-      await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
-        .run('queued',result.summary,job.id);
+      await finish(['ready'],{status:'queued',nextAttemptAt:nextUtcDay(),decrement:true},
+        'UPDATE reviews SET status=?,summary=? WHERE id=?',['queued',result.summary]);
       return 'deferred';
     }
     if(result.status==='progress'){
-      // Exactly one saved model batch is resumable on the next worker invocation.
-      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=0 WHERE id=? AND status='running'").run(job.job_id);
-      await db.prepare("UPDATE reviews SET status='queued',summary=?,error=NULL WHERE id=?")
-        .run(result.summary,job.id);
+      // Only an atomically saved model batch may release a continuation.
+      await finish(['model_saved'],{status:'queued'},
+        "UPDATE reviews SET status='queued',summary=?,error=NULL WHERE id=?",[result.summary]);
       return 'progress';
     }
-    await db.prepare("UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?")
-      .run(result.status,result.summary,JSON.stringify(result.findings),result.posted,job.id);
-    await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
+    await finish(['ready','model_saved','post_started'],{status:'completed'},
+      "UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+      [result.status,result.summary,JSON.stringify(result.findings),result.posted]);
     return 'completed';
   }catch(err){
-    const retries=job.attempts + (db.claimJob?0:1);
-    const next=retryState(Number(retries),Date.now(),modelCallsMayHaveStarted||githubPostMayHaveStarted||err?.nonRetryable===true);
-    await db.prepare('UPDATE jobs SET status=?,next_attempt_at=? WHERE id=?').run(next.failed?'failed':'queued',next.nextAttemptAt,job.job_id);
+    if(err?.claimLost===true)return 'stale';
+    const next=retryState(Number(job.attempts),Date.now(),modelCallsMayHaveStarted||githubPostMayHaveStarted||err?.nonRetryable===true);
     const errorText=String(err.message).slice(0,260);
-    if(next.failed){
-      const summary=githubPostMayHaveStarted
-        ? 'GitHub review publication may have started; automatic replay disabled to prevent duplicate posting.'
-        : modelCallsMayHaveStarted
-        ? 'AI review incomplete; automatic replay disabled to prevent duplicate model costs.'
-        : 'Review failed after the maximum safe attempts.';
-      await db.prepare("UPDATE reviews SET status='failed',error=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?")
-        .run(errorText,summary,job.id);
-    } else {
-      await db.prepare("UPDATE reviews SET status='queued',error=?,summary=? WHERE id=?")
-        .run(errorText,'Review failed before model execution; retry is scheduled.',job.id);
-    }
+    try{
+      if(next.failed){
+        const summary=githubPostMayHaveStarted
+          ? 'GitHub review publication may have started; automatic replay disabled to prevent duplicate posting.'
+          : modelCallsMayHaveStarted
+          ? 'AI review incomplete; automatic replay disabled to prevent duplicate model costs.'
+          : 'Review failed after the maximum safe attempts.';
+        await finish(allPhases,{status:'failed',nextAttemptAt:next.nextAttemptAt},
+          "UPDATE reviews SET status='failed',error=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+          [errorText,summary]);
+      }else{
+        await finish(['ready'],{status:'queued',nextAttemptAt:next.nextAttemptAt},
+          "UPDATE reviews SET status='queued',error=?,summary=? WHERE id=?",
+          [errorText,'Review failed before model execution; retry is scheduled.']);
+      }
+    }catch(writeError){if(writeError?.claimLost===true)return 'stale';throw writeError;}
     console.error('[worker] review',job.id,'failed:',errorText);
     return next.failed?'failed':'retry';
   }finally{busy=false;}

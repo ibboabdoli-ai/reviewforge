@@ -160,7 +160,7 @@ export async function analyzePullRequestStep({
     const options={batchIndex:next+1,totalBatches:batches.length,
       ...(reviewContexts?{reviewContext:reviewContexts[next]}:{}) ,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})};
-    deps.onModelStart?.();
+    await deps.onModelStart?.();
     let response;
     try{response=await (deps.reviewWithAI || reviewWithAI)(batch,options);}
     catch(error){error.nonRetryable=true;throw error;}
@@ -225,7 +225,7 @@ export async function analyzePullRequestStep({
   // A lost response may mean GitHub accepted the write. Even when every
   // model batch was saved by an earlier invocation, never retry an ambiguous
   // publication as if this were a harmless pre-model failure.
-  deps.onPostStart?.();
+  await deps.onPostStart?.();
   let result;
   try {
     result=await (deps.postReview || postReview)({
