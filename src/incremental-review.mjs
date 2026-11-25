@@ -222,9 +222,18 @@ export async function analyzePullRequestStep({
     status:'completed',summary:'[Preview only — not posted to GitHub] '+summary,
     findings,posted:0,coverage
   };
-  const result=await (deps.postReview || postReview)({
-    repoFullName:repository,prNumber:number,headSha,token,...review,summary,
-    approval:postMode==='fallback' && findings.length===0
-  });
+  // A lost response may mean GitHub accepted the write. Even when every
+  // model batch was saved by an earlier invocation, never retry an ambiguous
+  // publication as if this were a harmless pre-model failure.
+  deps.onPostStart?.();
+  let result;
+  try {
+    result=await (deps.postReview || postReview)({
+      repoFullName:repository,prNumber:number,headSha,token,...review,summary,
+      approval:postMode==='fallback' && findings.length===0
+    });
+  } catch(error) {
+    error.nonRetryable=true;throw error;
+  }
   return {status:'completed',summary,findings,posted:result==='none'?0:1,coverage};
 }

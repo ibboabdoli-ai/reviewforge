@@ -164,3 +164,44 @@ test('large diffs are split into small model payloads and resumable checkpoints'
   assert.deepEqual(f.quotas,[2]);
  }finally{f.dispose();}
 });
+
+test('resumed final checkpoint treats ambiguous GitHub publication as non-retryable',async()=>{
+  for(const postMode of ['live','fallback']){
+    const f=fixture(1);
+    try{
+      let modelCalls=0,postStarts=0,postAttempts=0;
+      f.deps.reviewWithAI=async()=>{
+        modelCalls++;
+        return {summary:'Synthetic clean batch',findings:[]};
+      };
+      f.deps.onPostStart=()=>{postStarts++;};
+      f.deps.postReview=async({approval})=>{
+        postAttempts++;
+        assert.equal(approval,postMode==='fallback');
+        assert.equal(postStarts,postAttempts);
+        throw new Error('Synthetic lost publication response');
+      };
+      const publishedTarget={...target,postMode};
+      // First simulated failure leaves a complete, durable model checkpoint.
+      await assert.rejects(analyzePullRequestStep(publishedTarget,f.deps),
+        error=>error.message==='Synthetic lost publication response'&&error.nonRetryable===true);
+      assert.equal(f.db.prepare('SELECT completed_batches FROM review_progress WHERE review_id=1').get().completed_batches,1);
+      assert.equal(modelCalls,1);
+      // Directly exercise the completed-checkpoint path in this isolated
+      // fixture. The real worker must not automatically make this second call.
+      await assert.rejects(analyzePullRequestStep(publishedTarget,f.deps),
+        error=>error.message==='Synthetic lost publication response'&&error.nonRetryable===true);
+      assert.equal(modelCalls,1);
+      assert.equal(postStarts,2);
+      assert.equal(postAttempts,2);
+    }finally{f.dispose();}
+  }
+});
+test('dry run never signals a GitHub publication attempt',async()=>{
+  const f=fixture(1);
+  try{
+    f.deps.onPostStart=()=>{throw new Error('Unexpected publication start');};
+    assert.equal((await analyzePullRequestStep(target,f.deps)).status,'completed');
+    assert.equal(f.postCount(),0);
+  }finally{f.dispose();}
+});

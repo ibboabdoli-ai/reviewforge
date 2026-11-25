@@ -206,6 +206,7 @@ export async function processQueue(reviewId=null){
     await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
   }
   let modelCallsMayHaveStarted=false;
+  let githubPostMayHaveStarted=false;
   try {
     if(!repositoryAllowed(job.full_name,config.aiAllowedRepositories)){
       await db.prepare('UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?')
@@ -239,6 +240,7 @@ export async function processQueue(reviewId=null){
         return saved.changes===1;
       },
       onModelStart:()=>{modelCallsMayHaveStarted=true;},
+      onPostStart:()=>{githubPostMayHaveStarted=true;},
       reserveModelCalls:async count=>{
         // Count exemptions never bypass the atomic paid-model request budget.
         // Every model batch must reserve quota before network use.
@@ -268,11 +270,13 @@ export async function processQueue(reviewId=null){
     return 'completed';
   }catch(err){
     const retries=job.attempts + (db.claimJob?0:1);
-    const next=retryState(Number(retries),Date.now(),modelCallsMayHaveStarted||err?.nonRetryable===true);
+    const next=retryState(Number(retries),Date.now(),modelCallsMayHaveStarted||githubPostMayHaveStarted||err?.nonRetryable===true);
     await db.prepare('UPDATE jobs SET status=?,next_attempt_at=? WHERE id=?').run(next.failed?'failed':'queued',next.nextAttemptAt,job.job_id);
     const errorText=String(err.message).slice(0,260);
     if(next.failed){
-      const summary=modelCallsMayHaveStarted
+      const summary=githubPostMayHaveStarted
+        ? 'GitHub review publication may have started; automatic replay disabled to prevent duplicate posting.'
+        : modelCallsMayHaveStarted
         ? 'AI review incomplete; automatic replay disabled to prevent duplicate model costs.'
         : 'Review failed after the maximum safe attempts.';
       await db.prepare("UPDATE reviews SET status='failed',error=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?")
