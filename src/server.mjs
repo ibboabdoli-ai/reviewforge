@@ -19,7 +19,10 @@ import { retryState } from './queue-policy.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
-if (!process.env.DATABASE_URL) db.exec("UPDATE jobs SET status='queued' WHERE status='running';");
+// Do not reset SQLite running jobs at startup: another process may still own
+// the claim, and a stopped process may have made an uncheckpointed paid call.
+// Leave interrupted claims quarantined for explicit reconciliation until a
+// durable lease-fenced recovery protocol exists. Queued continuations remain runnable.
 // Explicit URL-relative static imports keep public assets bundled with Vercel Functions.
 const staticFiles = {
   '/styles.css':['text/css; charset=utf-8', readFileSync(new URL('../public/styles.css', import.meta.url))],

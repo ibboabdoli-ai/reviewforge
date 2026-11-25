@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {spawnSync} from 'node:child_process';
 import {openDatabase} from '../src/db.mjs';
 
 test('SQLite claims a queued review once, even across two worker connections',async()=>{
@@ -54,4 +55,33 @@ test('SQLite claims a queued review once, even across two worker connections',as
     assert.equal(other.claimJob(second.id).id,second.id);
     assert.equal(db.prepare('SELECT status FROM reviews WHERE id=?').get(second.id).status,'running');
   }finally{other?.close();db.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+test('SQLite server startup must not requeue an active or interrupted claim',async()=>{
+  const dir=mkdtempSync(join(tmpdir(),'rf-startup-claim-'));
+  const path=join(dir,'fixture.sqlite');
+  const db=openDatabase(path);
+  try{
+    db.prepare("INSERT INTO users(id,github_id,login) VALUES(1,101,'owner')").run();
+    db.prepare("INSERT INTO installations(id,owner_user_id,account_login,status) VALUES(17,1,'owner','active')").run();
+    db.prepare("INSERT INTO repositories(id,installation_id,name,full_name,html_url,enabled) VALUES(27,17,'Proffera','ibboabdoli-ai/Proffera','https://example.invalid/repo',1)").run();
+    const props={installationId:17,repositoryId:27,prNumber:971,title:'Synthetic',author:'owner',headSha:'b'.repeat(40)};
+    const interrupted=await db.reserveReview(props);
+    const continuation=await db.reserveReview({...props,headSha:'c'.repeat(40)});
+    assert.equal(db.claimJob(interrupted.id).id,interrupted.id);
+    // Import the real server in a separate process using the same disposable
+    // database. No project .env, credentials, scheduler or network is available.
+    const serverUrl=new URL('../src/server.mjs',import.meta.url).href;
+    const env={NODE_ENV:'test',DEMO_MODE:'false',DB_PATH:path,AI_REVIEW_ENABLED:'false',
+      ...(process.env.SystemRoot?{SystemRoot:process.env.SystemRoot}:{})};
+    const startup=spawnSync(process.execPath,['--input-type=module','--eval',
+      'globalThis.fetch=()=>{throw new Error("network prohibited")}; await import('+JSON.stringify(serverUrl)+');'],
+      {cwd:dir,env,encoding:'utf8',timeout:15000});
+    assert.equal(startup.status,0,startup.stderr||String(startup.error||''));
+    assert.equal(db.prepare('SELECT status FROM jobs WHERE review_id=?').get(interrupted.id).status,'running');
+    assert.equal(db.prepare('SELECT status FROM reviews WHERE id=?').get(interrupted.id).status,'running');
+    assert.equal(db.claimJob(interrupted.id),null);
+    assert.equal(db.prepare('SELECT attempts FROM jobs WHERE review_id=?').get(interrupted.id).attempts,1);
+    assert.equal(db.claimJob(continuation.id).id,continuation.id);
+  }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });
