@@ -164,6 +164,27 @@ export function openDatabase(file) {
     }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
     finally{locked?.close();release();if(subscriptionQueues.get(file)===current)subscriptionQueues.delete(file);}
   };
+  // Claim a SQLite job atomically before returning it to an async worker.
+  // A separate SELECT and unconditional UPDATE let two workers claim one job.
+  db.claimJob=(reviewId=null)=>{
+    if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
+      throw new Error('Invalid review ID');
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      const winner=db.prepare(`UPDATE jobs SET status='running', attempts=attempts+1
+        WHERE id=(SELECT j.id FROM jobs j JOIN reviews r ON r.id=j.review_id
+          JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
+          JOIN installations i ON i.id=r.installation_id
+          WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
+            AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1)
+        AND status='queued' RETURNING id AS job_id,review_id,attempts`).get(Date.now(),reviewId,reviewId);
+      const review=winner?db.prepare(`SELECT r.*,p.full_name FROM reviews r
+        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=?`).get(winner.review_id):null;
+      if(winner&&!review)throw new Error('Claimed review is not accessible');
+      db.exec('COMMIT');
+      return winner?{...review,job_id:winner.job_id,attempts:winner.attempts}:null;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
   // BEGIN IMMEDIATE serializes the count and inserts across SQLite connections.
   // Retry without blocking the event loop while another writer holds the lock.
   db.reserveReview=async({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false})=>{
