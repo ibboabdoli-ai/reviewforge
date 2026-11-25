@@ -154,7 +154,7 @@ test('possible AI spending makes the first failed attempt terminal, without an a
  assert.deepEqual(retryState(1,1000,false),{failed:false,nextAttemptAt:61000});
  assert.equal(retryState(3,1000,false).failed,true);
  const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
- assert.match(server,/modelCallsMayHaveStarted\|\|err\?\.nonRetryable===true/);
+ assert.match(server,/modelCallsMayHaveStarted\|\|githubPostMayHaveStarted\|\|err\?\.nonRetryable===true/);
  assert.match(server,/finished_at=CURRENT_TIMESTAMP WHERE id=\?/);
  assert.match(server,/priorJob\?\.status==='queued'/);
 });
