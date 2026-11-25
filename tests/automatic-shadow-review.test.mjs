@@ -66,5 +66,5 @@ test('server uses the approved automatic decision only with a durable manual no-
   assert.match(server,/const manual=await db\.prepare\('SELECT review_id FROM manual_review_requests/);
   assert.match(server,/postMode:manual\?'dry-run':effectiveReviewPostMode/);
   assert.match(server,/allowDraft:!!manual/);
-  assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit,Date\.now\(\),count\)/);
+  assert.match(server,/guarded\(\['ready'\],tx=>reserveDailyReview\(tx,config\.aiDailyRequestLimit,Date\.now\(\),count\)\)/);
 });

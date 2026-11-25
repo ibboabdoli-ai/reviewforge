@@ -100,7 +100,7 @@ test('Postgres claim is atomic across real connections on an isolated local clus
     await claimWork(adapter,second,['model_started'],tx=>setClaimPhase(tx,second,'model_saved'));
     await pool.query("CREATE TRIGGER reject_pair BEFORE UPDATE OF status ON reviews FOR EACH ROW WHEN (NEW.id=1) EXECUTE FUNCTION reject_claim()");
     // A trigger that rejects this specific pair, independent of the earlier claim test.
-    await pool.query("CREATE OR REPLACE FUNCTION reject_claim() RETURNS trigger LANGUAGE plpgsql AS $ BEGIN IF NEW.id=1 THEN RAISE EXCEPTION 'synthetic pair failure'; END IF; RETURN NEW; END; $");
+    await pool.query("CREATE OR REPLACE FUNCTION reject_claim() RETURNS trigger LANGUAGE plpgsql AS $rf_pair$ BEGIN IF NEW.id=1 THEN RAISE EXCEPTION 'synthetic pair failure'; END IF; RETURN NEW; END; $rf_pair$");
     await assert.rejects(()=>finish(second,['model_saved'],'queued'),/synthetic pair failure/);
     assert.deepEqual(await pair(1),{job:'running',review:'running',attempts:1});
     await pool.query('DROP TRIGGER reject_pair ON reviews');

@@ -45,7 +45,7 @@ test('worker gate and cron auth are explicitly implemented',async()=>{
   assert.match(server,/automaticShadowReviewDecision\(\{/);
   const policy=readFileSync(new URL('../src/review-policy.mjs',import.meta.url),'utf8');
   assert.match(policy,/repositoryAllowed\(repository,allowed\)/);
-  assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit,Date\.now\(\),count\)/);
+  assert.match(server,/guarded\(\['ready'\],tx=>reserveDailyReview\(tx,config\.aiDailyRequestLimit,Date\.now\(\),count\)\)/);
   assert.match(server,/req\.method==='GET'\?process\.env\.CRON_SECRET:process\.env\.WORKER_SECRET/);
 });
 
@@ -94,7 +94,7 @@ test('server enforces per-repo monthly and daily limits',async()=>{
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
  assert.match(source,/db\.reserveReview\(\{installationId:inst\.id,repositoryId:repo\.id,prNumber:pr\.number,/);
  assert.doesNotMatch(source,/if\(shadowUnlimited\)\{modelCallsMayHaveStarted=true;return \{allowed:true\};\}/);
- assert.match(source,/reserveDailyReview\(db,config\.aiDailyRequestLimit,Date\.now\(\),count\)/);
+ assert.match(source,/guarded\(\['ready'\],tx=>reserveDailyReview\(tx,config\.aiDailyRequestLimit,Date\.now\(\),count\)\)/);
  assert.match(source,/postMode:manual\?'dry-run':effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
 });
 
