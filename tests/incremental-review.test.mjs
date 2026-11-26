@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
 import { analyzePullRequestStep } from '../src/incremental-review.mjs';
+import { config } from '../src/config.mjs';
+import { dailyRequestLimit } from '../src/review-policy.mjs';
 
 const sha='a'.repeat(40);
 const target={
@@ -204,4 +206,30 @@ test('dry run never signals a GitHub publication attempt',async()=>{
     assert.equal((await analyzePullRequestStep(target,f.deps)).status,'completed');
     assert.equal(f.postCount(),0);
   }finally{f.dispose();}
+});
+
+test('saved checkpoint cannot start another model batch when daily cap is disabled or invalid',async()=>{
+  const priorLimit=config.aiDailyRequestLimit;
+  try{
+    for(const raw of ['0','invalid']){
+      const f=fixture();
+      try{
+        config.aiDailyRequestLimit=2;
+        assert.equal((await analyzePullRequestStep(target,f.deps)).status,'progress');
+        config.aiDailyRequestLimit=dailyRequestLimit(raw);
+        assert.equal(config.aiDailyRequestLimit,0);
+        let starts=0;
+        f.deps.onModelStart=async()=>{starts++;};
+        const result=await analyzePullRequestStep(target,f.deps);
+        assert.equal(result.status,'partial');
+        assert.match(result.summary,/allowance disabled/);
+        assert.equal(result.posted,0);
+        assert.equal(starts,0);
+        assert.deepEqual(f.modelCalls.map(c=>c.batchIndex),[1]);
+        assert.deepEqual(f.quotas,[2]);
+        assert.equal(f.postCount(),0);
+        assert.equal(f.db.prepare('SELECT completed_batches FROM review_progress WHERE review_id=1').get().completed_batches,1);
+      }finally{f.dispose();}
+    }
+  }finally{config.aiDailyRequestLimit=priorLimit;}
 });

@@ -155,6 +155,12 @@ export async function analyzePullRequestStep({
       status:'superseded',posted:0,findings:[],coverage,
       summary:'PR changed during checkpoint operations; no model calls made.'
     };
+    // A saved reservation must not bypass an explicit zero/invalid daily cap.
+    // This is a stop gate, not a second charge against the original reservation.
+    if(config.aiDailyRequestLimit===0) return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:'AI daily allowance disabled; no further model calls made. Review incomplete.'
+    };
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
