@@ -14,14 +14,10 @@ export function repositoryAllowed(name,allowlist) {
 /** Force approved shadow repositories into a no-post review mode,
  * even if an operator changes the global posting setting. */
 export function effectiveReviewPostMode(repository,globalMode,shadowRepositories,{fallbackOnly=[],approval=[],allowed=[]}={}){
-  // All four explicit allowlists must agree before this exception is allowed.
-  // Quota evidence is checked BEFORE the job is enqueued.
-  if(repositoryAllowed(repository,shadowRepositories)){
-    if(repositoryAllowed(repository,fallbackOnly) &&
-       repositoryAllowed(repository,approval) &&
-       repositoryAllowed(repository,allowed))return 'fallback';
-    return 'dry-run';
-  }
+  // Configuration alone is not proof that this queued review originated
+  // from an authentic exact-HEAD quota notice. Keep shadow reviews private
+  // until durable quota provenance and a publication-time check exist.
+  if(repositoryAllowed(repository,shadowRepositories))return 'dry-run';
   // A fallback-managed repository with a missing shadow entry must not
   // fall through to ordinary live posting on configuration drift.
   if(repositoryAllowed(repository,fallbackOnly) || repositoryAllowed(repository,approval))return 'dry-run';

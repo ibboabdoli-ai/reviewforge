@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
-import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
+import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,automaticShadowReviewDecision,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
 import { sqlForPostgres } from '../src/db-postgres.mjs';
 
 test('repository allowlist defaults to deny all, matches only exact repos',()=>{
@@ -102,7 +102,7 @@ test('fallback publishing is disabled by default even for allowed shadow reposit
  const shadow=allowedRepositories('ibboabdoli-ai/proffera');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,allowed:shadow}),'dry-run');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{approval:shadow,allowed:shadow}),'dry-run');
- assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'fallback');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'dry-run');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/other','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'dry-run');
 });
 
@@ -123,4 +123,15 @@ test('fallback-managed repositories fail closed when the shadow allowlist drifts
  assert.equal(effectiveReviewPostMode(repo,'live',[],{fallbackOnly:list,approval:list,allowed:list}),'dry-run');
  assert.equal(effectiveReviewPostMode(repo.toUpperCase(),'live',[],{approval:list}),'dry-run');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/other','live',[],{fallbackOnly:list,approval:list}),'live');
+});
+
+test('legacy ordinary jobs cannot gain fallback publication from config alone',()=>{
+ const repo='ibboabdoli-ai/proffera';
+ const list=[repo];
+ const admitted=automaticShadowReviewDecision({event:'pull_request',action:'opened',repository:repo,draft:false},{allowed:list,shadow:list,automatic:[],fallbackOnly:[]});
+ assert.deepEqual(admitted,{queue:true,automatic:false});
+ for(const mode of ['live','dry-run']){
+   assert.equal(effectiveReviewPostMode(repo,mode,list,{fallbackOnly:list,approval:list,allowed:list}),'dry-run');
+ }
+ assert.equal(effectiveReviewPostMode('owner/unrelated','live',list,{fallbackOnly:list,approval:list,allowed:list}),'live');
 });

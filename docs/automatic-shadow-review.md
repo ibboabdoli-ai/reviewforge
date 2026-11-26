@@ -18,6 +18,8 @@ Replays of the same installation/repo/PR/HEAD reuse the existing review. Differe
 
 ## Important limitations
 
+- Quota fallback publication is deliberately disabled in this draft, even if all fallback allowlists agree. Durable exact-HEAD quota-origin evidence and publication-time revalidation are not yet implemented. A private result is not a GitHub approval.
+
 - Automatic *attempt* does not mean unlimited paid review. The current production setting is a maximum of 2 AI request reservations per UTC day, with owner-monthly quotas also applying. More complex PRs may be deferred or marked partial. Do not increase those limits without reviewing actual cost.
 - Large PRs (for example, Proffera PR #971 with >200 changed files) can exceed the 4-batch coverage limit and must be reported as incomplete rather than clean; no model calls should start for such a preflight.
 - Existing Draft PRs need a fresh supported GitHub event to enter this flow; enabling the environment variable does not silently backfill old heads.
