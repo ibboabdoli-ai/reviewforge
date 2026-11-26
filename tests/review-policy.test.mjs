@@ -114,3 +114,13 @@ test('Proffera-only count exception cannot be widened by misconfigured allowlist
  assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/other',args),false);
  assert.equal(isUnlimitedShadowRepository('other/proffera',args),false);
 });
+
+test('fallback-managed repositories fail closed when the shadow allowlist drifts',()=>{
+ const repo='ibboabdoli-ai/proffera';
+ const list=[repo];
+ assert.equal(effectiveReviewPostMode(repo,'live',[],{fallbackOnly:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode(repo,'live',[],{approval:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode(repo,'live',[],{fallbackOnly:list,approval:list,allowed:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode(repo.toUpperCase(),'live',[],{approval:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/other','live',[],{fallbackOnly:list,approval:list}),'live');
+});

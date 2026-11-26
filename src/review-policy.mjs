@@ -22,6 +22,9 @@ export function effectiveReviewPostMode(repository,globalMode,shadowRepositories
        repositoryAllowed(repository,allowed))return 'fallback';
     return 'dry-run';
   }
+  // A fallback-managed repository with a missing shadow entry must not
+  // fall through to ordinary live posting on configuration drift.
+  if(repositoryAllowed(repository,fallbackOnly) || repositoryAllowed(repository,approval))return 'dry-run';
   return globalMode;
 }
 // The owner authorized a monthly review-count exception for Proffera only.
