@@ -36,12 +36,13 @@ export function alreadyReviewedExactHead(reviews,inlineComments,headSha,requestT
   if(!Array.isArray(reviews)||!Array.isArray(inlineComments))return true; // fail closed
   const since=Date.parse(requestTime);
   if(!Number.isFinite(since))return true;
+  // A repeated request does not invalidate an existing review of immutable code.
+  // Even unknown result timestamps must not grant a fallback for a known SHA.
   return reviews.some(r=>r.user?.login==='coderabbitai[bot]' &&
-       r.commit_id===headSha && Date.parse(r.submitted_at||'')>=since &&
+       r.commit_id===headSha &&
        ['APPROVED','CHANGES_REQUESTED','COMMENTED'].includes(r.state)) ||
     inlineComments.some(c=>c.user?.login==='coderabbitai[bot]' &&
-       (c.original_commit_id||c.commit_id)===headSha &&
-       Date.parse(c.created_at||'')>=since);
+       (c.original_commit_id||c.commit_id)===headSha);
 }
 
 // A signed delivery is a historical snapshot. A delayed delivery must not
