@@ -6,7 +6,7 @@ import { config,assertConfig,integrations,production } from './config.mjs';
 import { openConfiguredDatabase, seedDemo,createSession,getUserBySession, allowedReviews } from './db.mjs';
 import { randomToken, cookies,cookie, csrfFor, safeCompare, validOrigin, verifyGithub, sha256 } from './security.mjs';
 import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken, upsertInstalledRepository } from './github.mjs';
-import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
+import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead, matchesCurrentQuotaNotice } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
 import { enqueueManualReview } from './manual-review.mjs';
 import { requestWorkerReview, getWorkerReviewStatus, workerErrorStatus } from './worker-review.mjs';
@@ -145,7 +145,8 @@ async function webhookGithub(req,res){
           throw new Error('CodeRabbit evidence exceeded pagination bound; fallback refused');
         }
         const comments=await allPages('issues/'+prNo+'/comments');
-        const request=currentHeadReviewRequest(comments,head,payload.comment);
+        const request=matchesCurrentQuotaNotice(comments,payload.comment)
+          ?currentHeadReviewRequest(comments,head,payload.comment):null;
         if(request){
           const [reviews,inline]=await Promise.all([
             allPages('pulls/'+prNo+'/reviews'),allPages('pulls/'+prNo+'/comments')

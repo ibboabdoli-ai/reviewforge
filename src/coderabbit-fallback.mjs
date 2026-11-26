@@ -43,3 +43,18 @@ export function alreadyReviewedExactHead(reviews,inlineComments,headSha,requestT
        (c.original_commit_id||c.commit_id)===headSha &&
        Date.parse(c.created_at||'')>=since);
 }
+
+// A signed delivery is a historical snapshot. A delayed delivery must not
+// reserve work after the bot has edited or removed the quota notice.
+export function matchesCurrentQuotaNotice(comments,notice){
+  if(!Array.isArray(comments)||!Number.isSafeInteger(notice?.id)||notice.id<=0)return false;
+  if(notice.user?.login!=='coderabbitai[bot]'||typeof notice.body!=='string'||
+    !Number.isFinite(Date.parse(notice.created_at||''))||
+    !Number.isFinite(Date.parse(notice.updated_at||'')))return false;
+  const matches=comments.filter(c=>c.id===notice.id);
+  if(matches.length!==1)return false;
+  const current=matches[0];
+  return current.user?.login==='coderabbitai[bot]' &&
+    current.body===notice.body && current.created_at===notice.created_at &&
+    current.updated_at===notice.updated_at;
+}

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {isCodeRabbitQuotaEvent,currentHeadReviewRequest,alreadyReviewedExactHead} from '../src/coderabbit-fallback.mjs';
+import {isCodeRabbitQuotaEvent,currentHeadReviewRequest,alreadyReviewedExactHead,matchesCurrentQuotaNotice} from '../src/coderabbit-fallback.mjs';
 const sha='a'.repeat(40);
 const requestAt='2026-10-30T09:00:00Z',noticeAt='2026-10-30T09:01:00Z';
 const request={user:{login:'github-actions[bot]'},created_at:requestAt,
@@ -43,9 +43,26 @@ test('fallback-only webhook path is present and protected by exact allowlists',a
  const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
  assert.match(server,/event==='issue_comment' && isCodeRabbitQuotaEvent\(payload\)/);
  assert.match(server,/repositoryAllowed\(payload\.repository\?\.full_name,config\.aiFallbackOnlyRepositories\)/);
+ assert.match(server,/matchesCurrentQuotaNotice\(comments,payload\.comment\)/);
  assert.match(server,/currentHeadReviewRequest\(comments,head,payload\.comment\)/);
  assert.match(server,/alreadyReviewedExactHead\(reviews,inline,head,request\.created_at\)/);
  assert.match(server,/automaticShadowReviewDecision\(/);
  assert.match(server,/fallbackOnly:config\.aiFallbackOnlyRepositories/);
  assert.match(server,/db\.reserveReview\(\{installationId:inst\.id,repositoryId:repo\.id,prNumber:prNo,/);
+});
+
+test('stale or ambiguous quota deliveries cannot reserve a review',()=>{
+ const notice={...bot,id:22,updated_at:noticeAt,body:'<!-- CodeRabbit quota exact-head: '+sha+' -->\n'+bot.body};
+ const admission=(comments,delivered=notice)=>matchesCurrentQuotaNotice(comments,delivered)
+   ?currentHeadReviewRequest(comments,sha,delivered):null;
+ assert.equal(admission([request,notice]),request);
+ assert.equal(admission([request]),null);
+ assert.equal(admission([request,{...notice,body:'Review finished'}]),null);
+ assert.equal(admission([request,{...notice,updated_at:'2026-10-30T09:02:00Z'}]),null);
+ assert.equal(admission([request,{...notice,user:{login:'attacker'}}]),null);
+ assert.equal(admission([request,notice,notice]),null);
+ assert.equal(admission([request,notice],{...notice,id:null}),null);
+ assert.equal(admission([notice]),null);
+ const unbound={...notice,body:bot.body};
+ assert.equal(admission([request,unbound],unbound),null);
 });
