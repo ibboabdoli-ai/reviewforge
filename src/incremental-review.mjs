@@ -95,6 +95,8 @@ export async function analyzePullRequestStep({
   const planHash=createHash('sha256').update(JSON.stringify({
     headSha,postMode,allowDraft,batches,coverage,reviewContexts,
     profferaPilot:repository.toLowerCase()==='ibboabdoli-ai/proffera',
+    pilotLimit:repository.toLowerCase()==='ibboabdoli-ai/proffera'
+      ?config.aiPilotMaxModelCalls:null,
     modelPolicy:{
       auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
       defaultModel:config.openai.model,
@@ -164,6 +166,13 @@ export async function analyzePullRequestStep({
     if(config.aiDailyRequestLimit===0) return {
       status:'partial',posted:0,findings:[],coverage,
       summary:'AI daily allowance disabled; no further model calls made. Review incomplete.'
+    };
+    // A saved batch reservation must never bypass a later emergency pilot
+    // pause. This gate is checked again immediately before every model call.
+    if(repository.toLowerCase()==='ibboabdoli-ai/proffera' &&
+       config.aiPilotMaxModelCalls===0)return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:'Proffera paid shadow pilot disabled; no further model calls made. Review incomplete.'
     };
     const batch=batches[next];
     const choice=modelChoice;

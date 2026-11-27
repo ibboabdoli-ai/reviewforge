@@ -110,6 +110,36 @@ test('exhausted Proffera pilot never starts a model or presents a clean review',
     assert.equal(f.modelCalls.length,0);
   }finally{f.dispose();}
 });
+test('turning off the Proffera pilot blocks a paid batch even after reservation',async()=>{
+  const f=fixture(1),original=config.aiPilotMaxModelCalls;
+  try{
+    config.aiPilotMaxModelCalls=2;
+    f.deps.githubApi=async()=>({head:{sha},state:'open',draft:false});
+    const init=f.deps.initProgress;
+    f.deps.initProgress=async args=>{
+      const saved=await init(args);
+      config.aiPilotMaxModelCalls=0;
+      return saved;
+    };
+    const result=await analyzePullRequestStep({...target,repository:'ibboabdoli-ai/Proffera'},f.deps);
+    assert.equal(result.status,'partial');
+    assert.match(result.summary,/pilot disabled/);
+    assert.equal(f.modelCalls.length,0);
+  }finally{config.aiPilotMaxModelCalls=original;f.dispose();}
+});
+test('changing the Proffera pilot ceiling invalidates a saved batch plan',async()=>{
+  const f=fixture(37),original=config.aiPilotMaxModelCalls;
+  try{
+    config.aiPilotMaxModelCalls=2;
+    f.deps.githubApi=async()=>({head:{sha},state:'open',draft:false});
+    const pilot={...target,repository:'ibboabdoli-ai/Proffera'};
+    assert.equal((await analyzePullRequestStep(pilot,f.deps)).status,'progress');
+    config.aiPilotMaxModelCalls=0;
+    const stopped=await analyzePullRequestStep(pilot,f.deps);
+    assert.equal(stopped.status,'superseded');
+    assert.deepEqual(f.modelCalls.map(c=>c.batchIndex),[1]);
+  }finally{config.aiPilotMaxModelCalls=original;f.dispose();}
+});
 test('changed diff or posting policy cannot mix checkpoints or publish stale findings',async()=>{
   const f=fixture();
   try{
