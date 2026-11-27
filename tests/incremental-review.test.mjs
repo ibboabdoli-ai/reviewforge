@@ -82,6 +82,19 @@ test('one model batch is saved per invocation; next invocation resumes, never re
     assert.deepEqual(f.modelCalls.map(c=>c.batchIndex),[1,2]);
   }finally{f.dispose();}
 });
+test('each completed batch checkpoints bounded telemetry alongside its validated findings',async()=>{
+  const f=fixture(1);
+  try{
+    f.deps.reviewWithAI=async()=>({summary:'Offline check',findings:[],
+      telemetry:{model:'fixture-model',durationMs:321,
+        tokens:{inputTokens:12,outputTokens:3,totalTokens:15}}});
+    assert.equal((await analyzePullRequestStep(target,f.deps)).status,'completed');
+    const rows=JSON.parse(f.db.prepare('SELECT results_json FROM review_progress WHERE review_id=1').get().results_json);
+    assert.deepEqual(rows[0].telemetry,{model:'fixture-model',durationMs:321,
+      tokens:{inputTokens:12,outputTokens:3,totalTokens:15}});
+    assert.equal(f.modelCalls.length,0);
+  }finally{f.dispose();}
+});
 test('changed diff or posting policy cannot mix checkpoints or publish stale findings',async()=>{
   const f=fixture();
   try{

@@ -172,9 +172,21 @@ export async function analyzePullRequestStep({
     catch(error){error.nonRetryable=true;throw error;}
     const accepted=validateFindings(response.findings,batch);
     const stats=response.diagnostics;
+    const reported=response.telemetry;
+    const measured=reported?.tokens;
+    const telemetry=reported && typeof reported.model==='string' &&
+      reported.model.length<=100 && Number.isSafeInteger(reported.durationMs) &&
+      reported.durationMs>=0 && reported.durationMs<=3600000
+      ?{model:reported.model,durationMs:reported.durationMs,
+        tokens:measured && [measured.inputTokens,measured.outputTokens,measured.totalTokens].every(
+          n=>Number.isSafeInteger(n)&&n>=0) &&
+          measured.inputTokens+measured.outputTokens<=measured.totalTokens
+          ?{inputTokens:measured.inputTokens,outputTokens:measured.outputTokens,
+            totalTokens:measured.totalTokens}:null}:null;
     const item={
       summary:'Batch '+(next+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350),
       findings:accepted,
+      telemetry,
       // Integer counts help diagnose false negatives without retaining raw
       // model output or unvalidated potentially sensitive suggestions.
       diagnostics:stats&&[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings].every(

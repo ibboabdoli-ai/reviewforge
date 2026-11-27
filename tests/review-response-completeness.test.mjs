@@ -47,6 +47,21 @@ test('valid completed empty and grounded findings remain supported',async()=>{
   }
 });
 
+test('completed provider response reports measured tokens and time without pricing guesses',async()=>{
+  await mockResponse({status:'completed',output_text:JSON.stringify(clean),
+    usage:{input_tokens:120,output_tokens:30,total_tokens:150}},async()=>{
+    const result=await reviewWithAI(files);
+    assert.deepEqual(result.telemetry.tokens,{inputTokens:120,outputTokens:30,totalTokens:150});
+    assert.equal(result.telemetry.model,config.openai.model);
+    assert.ok(Number.isSafeInteger(result.telemetry.durationMs));
+    assert.equal('cost' in result.telemetry,false);
+  });
+  await mockResponse({status:'completed',output_text:JSON.stringify(clean),
+    usage:{input_tokens:-1,output_tokens:30,total_tokens:29}},async()=>{
+    assert.equal((await reviewWithAI(files)).telemetry.tokens,null);
+  });
+});
+
 test('unfinished model output is terminal before checkpoint or fallback approval',async()=>{
   const sha='a'.repeat(40);let saved=0,posts=0;
   const deps={installationToken:async()=> 'test-token',

@@ -306,6 +306,7 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
       +(Array.isArray(reviewContext.testLinks)&&reviewContext.testLinks.length
         ? '\nTEST-TO-IMPLEMENTATION RELATIONSHIPS (inferred from imports; not proof of test coverage):\n'
           +reviewContext.testLinks.map(l=>l.test+' -> '+l.implementation).join('\n') : '') : '');
+  const started=performance.now();
   const res=await fetch('https://api.openai.com/v1/responses',{
     method:'POST',headers:{Authorization:`Bearer ${config.openai.apiKey}`,'Content-Type':'application/json'},
     body:JSON.stringify({model,store:false,max_output_tokens:reasoningEffort?6000:2000,
@@ -329,8 +330,16 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
      !Array.isArray(result.findings))throw new Error('Invalid AI review result; no review verdict is available.');
   const rawFindings=result.findings;
   const findings=validateFindings(rawFindings,files);
+  const usage=data.usage;
+  // Provider counters are optional. Never infer billing from token counts.
+  const tokens=usage && [usage.input_tokens,usage.output_tokens,usage.total_tokens].every(
+    n=>Number.isSafeInteger(n)&&n>=0) &&
+    usage.input_tokens+usage.output_tokens<=usage.total_tokens
+    ?{inputTokens:usage.input_tokens,outputTokens:usage.output_tokens,totalTokens:usage.total_tokens}
+    :null;
   // Counts only; no raw model response, source code or credentials persisted.
   return {summary:String(result.summary||'Review complete.').slice(0,600),findings,
+    telemetry:{model,durationMs:Math.round(performance.now()-started),tokens},
     diagnostics:{modelSuggestions:rawFindings.length,acceptedFindings:findings.length,
       filteredFindings:Math.max(0,rawFindings.length-findings.length)}};
 }

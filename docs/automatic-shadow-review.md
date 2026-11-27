@@ -26,3 +26,13 @@ Replays of the same installation/repo/PR/HEAD reuse the existing review. Differe
 - Do not enable on production until approved after test results, budget review and confirmation that current deployed code matches this branch.
 - ReviewForge findings must be compared with CodeRabbit and Codex only at matching PR + HEAD. Silence from a reviewer or skipped review is not agreement.
 - Do not merge, deploy, change Proffera, widen billing, enable auto-approval, or post to GitHub as part of this PR.
+
+## Paired quality check after both independent reviews
+
+`node benchmarks/compare-paired-reviews.mjs reviewforge.json coderabbit.json adjudication.json`
+
+The offline comparison processor reads two independently saved snapshots. Neither snapshot nor the comparison output is imported into ReviewForge's reviewer prompt. Record the repository, PR number and full 40-character head SHA in **both** snapshots. Each needs `tool` (`reviewforge` or `coderabbit`), `status`, `findings` (unique `id`, `path`, `line`, `severity`), and independently verified `coverage` (`complete`, `eligible`, `analyzed`, `excluded`). A missing or failed review produces a non-comparable report with its status and error; it is never scored as clean. CodeRabbit coverage must be checked from its actual review and diff, not inferred from an approval.
+
+After checking the diff and source at that SHA, create `adjudication.json` with `issues`: each issue has a unique `id`, `valid` boolean, `severity`, concrete `evidence`, and arrays `reviewforgeFindingIds` and `coderabbitFindingIds`. Assign every finding exactly once. The processor rejects unmatched or reused IDs. It reports shared important issues, important issues ReviewForge missed, additional valid findings, false warnings, full-file coverage, duration, token usage, billed cost if supplied from a real invoice, and failures. These labels are evidence for a human quality decision, never merge permission.
+
+Provider input, output and total tokens plus model duration are saved with each completed ReviewForge batch in `review_progress.results_json` and shown on the authorized review detail page. Provider tokens can be absent; cost is then unknown. The comparison snapshot's optional `billedCost` must come from actual provider billing. Never calculate a charge from tokens alone or automatically retry a timed-out paid call. A confirmed ReviewForge miss should be fixed on an isolated branch with a regression test, then rechecked on a new SHA through the normal independent review path.

@@ -125,16 +125,25 @@ export async function manualReviewPage(db,user,token,query=new URLSearchParams()
 /** Deny direct review IDs unless the user still has access to its repository. */
 export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess=authorizedRepositoryGrants}={}){
   const ids=demo?[]:await visibleIds(db,user,repositoryAccess);
-  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1`).get(id,...grantParams(ids));
+  const r=demo?await db.prepare('SELECT * FROM reviews WHERE id=? AND demo_user_id IN (-1,?)').get(id,user.id):await db.prepare(`SELECT r.*,p.full_name,p.html_url,prog.total_batches,prog.completed_batches,prog.results_json FROM reviews r JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id LEFT JOIN review_progress prog ON prog.review_id=r.id JOIN installations i ON i.id=r.installation_id WHERE r.id=? AND ${inRepos(ids,'p.id')} AND i.status='active' AND p.enabled=1`).get(id,...grantParams(ids));
   if(!r)return null; const findings=JSON.parse(r.findings_json||'[]');
   const progressInfo=r.total_batches!=null?'<p class="meta-note">Batch progress: '+Number(r.completed_batches)+'/'+Number(r.total_batches)+'. Incomplete progress is not a review verdict.</p>':'';
+  let batches=[];
+  try{batches=JSON.parse(r.results_json||'[]');if(!Array.isArray(batches))batches=[];}catch{}
+  const measured=batches.map(b=>b?.telemetry).filter(t=>t && Number.isSafeInteger(t.durationMs));
+  const tokenRows=measured.filter(t=>t.tokens && Number.isSafeInteger(t.tokens.totalTokens));
+  const telemetryInfo=measured.length?'<p class="meta-note">Model calls: '+measured.length+
+    ' · recorded time: '+measured.reduce((n,t)=>n+t.durationMs,0)+' ms'+
+    (tokenRows.length?' · reported tokens: '+tokenRows.reduce((n,t)=>n+t.tokens.totalTokens,0)+
+      ' ('+tokenRows.length+'/'+measured.length+' calls)':' · provider tokens unavailable')+
+    '. Cost requires provider billing data.</p>':'';
   const emptyText=r.status==='failed'
     ?'This review failed. No reliable findings or clean verdict are available.'
     :r.status==='queued'||r.status==='running'
       ?'The review is not finished; findings will appear only after all batches complete.'
       :'No findings recorded for this review.';
   let body=header('Review details',`Pull request #${r.pr_number} · ${r.author}`,`<a class="btn btn-outline" href="/reviews">← Back to reviews</a>`);
-  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p>${progressInfo}</div></div>
+  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p>${progressInfo}${telemetryInfo}</div></div>
   <div class="section-title"><h3>Findings <span class="count-badge">${findings.length}</span></h3></div>${findings.length?findings.map(f=>`<article class="finding"><div class="finding-head"><span class="severity severity-${s(f.severity)}">${s(f.severity)}</span><span class="finding-path">${s(f.path)}:${s(f.line)}</span><span class="confidence">${Math.round(Number(f.confidence||0)*100)}% confidence</span></div><h4>${s(f.title)}</h4><p>${s(f.body)}</p></article>`).join(''):('<div class="empty-state small-empty">'+s(emptyText)+'</div>')}</div>`;
   return base({title:'Review details',body,user,active:'/reviews',demo,csrfToken:token});
 }
