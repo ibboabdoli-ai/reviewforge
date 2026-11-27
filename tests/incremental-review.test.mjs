@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
 import { analyzePullRequestStep } from '../src/incremental-review.mjs';
+import { config } from '../src/config.mjs';
+import { dailyRequestLimit } from '../src/review-policy.mjs';
 
 const sha='a'.repeat(40);
 const target={
@@ -79,6 +81,64 @@ test('one model batch is saved per invocation; next invocation resumes, never re
     assert.equal(after.status,'completed');
     assert.deepEqual(f.modelCalls.map(c=>c.batchIndex),[1,2]);
   }finally{f.dispose();}
+});
+test('each completed batch checkpoints bounded telemetry alongside its validated findings',async()=>{
+  const f=fixture(1);
+  try{
+    f.deps.reviewWithAI=async()=>({summary:'Offline check',findings:[],
+      telemetry:{model:'fixture-model',durationMs:321,
+        tokens:{inputTokens:12,outputTokens:3,totalTokens:15}}});
+    assert.equal((await analyzePullRequestStep(target,f.deps)).status,'completed');
+    const rows=JSON.parse(f.db.prepare('SELECT results_json FROM review_progress WHERE review_id=1').get().results_json);
+    assert.deepEqual(rows[0].telemetry,{model:'fixture-model',durationMs:321,
+      tokens:{inputTokens:12,outputTokens:3,totalTokens:15}});
+    assert.equal(f.modelCalls.length,0);
+  }finally{f.dispose();}
+});
+test('exhausted Proffera pilot never starts a model or presents a clean review',async()=>{
+  const f=fixture(1);
+  try{
+    f.deps.githubApi=async path=>{
+      assert.equal(path,'/repos/ibboabdoli-ai/Proffera/pulls/12');
+      return {head:{sha},state:'open',draft:false};
+    };
+    f.deps.reserveModelCalls=async()=>({allowed:false,reason:'pilot-exhausted'});
+    const result=await analyzePullRequestStep({...target,repository:'ibboabdoli-ai/Proffera'},f.deps);
+    assert.equal(result.status,'partial');
+    assert.match(result.summary,/pilot ceiling reached/);
+    assert.equal(result.posted,0);
+    assert.equal(f.modelCalls.length,0);
+  }finally{f.dispose();}
+});
+test('turning off the Proffera pilot blocks a paid batch even after reservation',async()=>{
+  const f=fixture(1),original=config.aiPilotMaxModelCalls;
+  try{
+    config.aiPilotMaxModelCalls=2;
+    f.deps.githubApi=async()=>({head:{sha},state:'open',draft:false});
+    const init=f.deps.initProgress;
+    f.deps.initProgress=async args=>{
+      const saved=await init(args);
+      config.aiPilotMaxModelCalls=0;
+      return saved;
+    };
+    const result=await analyzePullRequestStep({...target,repository:'ibboabdoli-ai/Proffera'},f.deps);
+    assert.equal(result.status,'partial');
+    assert.match(result.summary,/pilot disabled/);
+    assert.equal(f.modelCalls.length,0);
+  }finally{config.aiPilotMaxModelCalls=original;f.dispose();}
+});
+test('changing the Proffera pilot ceiling invalidates a saved batch plan',async()=>{
+  const f=fixture(37),original=config.aiPilotMaxModelCalls;
+  try{
+    config.aiPilotMaxModelCalls=2;
+    f.deps.githubApi=async()=>({head:{sha},state:'open',draft:false});
+    const pilot={...target,repository:'ibboabdoli-ai/Proffera'};
+    assert.equal((await analyzePullRequestStep(pilot,f.deps)).status,'progress');
+    config.aiPilotMaxModelCalls=0;
+    const stopped=await analyzePullRequestStep(pilot,f.deps);
+    assert.equal(stopped.status,'superseded');
+    assert.deepEqual(f.modelCalls.map(c=>c.batchIndex),[1]);
+  }finally{config.aiPilotMaxModelCalls=original;f.dispose();}
 });
 test('changed diff or posting policy cannot mix checkpoints or publish stale findings',async()=>{
   const f=fixture();
@@ -163,4 +223,71 @@ test('large diffs are split into small model payloads and resumable checkpoints'
   assert.ok(sizes.every(n=>n<=24000));
   assert.deepEqual(f.quotas,[2]);
  }finally{f.dispose();}
+});
+
+test('resumed final checkpoint treats ambiguous GitHub publication as non-retryable',async()=>{
+  for(const postMode of ['live','fallback']){
+    const f=fixture(1);
+    try{
+      let modelCalls=0,postStarts=0,postAttempts=0;
+      f.deps.reviewWithAI=async()=>{
+        modelCalls++;
+        return {summary:'Synthetic clean batch',findings:[]};
+      };
+      f.deps.onPostStart=()=>{postStarts++;};
+      f.deps.postReview=async({approval})=>{
+        postAttempts++;
+        assert.equal(approval,postMode==='fallback');
+        assert.equal(postStarts,postAttempts);
+        throw new Error('Synthetic lost publication response');
+      };
+      const publishedTarget={...target,postMode};
+      // First simulated failure leaves a complete, durable model checkpoint.
+      await assert.rejects(analyzePullRequestStep(publishedTarget,f.deps),
+        error=>error.message==='Synthetic lost publication response'&&error.nonRetryable===true);
+      assert.equal(f.db.prepare('SELECT completed_batches FROM review_progress WHERE review_id=1').get().completed_batches,1);
+      assert.equal(modelCalls,1);
+      // Directly exercise the completed-checkpoint path in this isolated
+      // fixture. The real worker must not automatically make this second call.
+      await assert.rejects(analyzePullRequestStep(publishedTarget,f.deps),
+        error=>error.message==='Synthetic lost publication response'&&error.nonRetryable===true);
+      assert.equal(modelCalls,1);
+      assert.equal(postStarts,2);
+      assert.equal(postAttempts,2);
+    }finally{f.dispose();}
+  }
+});
+test('dry run never signals a GitHub publication attempt',async()=>{
+  const f=fixture(1);
+  try{
+    f.deps.onPostStart=()=>{throw new Error('Unexpected publication start');};
+    assert.equal((await analyzePullRequestStep(target,f.deps)).status,'completed');
+    assert.equal(f.postCount(),0);
+  }finally{f.dispose();}
+});
+
+test('saved checkpoint cannot start another model batch when daily cap is disabled or invalid',async()=>{
+  const priorLimit=config.aiDailyRequestLimit;
+  try{
+    for(const raw of ['0','invalid']){
+      const f=fixture();
+      try{
+        config.aiDailyRequestLimit=2;
+        assert.equal((await analyzePullRequestStep(target,f.deps)).status,'progress');
+        config.aiDailyRequestLimit=dailyRequestLimit(raw);
+        assert.equal(config.aiDailyRequestLimit,0);
+        let starts=0;
+        f.deps.onModelStart=async()=>{starts++;};
+        const result=await analyzePullRequestStep(target,f.deps);
+        assert.equal(result.status,'partial');
+        assert.match(result.summary,/allowance disabled/);
+        assert.equal(result.posted,0);
+        assert.equal(starts,0);
+        assert.deepEqual(f.modelCalls.map(c=>c.batchIndex),[1]);
+        assert.deepEqual(f.quotas,[2]);
+        assert.equal(f.postCount(),0);
+        assert.equal(f.db.prepare('SELECT completed_batches FROM review_progress WHERE review_id=1').get().completed_batches,1);
+      }finally{f.dispose();}
+    }
+  }finally{config.aiDailyRequestLimit=priorLimit;}
 });

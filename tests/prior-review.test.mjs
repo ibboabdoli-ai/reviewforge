@@ -1,0 +1,15 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {alreadyReviewedExactHead} from '../src/coderabbit-fallback.mjs';
+const sha='a'.repeat(40), request='2026-11-26T09:00:00Z', earlier='2026-11-26T08:59:00Z', later='2026-11-26T09:01:00Z';
+const review={user:{login:'coderabbitai[bot]'},commit_id:sha,state:'APPROVED',submitted_at:earlier};
+const inline={user:{login:'coderabbitai[bot]'},original_commit_id:sha,created_at:earlier};
+test('an existing exact-head CodeRabbit approval remains a blocker after a new review request',()=>assert.equal(alreadyReviewedExactHead([review],[],sha,request),true));
+test('an existing exact-head request for changes remains a blocker',()=>assert.equal(alreadyReviewedExactHead([{...review,state:'CHANGES_REQUESTED'}],[],sha,request),true));
+test('an existing exact-head inline finding remains a blocker',()=>assert.equal(alreadyReviewedExactHead([],[inline],sha,request),true));
+test('missing timestamps cannot turn a known same-head review into permission',()=>assert.equal(alreadyReviewedExactHead([{...review,submitted_at:null}],[],sha,request),true));
+test('new same-head review blocks fallback',()=>assert.equal(alreadyReviewedExactHead([{...review,submitted_at:later}],[],sha,request),true));
+test('different immutable SHA does not block',()=>assert.equal(alreadyReviewedExactHead([{...review,commit_id:'b'.repeat(40)}],[],sha,request),false));
+test('non-CodeRabbit author does not block',()=>assert.equal(alreadyReviewedExactHead([{...review,user:{login:'other'}}],[],sha,request),false));
+test('no existing results does not block',()=>assert.equal(alreadyReviewedExactHead([],[],sha,request),false));
+test('malformed request time or unavailable evidence remains fail closed',()=>{assert.equal(alreadyReviewedExactHead([],[],sha,null),true);assert.equal(alreadyReviewedExactHead(null,[],sha,request),true);});

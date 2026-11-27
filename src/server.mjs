@@ -6,7 +6,7 @@ import { config,assertConfig,integrations,production } from './config.mjs';
 import { openConfiguredDatabase, seedDemo,createSession,getUserBySession, allowedReviews } from './db.mjs';
 import { randomToken, cookies,cookie, csrfFor, safeCompare, validOrigin, verifyGithub, sha256 } from './security.mjs';
 import { githubOAuthCode, persistUserToken, githubApi, syncInstallations, installationToken, upsertInstalledRepository } from './github.mjs';
-import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead } from './coderabbit-fallback.mjs';
+import { isCodeRabbitQuotaEvent, currentHeadReviewRequest, alreadyReviewedExactHead, matchesCurrentQuotaNotice } from './coderabbit-fallback.mjs';
 import { localDemoReview } from './reviewer.mjs';
 import { enqueueManualReview } from './manual-review.mjs';
 import { requestWorkerReview, getWorkerReviewStatus, workerErrorStatus } from './worker-review.mjs';
@@ -14,12 +14,17 @@ import { analyzePullRequestStep } from './incremental-review.mjs';
 import { startCheckout,portal,processStripeEvent,stripeFailureCategory } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, reserveProfferaPilotCalls, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository, automaticShadowReviewDecision } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
+import {claimWork,setClaimPhase,finishClaim} from './claim-fence.mjs';
+import {reviewFailureMessage} from './review-telemetry.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
-if (!process.env.DATABASE_URL) db.exec("UPDATE jobs SET status='queued' WHERE status='running';");
+// Do not reset SQLite running jobs at startup: another process may still own
+// the claim, and a stopped process may have made an uncheckpointed paid call.
+// Expired claims with durable identities fail closed during reconciliation.
+// Legacy interrupted claims without a token remain quarantined; no paid replay.
 // Explicit URL-relative static imports keep public assets bundled with Vercel Functions.
 const staticFiles = {
   '/styles.css':['text/css; charset=utf-8', readFileSync(new URL('../public/styles.css', import.meta.url))],
@@ -81,12 +86,18 @@ async function webhookGithub(req,res){
   if(exists){send(res,200,'Duplicate delivery','text/plain');return;}
   const payload=JSON.parse(raw),event=req.headers['x-github-event'];
   let queued=false;
-  if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)
-     && !repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories)) {
+  const autoPolicy=automaticShadowReviewDecision({
+    event,action:payload.action,repository:payload.repository?.full_name,
+    draft:payload.pull_request?.draft
+  },{
+    allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
+    automatic:config.aiAutoShadowRepositories,fallbackOnly:config.aiFallbackOnlyRepositories
+  });
+  if(autoPolicy.queue) {
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
-    if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
+    if(installed && integrations().ai){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
       await upsertInstalledRepository(db,inst.id,repo);
       const rr=await db.prepare('SELECT * FROM repositories WHERE id=? AND installation_id=? AND enabled=1').get(repo.id,inst.id);
@@ -97,7 +108,10 @@ async function webhookGithub(req,res){
       if(rr){
         try{
           const row=await db.reserveReview({installationId:inst.id,repositoryId:repo.id,prNumber:pr.number,
-            title:pr.title?.slice(0,250)||'',author:pr.user?.login||'',headSha:pr.head?.sha||'',unlimited:shadowUnlimited});
+            title:pr.title?.slice(0,250)||'',author:pr.user?.login||'',headSha:pr.head?.sha||'',
+             // Reuse the durable no-post marker. It also permits Draft and
+             // overrides a later change of global GitHub posting settings.
+             manual:autoPolicy.automatic,unlimited:shadowUnlimited});
           queued=row.created;
         }catch(error){if(error.status!==429)throw error;}
       }
@@ -132,7 +146,8 @@ async function webhookGithub(req,res){
           throw new Error('CodeRabbit evidence exceeded pagination bound; fallback refused');
         }
         const comments=await allPages('issues/'+prNo+'/comments');
-        const request=currentHeadReviewRequest(comments,head,payload.comment);
+        const request=matchesCurrentQuotaNotice(comments,payload.comment)
+          ?currentHeadReviewRequest(comments,head,payload.comment):null;
         if(request){
           const [reviews,inline]=await Promise.all([
             allPages('pulls/'+prNo+'/reviews'),allPages('pulls/'+prNo+'/comments')
@@ -185,27 +200,20 @@ export async function processQueue(reviewId=null){
   if(!integrations().github||!integrations().ai)return 'disabled';
   if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
     throw new Error('Invalid review ID');
-  const job=db.claimJob
-    ? await db.claimJob(reviewId)
-    : await db.prepare(`SELECT j.id job_id,j.attempts,r.*,p.full_name FROM jobs j JOIN reviews r ON r.id=j.review_id
-      JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id JOIN installations i ON i.id=r.installation_id
-      WHERE j.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
-        AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1`).get(Date.now(),reviewId,reviewId);
+  const job=await db.claimJob(reviewId);
   if(!job)return 'idle';busy=true;
-  if(!db.claimJob) await db.prepare("UPDATE jobs SET status='running', attempts=attempts+1 WHERE id=?").run(job.job_id);
-  await db.prepare("UPDATE reviews SET status='running' WHERE id=?").run(job.id);
+  const allPhases=['ready','model_started','model_saved','post_started'];
+  const guarded=(phases,work)=>claimWork(db,job,phases,work);
+  const finish=(phases,state,sql,args)=>finishClaim(db,job,phases,state,sql,args);
   let modelCallsMayHaveStarted=false;
+  let githubPostMayHaveStarted=false;
   try {
     if(!repositoryAllowed(job.full_name,config.aiAllowedRepositories)){
-      await db.prepare('UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?')
-        .run('skipped','Repository not approved for AI review.',job.id);
-      await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
+      await finish(['ready'],{status:'completed'},
+        'UPDATE reviews SET status=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?',
+        ['skipped','Repository not approved for AI review.']);
       return 'skipped';
     }
-    const shadowUnlimited=isUnlimitedShadowRepository(job.full_name,{
-      allowed:config.aiAllowedRepositories,shadow:config.aiShadowRepositories,
-      unlimited:config.aiUnlimitedRepositories
-    });
     const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
     // Durable no-post marker wins over any future global or fallback approval setting.
     const result=await analyzePullRequestStep({
@@ -220,61 +228,79 @@ export async function processQueue(reviewId=null){
       }),
       allowDraft:!!manual
     },{
-      loadProgress:async id=>db.prepare('SELECT * FROM review_progress WHERE review_id=?').get(id),
-      initProgress:async({reviewId,planHash,totalBatches})=>{
-        const saved=await db.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches,results_json) VALUES(?,?,?,0,'[]') ON CONFLICT(review_id) DO NOTHING")
+      loadProgress:async id=>guarded(['ready'],tx=>tx.prepare('SELECT * FROM review_progress WHERE review_id=?').get(id)),
+      initProgress:async({reviewId,planHash,totalBatches})=>guarded(['ready'],async tx=>{
+        const saved=await tx.prepare("INSERT INTO review_progress(review_id,plan_hash,total_batches,completed_batches,results_json) VALUES(?,?,?,0,'[]') ON CONFLICT(review_id) DO NOTHING")
           .run(reviewId,planHash,totalBatches);
         return saved.changes===1;
-      },
-      saveProgress:async({reviewId,planHash,previousBatches,completedBatches,results})=>{
-        const saved=await db.prepare('UPDATE review_progress SET completed_batches=?,results_json=?,updated_at=CURRENT_TIMESTAMP WHERE review_id=? AND plan_hash=? AND completed_batches=?')
+      }),
+      saveProgress:async({reviewId,planHash,previousBatches,completedBatches,results})=>guarded(['model_started'],async tx=>{
+        const saved=await tx.prepare('UPDATE review_progress SET completed_batches=?,results_json=?,updated_at=CURRENT_TIMESTAMP WHERE review_id=? AND plan_hash=? AND completed_batches=?')
           .run(completedBatches,JSON.stringify(results),reviewId,planHash,previousBatches);
-        return saved.changes===1;
+        if(saved.changes!==1)return false;
+        await setClaimPhase(tx,job,'model_saved');
+        return true;
+      }),
+      onModelStart:async()=>{
+        modelCallsMayHaveStarted=true;
+        await guarded(['ready'],tx=>setClaimPhase(tx,job,'model_started'));
       },
-      onModelStart:()=>{modelCallsMayHaveStarted=true;},
+      onPostStart:async()=>{
+        githubPostMayHaveStarted=true;
+        await guarded(['ready','model_saved'],tx=>setClaimPhase(tx,job,'post_started'));
+      },
       reserveModelCalls:async count=>{
-        // Explicitly approved shadow repositories bypass only daily attempts.
-        // Each PR remains deduplicated by SHA and limited to four batches.
-        if(shadowUnlimited){modelCallsMayHaveStarted=true;return {allowed:true};}
+        // Count exemptions never bypass the atomic paid-model request budget.
+        // Every model batch must reserve quota before network use.
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
-        const allowed=await reserveDailyReview(db,config.aiDailyRequestLimit,Date.now(),count);
-        if(allowed)modelCallsMayHaveStarted=true;
-        return allowed?{allowed:true}:{allowed:false,reason:'daily-used'};
+        let allowed;
+        try{
+          allowed=await guarded(['ready'],tx=>job.full_name.toLowerCase()==='ibboabdoli-ai/proffera'
+            ?reserveProfferaPilotCalls(tx,config.aiDailyRequestLimit,config.aiPilotMaxModelCalls,Date.now(),count)
+            :reserveDailyReview(tx,config.aiDailyRequestLimit,Date.now(),count));
+        }catch(error){
+          if(error?.pilotBudgetExhausted)return {allowed:false,reason:'pilot-exhausted'};
+          modelCallsMayHaveStarted=true;throw error;
+        }
+        if(allowed===true||allowed?.allowed===true)modelCallsMayHaveStarted=true;
+        return allowed===true?{allowed:true}:allowed;
       }
     });
     if(result.status==='deferred'){
-      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=?,attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END WHERE id=?")
-        .run(nextUtcDay(),job.job_id);
-      await db.prepare('UPDATE reviews SET status=?,summary=? WHERE id=?')
-        .run('queued',result.summary,job.id);
+      await finish(['ready'],{status:'queued',nextAttemptAt:nextUtcDay(),decrement:true},
+        'UPDATE reviews SET status=?,summary=? WHERE id=?',['queued',result.summary]);
       return 'deferred';
     }
     if(result.status==='progress'){
-      // Exactly one saved model batch is resumable on the next worker invocation.
-      await db.prepare("UPDATE jobs SET status='queued',next_attempt_at=0 WHERE id=? AND status='running'").run(job.job_id);
-      await db.prepare("UPDATE reviews SET status='queued',summary=?,error=NULL WHERE id=?")
-        .run(result.summary,job.id);
+      // Only an atomically saved model batch may release a continuation.
+      await finish(['model_saved'],{status:'queued'},
+        "UPDATE reviews SET status='queued',summary=?,error=NULL WHERE id=?",[result.summary]);
       return 'progress';
     }
-    await db.prepare("UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?")
-      .run(result.status,result.summary,JSON.stringify(result.findings),result.posted,job.id);
-    await db.prepare("UPDATE jobs SET status='completed' WHERE id=?").run(job.job_id);
+    await finish(['ready','model_saved','post_started'],{status:'completed'},
+      "UPDATE reviews SET status=?,summary=?,findings_json=?,posted=?,error=NULL,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+      [result.status,result.summary,JSON.stringify(result.findings),result.posted]);
     return 'completed';
   }catch(err){
-    const retries=job.attempts + (db.claimJob?0:1);
-    const next=retryState(Number(retries),Date.now(),modelCallsMayHaveStarted||err?.nonRetryable===true);
-    await db.prepare('UPDATE jobs SET status=?,next_attempt_at=? WHERE id=?').run(next.failed?'failed':'queued',next.nextAttemptAt,job.job_id);
-    const errorText=String(err.message).slice(0,260);
-    if(next.failed){
-      const summary=modelCallsMayHaveStarted
-        ? 'AI review incomplete; automatic replay disabled to prevent duplicate model costs.'
-        : 'Review failed after the maximum safe attempts.';
-      await db.prepare("UPDATE reviews SET status='failed',error=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?")
-        .run(errorText,summary,job.id);
-    } else {
-      await db.prepare("UPDATE reviews SET status='queued',error=?,summary=? WHERE id=?")
-        .run(errorText,'Review failed before model execution; retry is scheduled.',job.id);
-    }
+    if(err?.claimLost===true)return 'stale';
+    const next=retryState(Number(job.attempts),Date.now(),modelCallsMayHaveStarted||githubPostMayHaveStarted||err?.nonRetryable===true);
+    const errorText=reviewFailureMessage(err);
+    try{
+      if(next.failed){
+        const summary=githubPostMayHaveStarted
+          ? 'GitHub review publication may have started; automatic replay disabled to prevent duplicate posting.'
+          : modelCallsMayHaveStarted
+          ? 'AI review incomplete; automatic replay disabled to prevent duplicate model costs.'
+          : 'Review failed after the maximum safe attempts.';
+        await finish(allPhases,{status:'failed',nextAttemptAt:next.nextAttemptAt},
+          "UPDATE reviews SET status='failed',error=?,summary=?,finished_at=CURRENT_TIMESTAMP WHERE id=?",
+          [errorText,summary]);
+      }else{
+        await finish(['ready'],{status:'queued',nextAttemptAt:next.nextAttemptAt},
+          "UPDATE reviews SET status='queued',error=?,summary=? WHERE id=?",
+          [errorText,'Review failed before model execution; retry is scheduled.']);
+      }
+    }catch(writeError){if(writeError?.claimLost===true)return 'stale';throw writeError;}
     console.error('[worker] review',job.id,'failed:',errorText);
     return next.failed?'failed':'retry';
   }finally{busy=false;}

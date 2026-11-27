@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomToken, sha256 } from './security.mjs';
+import {activeClaim} from './claim-fence.mjs';
 const subscriptionQueues=new Map();
 
 function migrateReviewIdentity(db){
@@ -140,6 +141,41 @@ export function openDatabase(file) {
   if(!subscriptionColumns.has('checkout_session_id'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_session_id TEXT');
   if(!subscriptionColumns.has('checkout_previous_status'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_previous_status TEXT');
   migrateReviewIdentity(db);
+  // Serialize additive SQLite schema migration across local worker processes.
+  db.exec('BEGIN IMMEDIATE');
+  try{
+    const jobColumns=new Set(db.prepare('PRAGMA table_info(jobs)').all().map(row=>row.name));
+    if(!jobColumns.has('claim_token'))db.exec('ALTER TABLE jobs ADD COLUMN claim_token TEXT');
+    if(!jobColumns.has('claim_phase'))db.exec('ALTER TABLE jobs ADD COLUMN claim_phase TEXT');
+    db.exec('COMMIT');
+  }catch(error){db.exec('ROLLBACK');throw error;}
+  db.withClaim=async(job,work)=>{
+    const locked=new DatabaseSync(file);
+    let started=false;
+    try{
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+      locked.exec('BEGIN IMMEDIATE');started=true;
+      const row=locked.prepare(`SELECT j.claim_token,j.claim_phase,j.next_attempt_at,
+        j.status AS job_status,r.status AS review_status FROM jobs j
+        JOIN reviews r ON r.id=j.review_id WHERE j.id=? AND j.review_id=?`).get(job.job_id,job.id);
+      if(!activeClaim(row,job)){locked.exec('ROLLBACK');started=false;return null;}
+      const value=await work(locked,row.claim_phase);
+      locked.exec('COMMIT');started=false;return {value};
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked.close();}
+  };
+  db.reconcileExpiredJobs=()=>{
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      // Legacy running rows without a claim token remain quarantined.
+      const expired=db.prepare("UPDATE jobs SET status='failed',claim_token=NULL WHERE status='running' AND claim_token IS NOT NULL AND next_attempt_at<=? RETURNING review_id").all(Date.now());
+      for(const row of expired){
+        const marked=db.prepare("UPDATE reviews SET status='failed',finished_at=CURRENT_TIMESTAMP,summary='Review worker exceeded its execution lease. No clean review verdict was produced.',error='Worker timed out; automatic paid replay is prohibited.' WHERE id=? AND status='running'").run(row.review_id);
+        if(marked.changes!==1)throw new Error('Expired worker review status mismatch');
+      }
+      db.exec('COMMIT');return expired.length;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
   db.withSubscriptionLock=async(userId,work)=>{
     const previous=subscriptionQueues.get(file)||Promise.resolve();
     let release;
@@ -164,6 +200,33 @@ export function openDatabase(file) {
     }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
     finally{locked?.close();release();if(subscriptionQueues.get(file)===current)subscriptionQueues.delete(file);}
   };
+  // Claim a SQLite job atomically before returning it to an async worker.
+  // A separate SELECT and unconditional UPDATE let two workers claim one job.
+  db.claimJob=(reviewId=null)=>{
+    if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
+      throw new Error('Invalid review ID');
+    db.reconcileExpiredJobs();
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      const now=Date.now();
+      const winner=db.prepare(`UPDATE jobs SET status='running', attempts=attempts+1, next_attempt_at=?, claim_token=?, claim_phase='ready'
+        WHERE id=(SELECT j.id FROM jobs j JOIN reviews r ON r.id=j.review_id
+          JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
+          JOIN installations i ON i.id=r.installation_id
+          WHERE j.status='queued' AND r.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
+            AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1)
+        AND status='queued' RETURNING id AS job_id,review_id,attempts,claim_token`).get(now+5*60*1000,randomToken(),now,reviewId,reviewId);
+      if(winner){
+        const marked=db.prepare("UPDATE reviews SET status='running' WHERE id=? AND status='queued'").run(winner.review_id);
+        if(marked.changes!==1)throw new Error('Claimed review is not queued');
+      }
+      const review=winner?db.prepare(`SELECT r.*,p.full_name FROM reviews r
+        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=?`).get(winner.review_id):null;
+      if(winner&&!review)throw new Error('Claimed review is not accessible');
+      db.exec('COMMIT');
+      return winner?{...review,job_id:winner.job_id,attempts:winner.attempts,claim_token:winner.claim_token}:null;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
   // BEGIN IMMEDIATE serializes the count and inserts across SQLite connections.
   // Retry without blocking the event loop while another writer holds the lock.
   db.reserveReview=async({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false})=>{
@@ -184,7 +247,20 @@ export function openDatabase(file) {
       if(!repo)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
       const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=? AND r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(installationId,repositoryId,prNumber,headSha);
       let result;
-      if(existing)result={id:existing.id,created:false,manual:!!existing.manual_id};
+      if(existing){
+        let isManual=!!existing.manual_id;
+        // An auto-shadow opt-in may arrive after a regular review was queued
+        // for this exact SHA. Upgrade only a still-queued job atomically; a
+        // running/completed job cannot safely be relabeled retroactively.
+        if(manual && !isManual){
+          const pending=locked.prepare("SELECT id FROM jobs WHERE review_id=? AND status='queued'").get(existing.id);
+          if(pending){
+            locked.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(existing.id);
+            isManual=true;
+          }
+        }
+        result={id:existing.id,created:false,manual:isManual};
+      }
       else{
         const status=locked.prepare('SELECT status FROM subscriptions WHERE user_id=?').get(repo.owner_user_id)?.status;
         const limit=status==='active'||status==='trialing'?500:10;

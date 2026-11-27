@@ -1,6 +1,7 @@
 import { config } from './config.mjs';
 import { reviewSkillInstructions } from './review-skills.mjs';
 import { BEHAVIOR_TEST_REVIEW_METHOD } from './review-method.mjs';
+import { providerUsage } from './review-telemetry.mjs';
 
 export function addedLines(patch='') {
   const lines=new Set(); let nextLine=0,seenHunk=false;
@@ -295,7 +296,7 @@ const schema={type:'object',additionalProperties:false,required:['summary','find
  * Reject unfinished provider responses and malformed result envelopes; callers
  * must not publish a verdict or replay paid work after such failures.
  */
-export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null}={}) {
+export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null,profferaPilot=false}={}) {
   if(!config.openai.apiKey)throw new Error('OPENAI_API_KEY is not configured; AI review was not run.');
   if(!files.length)return {summary:'No reviewable text changes found.',findings:[]};
   const input=files.map(f=>`FILE: ${f.filename}\nDIFF:\n${f.patch}`).join('\n\n')
@@ -306,31 +307,49 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
       +(Array.isArray(reviewContext.testLinks)&&reviewContext.testLinks.length
         ? '\nTEST-TO-IMPLEMENTATION RELATIONSHIPS (inferred from imports; not proof of test coverage):\n'
           +reviewContext.testLinks.map(l=>l.test+' -> '+l.implementation).join('\n') : '') : '');
-  const res=await fetch('https://api.openai.com/v1/responses',{
+  const instructions=reviewSkillInstructions(files)
+    +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:'');
+  // Current direct-API list prices and these byte/output bounds keep ten
+  // reserved pilot calls well below $10. A new model or larger request fails
+  // before fetch; a changed pricing policy still needs operator revalidation.
+  if(profferaPilot && (!['gpt-6-luna','gpt-6.1-sol'].includes(model) ||
+     Buffer.byteLength(input,'utf8')+Buffer.byteLength(instructions,'utf8')+
+       Buffer.byteLength(JSON.stringify(schema),'utf8')>100000))
+    throw new Error('Proffera pilot model or input exceeds the approved cost envelope.');
+  const started=performance.now();
+  let data,result;
+  try{
+    const res=await fetch('https://api.openai.com/v1/responses',{
     method:'POST',headers:{Authorization:`Bearer ${config.openai.apiKey}`,'Content-Type':'application/json'},
     body:JSON.stringify({model,store:false,max_output_tokens:reasoningEffort?6000:2000,
       ...(reasoningEffort?{reasoning:{effort:reasoningEffort}}:{}),
-      instructions:reviewSkillInstructions(files)
-        +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:''),
+      instructions,
       input, text:{format:{type:'json_schema',name:'review_result',strict:true,schema}}}),
     signal:AbortSignal.timeout(85000)
   });
-  const data=await res.json();
-  if(!res.ok)throw new Error(`AI request failed (${res.status}): ${(data.error?.message||'unknown').slice(0,150)}`);
+    data=await res.json();
+    if(!res.ok)throw new Error(`AI request failed (${res.status}): ${(data.error?.message||'unknown').slice(0,150)}`);
   // HTTP success and parseable JSON do not establish a finished review.
   // Incomplete/failed provider output must never reach a clean verdict or
   // fallback approval. The staged caller marks this failure non-retryable.
-  if(data?.status!=='completed' || data.error || data.incomplete_details)
-    throw new Error('AI response did not complete; no review verdict is available.');
-  const raw=data.output_text ?? (data.output?.flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('') || '');
-  if(!raw)throw new Error('AI response contained no review text');
-  const result=JSON.parse(raw);
-  if(!result || Array.isArray(result) || typeof result.summary!=='string' ||
-     !Array.isArray(result.findings))throw new Error('Invalid AI review result; no review verdict is available.');
+    if(data?.status!=='completed' || data.error || data.incomplete_details)
+      throw new Error('AI response did not complete; no review verdict is available.');
+    const raw=data.output_text ?? (data.output?.flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('') || '');
+    if(!raw)throw new Error('AI response contained no review text');
+    result=JSON.parse(raw);
+    if(!result || Array.isArray(result) || typeof result.summary!=='string' ||
+       !Array.isArray(result.findings))throw new Error('Invalid AI review result; no review verdict is available.');
+  }catch(error){
+    error.telemetry={model,durationMs:Math.round(performance.now()-started),
+      tokens:providerUsage(data?.usage)};
+    throw error;
+  }
   const rawFindings=result.findings;
   const findings=validateFindings(rawFindings,files);
+  const tokens=providerUsage(data.usage);
   // Counts only; no raw model response, source code or credentials persisted.
   return {summary:String(result.summary||'Review complete.').slice(0,600),findings,
+    telemetry:{model,durationMs:Math.round(performance.now()-started),tokens},
     diagnostics:{modelSuggestions:rawFindings.length,acceptedFindings:findings.length,
       filteredFindings:Math.max(0,rawFindings.length-findings.length)}};
 }

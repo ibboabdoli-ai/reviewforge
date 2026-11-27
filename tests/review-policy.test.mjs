@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
-import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
+import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,automaticShadowReviewDecision,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,pilotCallLimit,reserveProfferaPilotCalls,PROFFERA_PILOT_KEY,nextUtcDay } from '../src/review-policy.mjs';
 import { sqlForPostgres } from '../src/db-postgres.mjs';
 
 test('repository allowlist defaults to deny all, matches only exact repos',()=>{
@@ -41,8 +41,12 @@ test('PostgreSQL receives a compatible parameterized atomic reservation',()=>{
 test('worker gate and cron auth are explicitly implemented',async()=>{
   const { readFileSync }=await import('node:fs');
   const server=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
-  assert.match(server,/repositoryAllowed\(repo\.full_name,config\.aiAllowedRepositories\)/);
-  assert.match(server,/reserveDailyReview\(db,config\.aiDailyRequestLimit,Date\.now\(\),count\)/);
+  // The allowlist check moved into the tested pure webhook decision helper.
+  assert.match(server,/automaticShadowReviewDecision\(\{/);
+  const policy=readFileSync(new URL('../src/review-policy.mjs',import.meta.url),'utf8');
+  assert.match(policy,/repositoryAllowed\(repository,allowed\)/);
+  assert.match(server,/guarded\(\['ready'\],tx=>job\.full_name\.toLowerCase\(\)==='ibboabdoli-ai\/proffera'/);
+  assert.match(server,/reserveProfferaPilotCalls\(tx,config\.aiDailyRequestLimit,config\.aiPilotMaxModelCalls,Date\.now\(\),count\)/);
   assert.match(server,/req\.method==='GET'\?process\.env\.CRON_SECRET:process\.env\.WORKER_SECRET/);
 });
 
@@ -90,14 +94,68 @@ test('server enforces per-repo monthly and daily limits',async()=>{
  const {readFileSync}=await import('node:fs');
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
  assert.match(source,/db\.reserveReview\(\{installationId:inst\.id,repositoryId:repo\.id,prNumber:pr\.number,/);
- assert.match(source,/if\(shadowUnlimited\)\{modelCallsMayHaveStarted=true;return \{allowed:true\};\}/);
+ assert.doesNotMatch(source,/if\(shadowUnlimited\)\{modelCallsMayHaveStarted=true;return \{allowed:true\};\}/);
+ assert.match(source,/reserveProfferaPilotCalls\(tx,config\.aiDailyRequestLimit,config\.aiPilotMaxModelCalls,Date\.now\(\),count\)/);
  assert.match(source,/postMode:manual\?'dry-run':effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
+});
+
+test('Proffera pilot ceiling is one-time, atomic and fails closed',async()=>{
+  for(const invalid of ['-1','11','oops','1.5'])assert.equal(pilotCallLimit(invalid),0);
+  assert.equal(pilotCallLimit('2'),2);
+  const dir=mkdtempSync(join(tmpdir(),'rf-pilot-'));
+  const db=openDatabase(join(dir,'test.sqlite'));
+  const reserve=async at=>{
+    db.exec('BEGIN IMMEDIATE');
+    try{const result=await reserveProfferaPilotCalls(db,2,2,at,1);
+      db.exec('COMMIT');return result;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
+  try{
+    const first=Date.parse('2026-11-27T10:00:00Z');
+    assert.deepEqual(await reserve(first),{allowed:true});
+    assert.deepEqual(await reserve(first+86400000),{allowed:true});
+    await assert.rejects(reserve(first+2*86400000),e=>e.pilotBudgetExhausted===true);
+    assert.equal(db.prepare('SELECT used FROM ai_daily_limits WHERE day=?').get(PROFFERA_PILOT_KEY).used,2);
+    assert.equal(db.prepare('SELECT used FROM ai_daily_limits WHERE day=?').get('2026-11-29'),undefined);
+    assert.deepEqual(await reserveProfferaPilotCalls(db,2,0,first,1),
+      {allowed:false,reason:'pilot-exhausted'});
+  }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });
 
 test('fallback publishing is disabled by default even for allowed shadow repositories',()=>{
  const shadow=allowedRepositories('ibboabdoli-ai/proffera');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,allowed:shadow}),'dry-run');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{approval:shadow,allowed:shadow}),'dry-run');
- assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'fallback');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/proffera','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'dry-run');
  assert.equal(effectiveReviewPostMode('ibboabdoli-ai/other','dry-run',shadow,{fallbackOnly:shadow,approval:shadow,allowed:shadow}),'dry-run');
+});
+
+test('Proffera-only count exception cannot be widened by misconfigured allowlists',()=>{
+ const args={allowed:allowedRepositories('ibboabdoli-ai/proffera,ibboabdoli-ai/other,other/proffera'),
+   shadow:allowedRepositories('ibboabdoli-ai/proffera,ibboabdoli-ai/other,other/proffera'),
+   unlimited:allowedRepositories('ibboabdoli-ai/proffera,ibboabdoli-ai/other,other/proffera')};
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/Proffera',args),true);
+ assert.equal(isUnlimitedShadowRepository('ibboabdoli-ai/other',args),false);
+ assert.equal(isUnlimitedShadowRepository('other/proffera',args),false);
+});
+
+test('fallback-managed repositories fail closed when the shadow allowlist drifts',()=>{
+ const repo='ibboabdoli-ai/proffera';
+ const list=[repo];
+ assert.equal(effectiveReviewPostMode(repo,'live',[],{fallbackOnly:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode(repo,'live',[],{approval:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode(repo,'live',[],{fallbackOnly:list,approval:list,allowed:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode(repo.toUpperCase(),'live',[],{approval:list}),'dry-run');
+ assert.equal(effectiveReviewPostMode('ibboabdoli-ai/other','live',[],{fallbackOnly:list,approval:list}),'live');
+});
+
+test('legacy ordinary jobs cannot gain fallback publication from config alone',()=>{
+ const repo='ibboabdoli-ai/proffera';
+ const list=[repo];
+ const admitted=automaticShadowReviewDecision({event:'pull_request',action:'opened',repository:repo,draft:false},{allowed:list,shadow:list,automatic:[],fallbackOnly:[]});
+ assert.deepEqual(admitted,{queue:true,automatic:false});
+ for(const mode of ['live','dry-run']){
+   assert.equal(effectiveReviewPostMode(repo,mode,list,{fallbackOnly:list,approval:list,allowed:list}),'dry-run');
+ }
+ assert.equal(effectiveReviewPostMode('owner/unrelated','live',list,{fallbackOnly:list,approval:list,allowed:list}),'live');
 });

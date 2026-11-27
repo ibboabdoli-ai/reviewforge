@@ -94,6 +94,9 @@ export async function analyzePullRequestStep({
     :null;
   const planHash=createHash('sha256').update(JSON.stringify({
     headSha,postMode,allowDraft,batches,coverage,reviewContexts,
+    profferaPilot:repository.toLowerCase()==='ibboabdoli-ai/proffera',
+    pilotLimit:repository.toLowerCase()==='ibboabdoli-ai/proffera'
+      ?config.aiPilotMaxModelCalls:null,
     modelPolicy:{
       auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
       defaultModel:config.openai.model,
@@ -123,8 +126,11 @@ export async function analyzePullRequestStep({
       const reservation=await deps.reserveModelCalls(batches.length);
       if(reservation!==true && reservation?.allowed!==true){
         const insufficient=reservation?.reason==='requires-higher-cap';
-        return {status:insufficient?'partial':'deferred',posted:0,findings:[],coverage,
-          summary:insufficient
+        const pilotStopped=reservation?.reason==='pilot-exhausted';
+        return {status:insufficient||pilotStopped?'partial':'deferred',posted:0,findings:[],coverage,
+          summary:pilotStopped
+            ?'Proffera paid shadow pilot ceiling reached; no model calls made. Review incomplete.'
+            :insufficient
             ? 'The review needs '+batches.length+' model batches, exceeding the daily quota; no calls made.'
             : 'AI daily allowance exhausted; no calls made. Review deferred until the next UTC day.'};
       }
@@ -155,20 +161,46 @@ export async function analyzePullRequestStep({
       status:'superseded',posted:0,findings:[],coverage,
       summary:'PR changed during checkpoint operations; no model calls made.'
     };
+    // A saved reservation must not bypass an explicit zero/invalid daily cap.
+    // This is a stop gate, not a second charge against the original reservation.
+    if(config.aiDailyRequestLimit===0) return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:'AI daily allowance disabled; no further model calls made. Review incomplete.'
+    };
+    // A saved batch reservation must never bypass a later emergency pilot
+    // pause. This gate is checked again immediately before every model call.
+    if(repository.toLowerCase()==='ibboabdoli-ai/proffera' &&
+       config.aiPilotMaxModelCalls===0)return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:'Proffera paid shadow pilot disabled; no further model calls made. Review incomplete.'
+    };
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
+      profferaPilot:repository.toLowerCase()==='ibboabdoli-ai/proffera',
       ...(reviewContexts?{reviewContext:reviewContexts[next]}:{}) ,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})};
-    deps.onModelStart?.();
+    await deps.onModelStart?.();
     let response;
     try{response=await (deps.reviewWithAI || reviewWithAI)(batch,options);}
     catch(error){error.nonRetryable=true;throw error;}
     const accepted=validateFindings(response.findings,batch);
     const stats=response.diagnostics;
+    const reported=response.telemetry;
+    const measured=reported?.tokens;
+    const telemetry=reported && typeof reported.model==='string' &&
+      reported.model.length<=100 && Number.isSafeInteger(reported.durationMs) &&
+      reported.durationMs>=0 && reported.durationMs<=3600000
+      ?{model:reported.model,durationMs:reported.durationMs,
+        tokens:measured && [measured.inputTokens,measured.outputTokens,measured.totalTokens].every(
+          n=>Number.isSafeInteger(n)&&n>=0) &&
+          measured.inputTokens+measured.outputTokens<=measured.totalTokens
+          ?{inputTokens:measured.inputTokens,outputTokens:measured.outputTokens,
+            totalTokens:measured.totalTokens}:null}:null;
     const item={
       summary:'Batch '+(next+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350),
       findings:accepted,
+      telemetry,
       // Integer counts help diagnose false negatives without retaining raw
       // model output or unvalidated potentially sensitive suggestions.
       diagnostics:stats&&[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings].every(
@@ -222,9 +254,18 @@ export async function analyzePullRequestStep({
     status:'completed',summary:'[Preview only — not posted to GitHub] '+summary,
     findings,posted:0,coverage
   };
-  const result=await (deps.postReview || postReview)({
-    repoFullName:repository,prNumber:number,headSha,token,...review,summary,
-    approval:postMode==='fallback' && findings.length===0
-  });
+  // A lost response may mean GitHub accepted the write. Even when every
+  // model batch was saved by an earlier invocation, never retry an ambiguous
+  // publication as if this were a harmless pre-model failure.
+  await deps.onPostStart?.();
+  let result;
+  try {
+    result=await (deps.postReview || postReview)({
+      repoFullName:repository,prNumber:number,headSha,token,...review,summary,
+      approval:postMode==='fallback' && findings.length===0
+    });
+  } catch(error) {
+    error.nonRetryable=true;throw error;
+  }
   return {status:'completed',summary,findings,posted:result==='none'?0:1,coverage};
 }
