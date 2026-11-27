@@ -137,13 +137,14 @@ export async function reviewDetail(db,user,token,id,{demo=false,repositoryAccess
     (tokenRows.length?' · reported tokens: '+tokenRows.reduce((n,t)=>n+t.tokens.totalTokens,0)+
       ' ('+tokenRows.length+'/'+measured.length+' calls)':' · provider tokens unavailable')+
     '. Cost requires provider billing data.</p>':'';
+  const errorInfo=r.error?'<p class="meta-note">Error: '+s(r.error)+'</p>':'';
   const emptyText=r.status==='failed'
     ?'This review failed. No reliable findings or clean verdict are available.'
     :r.status==='queued'||r.status==='running'
       ?'The review is not finished; findings will appear only after all batches complete.'
       :'No findings recorded for this review.';
   let body=header('Review details',`Pull request #${r.pr_number} · ${r.author}`,`<a class="btn btn-outline" href="/reviews">← Back to reviews</a>`);
-  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p>${progressInfo}${telemetryInfo}</div></div>
+  body+=`<div class="panel review-detail-panel"><div class="panel-header"><div><h2>${s(r.pr_title)}</h2><p>${s(r.full_name||'demo / sample-repository')} · Commit ${s(r.head_sha.slice(0,10))}</p></div>${badge(r.status)}</div><div class="review-summary"><div class="summary-icon">✧</div><div><h3>Review summary</h3><p>${s(r.summary||r.error||'Queued for processing...')}</p>${progressInfo}${telemetryInfo}${errorInfo}</div></div>
   <div class="section-title"><h3>Findings <span class="count-badge">${findings.length}</span></h3></div>${findings.length?findings.map(f=>`<article class="finding"><div class="finding-head"><span class="severity severity-${s(f.severity)}">${s(f.severity)}</span><span class="finding-path">${s(f.path)}:${s(f.line)}</span><span class="confidence">${Math.round(Number(f.confidence||0)*100)}% confidence</span></div><h4>${s(f.title)}</h4><p>${s(f.body)}</p></article>`).join(''):('<div class="empty-state small-empty">'+s(emptyText)+'</div>')}</div>`;
   return base({title:'Review details',body,user,active:'/reviews',demo,csrfToken:token});
 }

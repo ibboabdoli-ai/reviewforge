@@ -17,6 +17,7 @@ import { createLimiter } from './rate-limit.mjs';
 import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository, automaticShadowReviewDecision } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 import {claimWork,setClaimPhase,finishClaim} from './claim-fence.mjs';
+import {reviewFailureMessage} from './review-telemetry.mjs';
 
 assertConfig();
 const db=await openConfiguredDatabase(config);if(config.demoMode && config.nodeEnv!=='production')await seedDemo(db);
@@ -278,7 +279,7 @@ export async function processQueue(reviewId=null){
   }catch(err){
     if(err?.claimLost===true)return 'stale';
     const next=retryState(Number(job.attempts),Date.now(),modelCallsMayHaveStarted||githubPostMayHaveStarted||err?.nonRetryable===true);
-    const errorText=String(err.message).slice(0,260);
+    const errorText=reviewFailureMessage(err);
     try{
       if(next.failed){
         const summary=githubPostMayHaveStarted

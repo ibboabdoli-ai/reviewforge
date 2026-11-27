@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { config } from '../src/config.mjs';
 import { reviewWithAI } from '../src/reviewer.mjs';
 import { analyzePullRequestStep } from '../src/incremental-review.mjs';
+import { reviewFailureMessage } from '../src/review-telemetry.mjs';
 
 const files=[{filename:'src/auth.mjs',patch:'@@ -1 +1 @@\n-oldCheck();\n+newCheck();'}];
 const clean={summary:'No defects found.',findings:[]};
@@ -62,6 +63,22 @@ test('completed provider response reports measured tokens and time without prici
   });
 });
 
+test('unfinished paid response retains provider usage on its terminal error',async()=>{
+  await mockResponse({status:'incomplete',incomplete_details:{reason:'max_output_tokens'},
+    usage:{input_tokens:6000,output_tokens:123,total_tokens:6123},
+    output_text:JSON.stringify(clean)},async()=>{
+    let failure;
+    try{await reviewWithAI(files);}catch(error){failure=error;}
+    assert.match(failure.message,/did not complete/);
+    assert.deepEqual(failure.telemetry.tokens,
+      {inputTokens:6000,outputTokens:123,totalTokens:6123});
+    const recorded=reviewFailureMessage(failure);
+    assert.match(recorded,/totalTokens=6123/);
+    assert.match(recorded,/durationMs=\d+/);
+    assert.ok(recorded.length<=260);
+  });
+});
+
 test('unfinished model output is terminal before checkpoint or fallback approval',async()=>{
   const sha='a'.repeat(40);let saved=0,posts=0;
   const deps={installationToken:async()=> 'test-token',
@@ -69,10 +86,12 @@ test('unfinished model output is terminal before checkpoint or fallback approval
     reserveModelCalls:async()=>true,loadProgress:async()=>null,initProgress:async()=>true,
     saveProgress:async()=>{saved++;return true;},postReview:async()=>{posts++;return 'inline';}};
   await mockResponse({status:'incomplete',incomplete_details:{reason:'max_output_tokens'},
+    usage:{input_tokens:6000,output_tokens:123,total_tokens:6123},
     output_text:JSON.stringify(clean)},async calls=>{
     await assert.rejects(analyzePullRequestStep({reviewId:1,repository:'test/sandbox',
       number:1,headSha:sha,installationId:1,postMode:'fallback'},deps),
-      error=>error.nonRetryable===true && /complete|status/i.test(error.message));
+      error=>error.nonRetryable===true && /complete|status/i.test(error.message) &&
+        reviewFailureMessage(error).includes('totalTokens=6123'));
     assert.equal(calls(),1);assert.equal(saved,0);assert.equal(posts,0);
   });
 });

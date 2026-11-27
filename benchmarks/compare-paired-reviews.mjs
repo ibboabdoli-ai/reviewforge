@@ -57,8 +57,11 @@ export function comparePairedReviews(reviewforge,coderabbit,adjudication){
     reviewforge:metrics(reviewforge),coderabbit:metrics(coderabbit)};
   if(!fullCoverage(reviewforge)||!fullCoverage(coderabbit))
     return {...report,comparable:false,reason:'Both reviews need completed, verified full-file coverage.',quality:null};
-  if(!adjudication || !Array.isArray(adjudication.issues))
-    reject('code-backed issue adjudication is required');
+  if(!adjudication || !Array.isArray(adjudication.issues) ||
+     String(adjudication.repository||'').toLowerCase()!==report.repository.toLowerCase() ||
+     adjudication.pr!==report.pr ||
+     String(adjudication.headSha||'').toLowerCase()!==report.headSha)
+    reject('code-backed issue adjudication must match repository, PR and exact HEAD SHA');
   const seenRf=new Set(),seenCr=new Set(),issues=new Set();
   const quality={sharedImportant:[],missedImportant:[],extraValid:[],
     falseWarnings:{reviewforge:[],coderabbit:[]},

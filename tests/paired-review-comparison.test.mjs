@@ -10,6 +10,7 @@ function finding(id,severity='high'){return {id,path:'src/auth.ts',line:12,sever
 const issue=(id,valid,rf,cr,severity='high')=>({id,valid,severity,
   evidence:'src/auth.ts:12 checked against the exact commit',
   reviewforgeFindingIds:rf,coderabbitFindingIds:cr});
+const adjudicate=issues=>({repository:'ibboabdoli-ai/Proffera',pr:123,headSha,issues});
 
 test('only exact-head completed full reviews can produce quality comparisons',()=>{
   const rf=snapshot('reviewforge',[finding('r1')]);
@@ -17,18 +18,18 @@ test('only exact-head completed full reviews can produce quality comparisons',()
   assert.throws(()=>comparePairedReviews(rf,{...cr,headSha:'b'.repeat(40)},{}),/exact HEAD/);
   assert.deepEqual(comparePairedReviews({...rf,status:'failed',error:'timeout'},cr,null).quality,null);
   assert.equal(comparePairedReviews({...rf,coverage:{...rf.coverage,analyzed:1}},cr,null).comparable,false);
-  assert.throws(()=>comparePairedReviews(rf,cr,{issues:[]}),/every finding/);
+  assert.throws(()=>comparePairedReviews(rf,cr,adjudicate([])),/every finding/);
 });
 
 test('code-adjudicated same-head comparison counts shared, missed, extra and false warnings',()=>{
   const rf=snapshot('reviewforge',[finding('r1'),finding('r2'),finding('r3')]);
   const cr=snapshot('coderabbit',[finding('c1'),finding('c2'),finding('c3')]);
-  const report=comparePairedReviews(rf,cr,{issues:[
+  const report=comparePairedReviews(rf,cr,adjudicate([
     issue('shared',true,['r1'],['c1']),
     issue('missed',true,[],['c2']),
     issue('extra',true,['r2'],[]),
     issue('rf-false',false,['r3'],[]),
-    issue('cr-false',false,[],['c3'])]});
+    issue('cr-false',false,[],['c3'])]));
   assert.equal(report.comparable,true);
   assert.deepEqual(report.quality.sharedImportant,['shared']);
   assert.deepEqual(report.quality.missedImportant,['missed']);
@@ -41,7 +42,16 @@ test('code-adjudicated same-head comparison counts shared, missed, extra and fal
 test('unassigned or reused findings cannot silently skew quality metrics',()=>{
   const rf=snapshot('reviewforge',[finding('r1'),finding('r2')]);
   const cr=snapshot('coderabbit',[finding('c1')]);
-  assert.throws(()=>comparePairedReviews(rf,cr,{issues:[issue('shared',true,['r1'],['c1'])]}),/every finding/);
-  assert.throws(()=>comparePairedReviews(rf,cr,{issues:[issue('one',true,['r1'],['c1']),
-    issue('two',true,['r1','r2'],[])]}),/reused/);
+  assert.throws(()=>comparePairedReviews(rf,cr,adjudicate([issue('shared',true,['r1'],['c1'])])),/every finding/);
+  assert.throws(()=>comparePairedReviews(rf,cr,adjudicate([issue('one',true,['r1'],['c1']),
+    issue('two',true,['r1','r2'],[])])),/reused/);
+});
+
+test('adjudication from another SHA or PR cannot classify current findings',()=>{
+  const rf=snapshot('reviewforge',[finding('r1')]);
+  const cr=snapshot('coderabbit',[finding('c1')]);
+  const checked=adjudicate([issue('shared',true,['r1'],['c1'])]);
+  for(const stale of [{...checked,headSha:'b'.repeat(40)},
+    {...checked,pr:124},{...checked,repository:'other/repo'}])
+    assert.throws(()=>comparePairedReviews(rf,cr,stale),/exact HEAD SHA/);
 });
