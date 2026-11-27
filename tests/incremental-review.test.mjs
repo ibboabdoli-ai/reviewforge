@@ -95,6 +95,21 @@ test('each completed batch checkpoints bounded telemetry alongside its validated
     assert.equal(f.modelCalls.length,0);
   }finally{f.dispose();}
 });
+test('exhausted Proffera pilot never starts a model or presents a clean review',async()=>{
+  const f=fixture(1);
+  try{
+    f.deps.githubApi=async path=>{
+      assert.equal(path,'/repos/ibboabdoli-ai/Proffera/pulls/12');
+      return {head:{sha},state:'open',draft:false};
+    };
+    f.deps.reserveModelCalls=async()=>({allowed:false,reason:'pilot-exhausted'});
+    const result=await analyzePullRequestStep({...target,repository:'ibboabdoli-ai/Proffera'},f.deps);
+    assert.equal(result.status,'partial');
+    assert.match(result.summary,/pilot ceiling reached/);
+    assert.equal(result.posted,0);
+    assert.equal(f.modelCalls.length,0);
+  }finally{f.dispose();}
+});
 test('changed diff or posting policy cannot mix checkpoints or publish stale findings',async()=>{
   const f=fixture();
   try{

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDatabase } from '../src/db.mjs';
-import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,automaticShadowReviewDecision,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,nextUtcDay } from '../src/review-policy.mjs';
+import { allowedRepositories,repositoryAllowed,effectiveReviewPostMode,automaticShadowReviewDecision,isUnlimitedShadowRepository,dailyRequestLimit,reserveDailyReview,pilotCallLimit,reserveProfferaPilotCalls,PROFFERA_PILOT_KEY,nextUtcDay } from '../src/review-policy.mjs';
 import { sqlForPostgres } from '../src/db-postgres.mjs';
 
 test('repository allowlist defaults to deny all, matches only exact repos',()=>{
@@ -45,7 +45,8 @@ test('worker gate and cron auth are explicitly implemented',async()=>{
   assert.match(server,/automaticShadowReviewDecision\(\{/);
   const policy=readFileSync(new URL('../src/review-policy.mjs',import.meta.url),'utf8');
   assert.match(policy,/repositoryAllowed\(repository,allowed\)/);
-  assert.match(server,/guarded\(\['ready'\],tx=>reserveDailyReview\(tx,config\.aiDailyRequestLimit,Date\.now\(\),count\)\)/);
+  assert.match(server,/guarded\(\['ready'\],tx=>job\.full_name\.toLowerCase\(\)==='ibboabdoli-ai\/proffera'/);
+  assert.match(server,/reserveProfferaPilotCalls\(tx,config\.aiDailyRequestLimit,config\.aiPilotMaxModelCalls,Date\.now\(\),count\)/);
   assert.match(server,/req\.method==='GET'\?process\.env\.CRON_SECRET:process\.env\.WORKER_SECRET/);
 });
 
@@ -94,8 +95,31 @@ test('server enforces per-repo monthly and daily limits',async()=>{
  const source=readFileSync(new URL('../src/server.mjs',import.meta.url),'utf8');
  assert.match(source,/db\.reserveReview\(\{installationId:inst\.id,repositoryId:repo\.id,prNumber:pr\.number,/);
  assert.doesNotMatch(source,/if\(shadowUnlimited\)\{modelCallsMayHaveStarted=true;return \{allowed:true\};\}/);
- assert.match(source,/guarded\(\['ready'\],tx=>reserveDailyReview\(tx,config\.aiDailyRequestLimit,Date\.now\(\),count\)\)/);
+ assert.match(source,/reserveProfferaPilotCalls\(tx,config\.aiDailyRequestLimit,config\.aiPilotMaxModelCalls,Date\.now\(\),count\)/);
  assert.match(source,/postMode:manual\?'dry-run':effectiveReviewPostMode\(job\.full_name,config\.reviewPostMode,config\.aiShadowRepositories,\{/);
+});
+
+test('Proffera pilot ceiling is one-time, atomic and fails closed',async()=>{
+  for(const invalid of ['-1','11','oops','1.5'])assert.equal(pilotCallLimit(invalid),0);
+  assert.equal(pilotCallLimit('2'),2);
+  const dir=mkdtempSync(join(tmpdir(),'rf-pilot-'));
+  const db=openDatabase(join(dir,'test.sqlite'));
+  const reserve=async at=>{
+    db.exec('BEGIN IMMEDIATE');
+    try{const result=await reserveProfferaPilotCalls(db,2,2,at,1);
+      db.exec('COMMIT');return result;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
+  try{
+    const first=Date.parse('2026-11-27T10:00:00Z');
+    assert.deepEqual(await reserve(first),{allowed:true});
+    assert.deepEqual(await reserve(first+86400000),{allowed:true});
+    await assert.rejects(reserve(first+2*86400000),e=>e.pilotBudgetExhausted===true);
+    assert.equal(db.prepare('SELECT used FROM ai_daily_limits WHERE day=?').get(PROFFERA_PILOT_KEY).used,2);
+    assert.equal(db.prepare('SELECT used FROM ai_daily_limits WHERE day=?').get('2026-11-29'),undefined);
+    assert.deepEqual(await reserveProfferaPilotCalls(db,2,0,first,1),
+      {allowed:false,reason:'pilot-exhausted'});
+  }finally{db.close();rmSync(dir,{recursive:true,force:true});}
 });
 
 test('fallback publishing is disabled by default even for allowed shadow repositories',()=>{

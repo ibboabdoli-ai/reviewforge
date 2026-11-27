@@ -14,7 +14,7 @@ import { analyzePullRequestStep } from './incremental-review.mjs';
 import { startCheckout,portal,processStripeEvent,stripeFailureCategory } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository, automaticShadowReviewDecision } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, reserveProfferaPilotCalls, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository, automaticShadowReviewDecision } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 import {claimWork,setClaimPhase,finishClaim} from './claim-fence.mjs';
 import {reviewFailureMessage} from './review-telemetry.mjs';
@@ -255,10 +255,15 @@ export async function processQueue(reviewId=null){
         if(count>config.aiDailyRequestLimit)return {allowed:false,reason:'requires-higher-cap'};
         let allowed;
         try{
-          allowed=await guarded(['ready'],tx=>reserveDailyReview(tx,config.aiDailyRequestLimit,Date.now(),count));
-        }catch(error){modelCallsMayHaveStarted=true;throw error;}
-        if(allowed)modelCallsMayHaveStarted=true;
-        return allowed?{allowed:true}:{allowed:false,reason:'daily-used'};
+          allowed=await guarded(['ready'],tx=>job.full_name.toLowerCase()==='ibboabdoli-ai/proffera'
+            ?reserveProfferaPilotCalls(tx,config.aiDailyRequestLimit,config.aiPilotMaxModelCalls,Date.now(),count)
+            :reserveDailyReview(tx,config.aiDailyRequestLimit,Date.now(),count));
+        }catch(error){
+          if(error?.pilotBudgetExhausted)return {allowed:false,reason:'pilot-exhausted'};
+          modelCallsMayHaveStarted=true;throw error;
+        }
+        if(allowed===true||allowed?.allowed===true)modelCallsMayHaveStarted=true;
+        return allowed===true?{allowed:true}:allowed;
       }
     });
     if(result.status==='deferred'){

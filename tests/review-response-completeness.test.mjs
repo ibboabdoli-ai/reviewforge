@@ -79,6 +79,15 @@ test('unfinished paid response retains provider usage on its terminal error',asy
   });
 });
 
+test('Proffera pilot refuses unpriced models and oversized input before provider fetch',async()=>{
+  await mockResponse({status:'completed',output_text:JSON.stringify(clean)},async calls=>{
+    await assert.rejects(reviewWithAI(files,{profferaPilot:true,model:'unpriced-model'}),/cost envelope/);
+    await assert.rejects(reviewWithAI([{filename:'src/huge.ts',patch:'x'.repeat(100001)}],
+      {profferaPilot:true,model:'gpt-6-luna'}),/cost envelope/);
+    assert.equal(calls(),0);
+  });
+});
+
 test('unfinished model output is terminal before checkpoint or fallback approval',async()=>{
   const sha='a'.repeat(40);let saved=0,posts=0;
   const deps={installationToken:async()=> 'test-token',

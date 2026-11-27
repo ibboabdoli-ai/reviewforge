@@ -296,7 +296,7 @@ const schema={type:'object',additionalProperties:false,required:['summary','find
  * Reject unfinished provider responses and malformed result envelopes; callers
  * must not publish a verdict or replay paid work after such failures.
  */
-export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null}={}) {
+export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null,profferaPilot=false}={}) {
   if(!config.openai.apiKey)throw new Error('OPENAI_API_KEY is not configured; AI review was not run.');
   if(!files.length)return {summary:'No reviewable text changes found.',findings:[]};
   const input=files.map(f=>`FILE: ${f.filename}\nDIFF:\n${f.patch}`).join('\n\n')
@@ -307,6 +307,15 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
       +(Array.isArray(reviewContext.testLinks)&&reviewContext.testLinks.length
         ? '\nTEST-TO-IMPLEMENTATION RELATIONSHIPS (inferred from imports; not proof of test coverage):\n'
           +reviewContext.testLinks.map(l=>l.test+' -> '+l.implementation).join('\n') : '') : '');
+  const instructions=reviewSkillInstructions(files)
+    +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:'');
+  // Current direct-API list prices and these byte/output bounds keep ten
+  // reserved pilot calls well below $10. A new model or larger request fails
+  // before fetch; a changed pricing policy still needs operator revalidation.
+  if(profferaPilot && (!['gpt-6-luna','gpt-6.1-sol'].includes(model) ||
+     Buffer.byteLength(input,'utf8')+Buffer.byteLength(instructions,'utf8')+
+       Buffer.byteLength(JSON.stringify(schema),'utf8')>100000))
+    throw new Error('Proffera pilot model or input exceeds the approved cost envelope.');
   const started=performance.now();
   let data,result;
   try{
@@ -314,8 +323,7 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
     method:'POST',headers:{Authorization:`Bearer ${config.openai.apiKey}`,'Content-Type':'application/json'},
     body:JSON.stringify({model,store:false,max_output_tokens:reasoningEffort?6000:2000,
       ...(reasoningEffort?{reasoning:{effort:reasoningEffort}}:{}),
-      instructions:reviewSkillInstructions(files)
-        +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:''),
+      instructions,
       input, text:{format:{type:'json_schema',name:'review_result',strict:true,schema}}}),
     signal:AbortSignal.timeout(85000)
   });

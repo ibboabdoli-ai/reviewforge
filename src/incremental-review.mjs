@@ -94,6 +94,7 @@ export async function analyzePullRequestStep({
     :null;
   const planHash=createHash('sha256').update(JSON.stringify({
     headSha,postMode,allowDraft,batches,coverage,reviewContexts,
+    profferaPilot:repository.toLowerCase()==='ibboabdoli-ai/proffera',
     modelPolicy:{
       auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
       defaultModel:config.openai.model,
@@ -123,8 +124,11 @@ export async function analyzePullRequestStep({
       const reservation=await deps.reserveModelCalls(batches.length);
       if(reservation!==true && reservation?.allowed!==true){
         const insufficient=reservation?.reason==='requires-higher-cap';
-        return {status:insufficient?'partial':'deferred',posted:0,findings:[],coverage,
-          summary:insufficient
+        const pilotStopped=reservation?.reason==='pilot-exhausted';
+        return {status:insufficient||pilotStopped?'partial':'deferred',posted:0,findings:[],coverage,
+          summary:pilotStopped
+            ?'Proffera paid shadow pilot ceiling reached; no model calls made. Review incomplete.'
+            :insufficient
             ? 'The review needs '+batches.length+' model batches, exceeding the daily quota; no calls made.'
             : 'AI daily allowance exhausted; no calls made. Review deferred until the next UTC day.'};
       }
@@ -164,6 +168,7 @@ export async function analyzePullRequestStep({
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
+      profferaPilot:repository.toLowerCase()==='ibboabdoli-ai/proffera',
       ...(reviewContexts?{reviewContext:reviewContexts[next]}:{}) ,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})};
     await deps.onModelStart?.();

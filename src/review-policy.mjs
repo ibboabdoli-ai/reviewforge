@@ -36,6 +36,29 @@ export function dailyRequestLimit(raw='1') {
   // Reject malformed, negative or excessive limits instead of falling back.
   return Number.isSafeInteger(limit) && limit>=0 && limit<=10 ? limit : 0;
 }
+export function pilotCallLimit(raw='0'){
+  const limit=Number(raw);
+  return Number.isSafeInteger(limit)&&limit>=0&&limit<=10?limit:0;
+}
+// This key must stay stable across deployments. The existing transactional
+// counter table provides a lifetime pilot reservation without a schema change.
+export const PROFFERA_PILOT_KEY='pilot-proffera-20261127';
+export async function reserveProfferaPilotCalls(db,dailyLimit,pilotLimit,at=Date.now(),count=1){
+  if(!Number.isSafeInteger(pilotLimit)||pilotLimit<1||pilotLimit>10 ||
+     !Number.isSafeInteger(count)||count<1||count>pilotLimit)
+    return {allowed:false,reason:'pilot-exhausted'};
+  const daily=await reserveDailyReview(db,dailyLimit,at,count);
+  if(!daily)return {allowed:false,reason:'daily-used'};
+  const row=await db.prepare(`INSERT INTO ai_daily_limits(day,used) VALUES(?,?)
+    ON CONFLICT(day) DO UPDATE SET used=ai_daily_limits.used+?
+    WHERE ai_daily_limits.used+? <= ? RETURNING used`)
+    .get(PROFFERA_PILOT_KEY,count,count,count,pilotLimit);
+  // The caller must run this inside a transaction. Throwing rolls back the
+  // daily reservation as well; never leave a charged day without a pilot slot.
+  if(!row)throw Object.assign(new Error('Proffera pilot model-call ceiling reached'),
+    {pilotBudgetExhausted:true});
+  return {allowed:true};
+}
 export async function reserveDailyReview(db,limit,at=Date.now(),count=1){
   if(!Number.isSafeInteger(limit)||limit<=0||
     !Number.isSafeInteger(count)||count<1||count>limit)return false;
