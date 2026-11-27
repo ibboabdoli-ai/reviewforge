@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { allowedRepositories, dailyRequestLimit } from './review-policy.mjs';
+import { allowedRepositories, dailyRequestLimit, pilotCallLimit } from './review-policy.mjs';
 try { process.loadEnvFile?.(resolve(process.cwd(), '.env')); } catch (e) { if (e.code !== 'ENOENT') throw e; }
 export const config = {
   port: Number(process.env.PORT || 3000),
@@ -12,6 +12,8 @@ export const config = {
   aiReviewEnabled: process.env.AI_REVIEW_ENABLED === 'true',
   aiAllowedRepositories: allowedRepositories(process.env.AI_ALLOWED_REPOSITORIES),
   aiShadowRepositories: allowedRepositories(process.env.AI_SHADOW_REPOSITORIES),
+  // Off by default. Exact allowlist must also appear in AI_ALLOWED and AI_SHADOW.
+  aiAutoShadowRepositories: allowedRepositories(process.env.AI_AUTO_SHADOW_REPOSITORIES),
   aiUnlimitedRepositories: allowedRepositories(process.env.AI_UNLIMITED_REPOSITORIES),
   aiAutoModelRepositories: allowedRepositories(process.env.AI_AUTO_MODEL_REPOSITORIES),
   // Opt-in to bounded, SHA-pinned context fetching; default is deny all.
@@ -21,6 +23,9 @@ export const config = {
   aiWorkerRequestRepositories: allowedRepositories(process.env.AI_WORKER_REQUEST_REPOSITORIES),
   aiFallbackApprovalRepositories: allowedRepositories(process.env.AI_FALLBACK_APPROVAL_REPOSITORIES),
   aiDailyRequestLimit: dailyRequestLimit(process.env.AI_DAILY_REQUEST_LIMIT ?? '1'),
+  // A one-time, Proffera-only paid-call ceiling for the bounded shadow pilot.
+  // Zero keeps the pilot disabled even when automatic shadow events are enabled.
+  aiPilotMaxModelCalls: pilotCallLimit(process.env.AI_PILOT_MAX_MODEL_CALLS ?? '0'),
   nodeEnv: process.env.NODE_ENV || 'development',
   github: {
     clientId: process.env.GITHUB_CLIENT_ID || '',

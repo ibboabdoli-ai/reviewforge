@@ -1,0 +1,11 @@
+{
+  "fixture": "equipment-rental-20261107",
+  "status": "preregistered-before-model-evaluation",
+  "runtimeDefects": [
+    {"id": "EQUIP-1", "path": "candidate/access.mjs", "kind": "authorization", "counterexample": "A member of the same organization without unit-specific access can reserve a private unit."},
+    {"id": "EQUIP-2", "path": "candidate/reservations.mjs", "kind": "concurrency", "counterexample": "Two simultaneous reservations pass the overlap check before the quote await and both reserve one unit."},
+    {"id": "EQUIP-3", "path": "candidate/returns.mjs", "kind": "state-integrity", "counterexample": "A return can increment inventory for a unit other than the one on the reservation."}
+  ],
+  "negativeControls": ["An authorized member can reserve an unoccupied unit.", "A sequential overlapping reservation is rejected.", "Returning the matching unit increments only its own inventory."],
+  "modelInput": "candidate/ only; never include this file or verify.mjs"
+}

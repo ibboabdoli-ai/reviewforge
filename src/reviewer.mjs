@@ -1,13 +1,16 @@
 import { config } from './config.mjs';
 import { reviewSkillInstructions } from './review-skills.mjs';
 import { BEHAVIOR_TEST_REVIEW_METHOD } from './review-method.mjs';
+import { providerUsage } from './review-telemetry.mjs';
 
 export function addedLines(patch='') {
-  const lines=new Set(); let nextLine=0;
+  const lines=new Set(); let nextLine=0,seenHunk=false;
   for(const str of patch.split('\n')) {
     const match=str.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if(match){nextLine=Number(match[1]);continue;}
-    if(str.startsWith('+++')||str.startsWith('---'))continue;
+    if(match){nextLine=Number(match[1]);seenHunk=true;continue;}
+    // A source line beginning with ++ becomes +++ in a hunk. Only skip
+    // file headers before the first hunk, never valid added source lines.
+    if(!seenHunk)continue;
     if(str.startsWith('+')) {lines.add(nextLine);nextLine++;}
     else if(str.startsWith(' '))nextLine++;
   }
@@ -17,26 +20,81 @@ export function redactKnownTokens(patch){
   return patch.replace(/sk-(?:proj-)?[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}/g,'[REDACTED_TOKEN]')
     .replace(/(Bearer\s+)[A-Za-z0-9._-]{16,}/gi,'$1[REDACTED_TOKEN]');
 }
+// Inline findings currently require an added line in the affected hunk.
+// An addition in another hunk cannot anchor a removed guard here. Until
+// deleted-line findings are supported, keep these changes explicitly partial.
+/** Detect a deleted-only hunk with no added-line anchor; ignore file headers. */
+function hasDeletionOnlyHunk(patch){
+  let inHunk=false,removed=false,added=false;
+  for(const line of patch.split('\n')){
+    if(/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line)){
+      if(removed&&!added)return true;
+      inHunk=true;removed=false;added=false;
+    }else if(inHunk){
+      if(line.startsWith('-'))removed=true;
+      if(line.startsWith('+'))added=true;
+    }
+  }
+  return removed&&!added;
+}
 // Selection is deterministic, cost-bounded and never silently truncates a
 // unified diff: a partial patch can invalidate line numbers or hide a bug.
 const SKIPPED_PATH=/(^|\/)(\.env(?:\.|$)|id_rsa$)|\.(pem|key)$/i;
+const REMOVED_WORKFLOW=/^\.github\/workflows\/[^/]+\.ya?ml$/i;
+// A removed dependency lockfile can change the resolved supply chain. Unlike
+// routine lockfile edits, deletion cannot be silently excluded as generated.
+const REMOVED_LOCK_PATH=/(?:^|\/)(?:package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|go\.sum|Gemfile\.lock|bun\.lockb?|uv\.lock|composer\.lock)$/i;
+// Deleted executable/configuration files have no added-line anchors. Until
+// removals can be reviewed as first-class patches, fail closed rather than
+// silently approving a PR that removed an auth or safety check.
+// Trust/ownership and container build files often have no extension; SQL
+// migration removals can delete access controls. Count these as unreviewed
+// instead of silently allowing a clean verdict.
+// Deleting TOML and Go module manifests can remove dependency or test gates.
+// Some permission and deployment gates are extensionless executables,
+// especially under bin/ and scripts/. Their removal has no reportable added
+// line; do not classify it as an ordinary deleted document.
+const REMOVED_SOURCE_PATH=/(?:\.(?:[cm]?[jt]sx?|py|go|rs|java|rb|sh|bash|ps1|ya?ml|json|sql|toml|mod)$|(?:^|\/)(?:CODEOWNERS|(?:Dockerfile|Containerfile)(?:\.[^/]+)?|(?:GNU)?Makefile)$|(?:^|\/)(?:bin|scripts)\/(?:[^/]+\/)*[^/.]+$)/i;
+function isRemovedSource(file){
+  return file?.status==='removed' && typeof file.filename==='string' &&
+    (REMOVED_LOCK_PATH.test(file.filename) ||
+      (REMOVED_SOURCE_PATH.test(file.filename) && !GENERATED_PATH.test(file.filename))) &&
+    !SKIPPED_PATH.test(file.filename);
+}
 const GENERATED_PATH=/(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|.*\.min\.js)$/i;
+// GitHub omits text patches for image assets. Report them as excluded, never as reviewed code.
+const UNREVIEWABLE_IMAGE_PATH=/\.(?:jpe?g|png)$/i;
 const MAX_FILES=35, MAX_FILE_PATCH=6500, MAX_TOTAL_PATCH=65000;
 function priority(path){
   if(/(?:^|\/)(?:auth|security|billing|payments?|api|webhooks?|middleware)(?:\/|\.|-)|(?:stripe|permissions|session|checkout)/i.test(path))return 0;
   if(/(?:^|\/)(?:tests?|e2e|__tests__|docs?)(?:\/|\.)|\.(?:md|mdx)$/i.test(path))return 2;
   return 1;
 }
+/** Select bounded, redacted patches and report any unsupported eligible changes.
+ * Selection counts describe preflight capacity, not completed model analysis.
+ */
 export function selectFilesForReview(changedFiles){
   if(!Array.isArray(changedFiles))throw new TypeError('GitHub changed files must be an array');
-  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,complete:true};
+  const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,missingPatch:0,oversized:0,limited:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,unanchoredDeletions:0,complete:true};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
-    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || GENERATED_PATH.test(file.filename)){
+    // Never send sensitive patches to the model. Their presence also prevents
+    // claiming complete coverage or publishing an unsound clean verdict.
+    if(typeof file?.filename==='string' && SKIPPED_PATH.test(file.filename)){
+      coverage.reviewable++;coverage.sensitiveUnreviewed++;continue;
+    }
+    if(file?.status==='removed' && typeof file.filename==='string' && REMOVED_WORKFLOW.test(file.filename)){
+      coverage.reviewable++;coverage.removedWorkflows++;continue;
+    }
+    if(isRemovedSource(file)){
+      coverage.reviewable++;coverage.removedCode++;continue;
+    }
+    if(!file || file.status==='removed' || typeof file.filename!=='string' || SKIPPED_PATH.test(file.filename) || (GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
     coverage.reviewable++;
     if(typeof file.patch!=='string' || !file.patch.trim()){coverage.missingPatch++;continue;}
+    if(hasDeletionOnlyHunk(file.patch)){coverage.unanchoredDeletions++;continue;}
     // Do not cut file hunks into invalid patches. Mark the review partial.
     if(file.patch.length>MAX_FILE_PATCH){coverage.oversized++;continue;}
     candidates.push({index,filename:file.filename,patch:redactKnownTokens(file.patch)});
@@ -49,14 +107,15 @@ export function selectFilesForReview(changedFiles){
     files.push({filename:f.filename,patch:f.patch});used+=f.patch.length;
   }
   coverage.reviewed=files.length;
-  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0;
+  coverage.complete=coverage.missingPatch===0 && coverage.oversized===0 && coverage.limited===0 && coverage.removedWorkflows===0 && coverage.removedCode===0 && coverage.sensitiveUnreviewed===0 && coverage.unanchoredDeletions===0;
   return {files,coverage};
 }
 // Compatibility for callers that only require the bounded payload.
 export function safeFiles(files){return selectFilesForReview(files).files;}
+/** Explain selected/excluded files and incomplete coverage without claiming AI execution. */
 export function coverageSummary(c){
-  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed or sensitive path(s) ignored.`;
-  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files analyzed; ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity omissions. Unchecked changes may contain bugs.`;
+  if(c.complete)return `Full review coverage: ${c.reviewed} eligible file(s); ${c.excluded} generated, removed, image or sensitive path(s) ignored.`;
+  return `INCOMPLETE REVIEW: ${c.reviewed}/${c.reviewable} eligible files fit the preflight selection (not AI-reviewed); ${c.missingPatch} missing patches, ${c.oversized} oversized patches, ${c.limited} capacity-limited file(s)${Number.isSafeInteger(c.limitedSegments)?` (${c.limitedSegments} omitted diff segment(s))`:''}. ${c.removedWorkflows||0} removed workflow file(s) not reviewed. ${c.removedCode||0} removed source/config file(s) not reviewed. ${c.sensitiveUnreviewed||0} sensitive path(s) withheld from AI review. ${c.unanchoredDeletions||0} file(s) with deletion-only hunks lack reportable anchors. Unchecked changes may contain bugs.`;
 }
 /**
  * Plan a PR review as bounded, deterministic batches. This is separate from
@@ -110,15 +169,27 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
   if(!Number.isSafeInteger(maxBatchCharacters)||maxBatchCharacters<MAX_FILE_PATCH||maxBatchCharacters>MAX_TOTAL_PATCH)
     throw new RangeError('Invalid model batch character budget');
   const coverage={totalChanged:changedFiles.length,reviewable:0,reviewed:0,excluded:0,
-    missingPatch:0,oversized:0,limited:0,complete:true,batches:0,segments:0,reviewedSegments:0};
+    missingPatch:0,oversized:0,limited:0,limitedSegments:0,removedWorkflows:0,removedCode:0,sensitiveUnreviewed:0,unanchoredDeletions:0,complete:true,batches:0,segments:0,reviewedSegments:0};
   const candidates=[];
   for(const [index,file] of changedFiles.entries()){
+    // Never send sensitive patches to the model. Their presence also prevents
+    // claiming complete coverage or publishing an unsound clean verdict.
+    if(typeof file?.filename==='string' && SKIPPED_PATH.test(file.filename)){
+      coverage.reviewable++;coverage.sensitiveUnreviewed++;continue;
+    }
+    if(file?.status==='removed' && typeof file.filename==='string' && REMOVED_WORKFLOW.test(file.filename)){
+      coverage.reviewable++;coverage.removedWorkflows++;continue;
+    }
+    if(isRemovedSource(file)){
+      coverage.reviewable++;coverage.removedCode++;continue;
+    }
     if(!file||file.status==='removed'||typeof file.filename!=='string'
-       ||SKIPPED_PATH.test(file.filename)||GENERATED_PATH.test(file.filename)){
+       ||SKIPPED_PATH.test(file.filename)||(GENERATED_PATH.test(file.filename)||UNREVIEWABLE_IMAGE_PATH.test(file.filename))){
       coverage.excluded++;continue;
     }
     coverage.reviewable++;
     if(typeof file.patch!=='string'||!file.patch.trim()){coverage.missingPatch++;continue;}
+    if(hasDeletionOnlyHunk(file.patch)){coverage.unanchoredDeletions++;continue;}
     const chunks=splitUnifiedPatch(redactKnownTokens(file.patch));
     if(!chunks){coverage.oversized++;continue;}
     coverage.segments+=chunks.length;
@@ -132,33 +203,75 @@ export function planReviewBatches(changedFiles,{maxBatches=MAX_MODEL_BATCHES,max
     let allIncluded=true;
     for(const patch of file.chunks){
       if(batch.length&&(batch.length>=MAX_FILES||size+patch.length>maxBatchCharacters))flush();
-      if(batches.length>=maxBatches){coverage.limited++;allIncluded=false;continue;}
+      if(batches.length>=maxBatches){coverage.limitedSegments++;allIncluded=false;continue;}
       batch.push({filename:file.filename,patch});size+=patch.length;
       coverage.reviewedSegments++;
     }
     if(allIncluded)seen.add(file.filename);
+    else coverage.limited++;
   }
   flush();
   coverage.reviewed=seen.size;
   coverage.batches=batches.length;
-  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited;
+  coverage.complete=!coverage.missingPatch&&!coverage.oversized&&!coverage.limited&&!coverage.removedWorkflows&&!coverage.removedCode&&!coverage.sensitiveUnreviewed&&!coverage.unanchoredDeletions;
   return {batches,coverage};
 }
 
 const severity=['critical','high','medium','low'];
+/** A filtered or unanchored model suggestion is not evidence of a clean PR.
+ * No raw untrusted suggestion is persisted just to enforce this gate.
+ */
+export function unverifiedModelSuggestions(response,validated) {
+  if(!Array.isArray(response?.findings)||!Array.isArray(validated))return true;
+  const stats=response.diagnostics;
+  if(stats){
+    const counts=[stats.modelSuggestions,stats.acceptedFindings,stats.filteredFindings];
+    if(!counts.every(n=>Number.isSafeInteger(n)&&n>=0) ||
+       stats.modelSuggestions!==stats.acceptedFindings+stats.filteredFindings ||
+       stats.acceptedFindings!==response.findings.length)return true;
+  }
+  // The existing eight-finding publication cap is intentional: it cannot
+  // itself produce a false clean verdict because eight valid findings remain.
+  // Distinguish that cap from suggestions discarded for invalid anchors.
+  const reportableLimit=8;
+  return validated.length<Math.min(response.findings.length,reportableLimit) ||
+    (stats?.filteredFindings??0)>0;
+}
 export function validateFindings(raw,files) {
-  const byPath=new Map(files.map(f=>[f.filename,addedLines(f.patch)]));
-  const seen=new Set();const output=[];
-  for(const f of (Array.isArray(raw)?raw:[]).slice(0,12)) {
+  // A bounded review batch can contain multiple patch segments of the same
+  // file. Union their changed-line anchors instead of discarding all but the
+  // final segment; otherwise valid earlier-segment findings are filtered out.
+  const byPath=new Map();
+  for(const f of files){
+    const changed=byPath.get(f.filename)||new Set();
+    for(const line of addedLines(f.patch))changed.add(line);
+    byPath.set(f.filename,changed);
+  }
+  const seen=new Map();const output=[];
+  // Check a bounded candidate window before the existing eight-finding cap.
+  // Invalid/duplicate early suggestions must not starve later valid anchors.
+  for(const f of (Array.isArray(raw)?raw:[]).slice(0,64)) {
     if(!f||!byPath.has(f.path)||!byPath.get(f.path).has(f.line)||!severity.includes(f.severity))continue;
     if(!Number.isFinite(f.confidence)||f.confidence<0.75||f.confidence>1)continue;
     if(typeof f.title!=='string'||typeof f.body!=='string'||f.body.length<8)continue;
     const key=f.path+':'+f.line;
-    if(seen.has(key))continue;seen.add(key);
-    output.push({path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
-      title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence});
+    const normalized={path:f.path,line:f.line,severity:f.severity,category:String(f.category||'correctness').slice(0,35),
+      title:f.title.slice(0,110),body:f.body.slice(0,900),confidence:f.confidence};
+    const priorIndex=seen.get(key);
+    if(priorIndex!==undefined){
+      // Keep the most serious validated finding at a shared changed-line anchor.
+      // Identical severity retains the earliest candidate as before.
+      if(severity.indexOf(normalized.severity)<severity.indexOf(output[priorIndex].severity))
+        output[priorIndex]=normalized;
+      continue;
+    }
+    seen.set(key,output.length);
+    output.push(normalized);
   }
-  return output.slice(0,8);
+  // Keep the existing eight-finding limit, but never let numerous low-risk
+  // suggestions push a valid later critical/high finding out of the verdict.
+  // JavaScript's stable sort preserves model order within each severity.
+  return output.sort((a,b)=>severity.indexOf(a.severity)-severity.indexOf(b.severity)).slice(0,8);
 }
 export function localDemoReview(diff) {
   const text=String(diff).slice(0,16000);const findings=[];
@@ -179,7 +292,11 @@ const schema={type:'object',additionalProperties:false,required:['summary','find
     category:{type:'string'},title:{type:'string'},body:{type:'string'},confidence:{type:'number'}
   }}}
 }};
-export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null}={}) {
+/** Request a bounded structured review and validate findings against added lines.
+ * Reject unfinished provider responses and malformed result envelopes; callers
+ * must not publish a verdict or replay paid work after such failures.
+ */
+export async function reviewWithAI(files,{model=config.openai.model,reasoningEffort=null,reviewContext=null,profferaPilot=false}={}) {
   if(!config.openai.apiKey)throw new Error('OPENAI_API_KEY is not configured; AI review was not run.');
   if(!files.length)return {summary:'No reviewable text changes found.',findings:[]};
   const input=files.map(f=>`FILE: ${f.filename}\nDIFF:\n${f.patch}`).join('\n\n')
@@ -190,24 +307,49 @@ export async function reviewWithAI(files,{model=config.openai.model,reasoningEff
       +(Array.isArray(reviewContext.testLinks)&&reviewContext.testLinks.length
         ? '\nTEST-TO-IMPLEMENTATION RELATIONSHIPS (inferred from imports; not proof of test coverage):\n'
           +reviewContext.testLinks.map(l=>l.test+' -> '+l.implementation).join('\n') : '') : '');
-  const res=await fetch('https://api.openai.com/v1/responses',{
+  const instructions=reviewSkillInstructions(files)
+    +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:'');
+  // Current direct-API list prices and these byte/output bounds keep ten
+  // reserved pilot calls well below $10. A new model or larger request fails
+  // before fetch; a changed pricing policy still needs operator revalidation.
+  if(profferaPilot && (!['gpt-6-luna','gpt-6.1-sol'].includes(model) ||
+     Buffer.byteLength(input,'utf8')+Buffer.byteLength(instructions,'utf8')+
+       Buffer.byteLength(JSON.stringify(schema),'utf8')>100000))
+    throw new Error('Proffera pilot model or input exceeds the approved cost envelope.');
+  const started=performance.now();
+  let data,result;
+  try{
+    const res=await fetch('https://api.openai.com/v1/responses',{
     method:'POST',headers:{Authorization:`Bearer ${config.openai.apiKey}`,'Content-Type':'application/json'},
     body:JSON.stringify({model,store:false,max_output_tokens:reasoningEffort?6000:2000,
       ...(reasoningEffort?{reasoning:{effort:reasoningEffort}}:{}),
-      instructions:reviewSkillInstructions(files)
-        +(reviewContext?'\n'+BEHAVIOR_TEST_REVIEW_METHOD:''),
+      instructions,
       input, text:{format:{type:'json_schema',name:'review_result',strict:true,schema}}}),
     signal:AbortSignal.timeout(85000)
   });
-  const data=await res.json();
-  if(!res.ok)throw new Error(`AI request failed (${res.status}): ${(data.error?.message||'unknown').slice(0,150)}`);
-  const raw=data.output_text ?? (data.output?.flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('') || '');
-  if(!raw)throw new Error('AI response contained no review text');
-  const result=JSON.parse(raw);
-  const rawFindings=Array.isArray(result.findings)?result.findings:[];
+    data=await res.json();
+    if(!res.ok)throw new Error(`AI request failed (${res.status}): ${(data.error?.message||'unknown').slice(0,150)}`);
+  // HTTP success and parseable JSON do not establish a finished review.
+  // Incomplete/failed provider output must never reach a clean verdict or
+  // fallback approval. The staged caller marks this failure non-retryable.
+    if(data?.status!=='completed' || data.error || data.incomplete_details)
+      throw new Error('AI response did not complete; no review verdict is available.');
+    const raw=data.output_text ?? (data.output?.flatMap(o=>o.content||[]).filter(c=>c.type==='output_text').map(c=>c.text).join('') || '');
+    if(!raw)throw new Error('AI response contained no review text');
+    result=JSON.parse(raw);
+    if(!result || Array.isArray(result) || typeof result.summary!=='string' ||
+       !Array.isArray(result.findings))throw new Error('Invalid AI review result; no review verdict is available.');
+  }catch(error){
+    error.telemetry={model,durationMs:Math.round(performance.now()-started),
+      tokens:providerUsage(data?.usage)};
+    throw error;
+  }
+  const rawFindings=result.findings;
   const findings=validateFindings(rawFindings,files);
+  const tokens=providerUsage(data.usage);
   // Counts only; no raw model response, source code or credentials persisted.
   return {summary:String(result.summary||'Review complete.').slice(0,600),findings,
+    telemetry:{model,durationMs:Math.round(performance.now()-started),tokens},
     diagnostics:{modelSuggestions:rawFindings.length,acceptedFindings:findings.length,
       filteredFindings:Math.max(0,rawFindings.length-findings.length)}};
 }

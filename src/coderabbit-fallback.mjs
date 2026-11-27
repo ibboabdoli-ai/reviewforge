@@ -15,6 +15,12 @@ export function isCodeRabbitQuotaEvent(payload){
 export function currentHeadReviewRequest(comments,headSha,botComment){
   if(!/^[0-9a-f]{40}$/.test(headSha||'')||!Array.isArray(comments))return null;
   const marker='<!-- proffera-coderabbit-final-review-request:'+headSha+' -->\n@coderabbitai review';
+  // A delayed authentic quota notice for a previous SHA can arrive after a
+  // newer exact-head review request. Time order alone is not correlation.
+  // Current CodeRabbit quota notices lack this marker: fail closed until
+  // a real bot-emitted exact-head format is verified end-to-end.
+  const quotaHeadMarker='<!-- CodeRabbit quota exact-head: '+headSha+' -->';
+  if(!String(botComment?.body||'').split(/\r?\n/).includes(quotaHeadMarker))return null;
   const botAt=Date.parse(botComment?.created_at||'');
   if(!Number.isFinite(botAt))return null;
   const requests=comments.filter(c=>
@@ -30,10 +36,26 @@ export function alreadyReviewedExactHead(reviews,inlineComments,headSha,requestT
   if(!Array.isArray(reviews)||!Array.isArray(inlineComments))return true; // fail closed
   const since=Date.parse(requestTime);
   if(!Number.isFinite(since))return true;
+  // A repeated request does not invalidate an existing review of immutable code.
+  // Even unknown result timestamps must not grant a fallback for a known SHA.
   return reviews.some(r=>r.user?.login==='coderabbitai[bot]' &&
-       r.commit_id===headSha && Date.parse(r.submitted_at||'')>=since &&
+       r.commit_id===headSha &&
        ['APPROVED','CHANGES_REQUESTED','COMMENTED'].includes(r.state)) ||
     inlineComments.some(c=>c.user?.login==='coderabbitai[bot]' &&
-       (c.original_commit_id||c.commit_id)===headSha &&
-       Date.parse(c.created_at||'')>=since);
+       (c.original_commit_id||c.commit_id)===headSha);
+}
+
+// A signed delivery is a historical snapshot. A delayed delivery must not
+// reserve work after the bot has edited or removed the quota notice.
+export function matchesCurrentQuotaNotice(comments,notice){
+  if(!Array.isArray(comments)||!Number.isSafeInteger(notice?.id)||notice.id<=0)return false;
+  if(notice.user?.login!=='coderabbitai[bot]'||typeof notice.body!=='string'||
+    !Number.isFinite(Date.parse(notice.created_at||''))||
+    !Number.isFinite(Date.parse(notice.updated_at||'')))return false;
+  const matches=comments.filter(c=>c.id===notice.id);
+  if(matches.length!==1)return false;
+  const current=matches[0];
+  return current.user?.login==='coderabbitai[bot]' &&
+    current.body===notice.body && current.created_at===notice.created_at &&
+    current.updated_at===notice.updated_at;
 }

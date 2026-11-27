@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "benchmarkId": "heldout-tenant-bookings-20261107",
+  "preregistration": "Registered in the ReviewForge repository before either model reviewed this fixture; no answer keys in the sandbox PR",
+  "targetRepository": "ibboabdoli-ai/reviewforge-sandbox",
+  "targetPr": 5,
+  "targetBaseSha": "420bf122458eb298080bca9e94e6fcfb32339e59",
+  "targetHeadSha": "c4054f5e247514c80b76344eb1854e2345aa8037",
+  "targetBranch": "test/holdout-20261107-tenant-bookings",
+  "referenceReviewForgeBuild": "49c02d22899ace7311e2ea62642b1a4babe0155e",
+  "cases": [
+    {
+      "id": "unscoped-invoice-view",
+      "kind": "authorization",
+      "path": "src/services/invoice-preview.mjs",
+      "lineMin": 7,
+      "lineMax": 13,
+      "witness": "Viewer with tenantId=tenant-b requests invoice id=910 belonging to tenant-a. Returns an invoice preview rather than null; tenantId is only validated, not used to scope the lookup. Independent witness uses the actual exported function.",
+      "expectedFix": "Filter or authorize tenant ownership before returning invoice data",
+      "rating": "high"
+    },
+    {
+      "id": "non-atomic-seat-bookings",
+      "kind": "concurrency",
+      "path": "src/services/seat-reservations.mjs",
+      "lineMin": 8,
+      "lineMax": 22,
+      "witness": "Two requests each reserve two seats when capacity=2, reserved=0. Synchronize the two reads before either write: both return accepted=true while persisted reserved remains 2, violating total committed booking capacity.",
+      "expectedFix": "Storage-backed atomic conditional update or transactional per-event locking that works across processes",
+      "rating": "high"
+    }
+  ],
+  "cleanControls": [
+    {
+      "path": "src/lib/tenant-metrics.mjs",
+      "contract": "Counts only the requested tenant, ignores unrelated status values, does not mutate records"
+    },
+    {
+      "path": "src/lib/invoice-index.mjs",
+      "contract": "A generic invoice-id lookup helper; tenant authorization is the responsibility of its caller and must be judged across files"
+    }
+  ],
+  "supplementaryNotPrimary": [
+    "Changed invoice tests exercise authenticated and revoked cases but no cross-tenant access denial.",
+    "Seat tests exercise sequential capacity but not synchronized parallel booking attempts."
+  ],
+  "scoring": {
+    "primary": "2 separately verified behavioral defects, each requiring a specific source-grounded explanation and correct anchor",
+    "controls": "Adjudicate any new reported control finding independently; never automatically mark as a false positive",
+    "source": "Same immutable base/head, no answers supplied to either reviewer; one declared attempt per product with full coverage",
+    "cost": "Owner approved up to $10 total; no provider calls until isolated API credentials and verifiable budget controls are available",
+    "safeguard": "No merge, no production, no Proffera changes, no auto review approval or comments"
+  }
+}

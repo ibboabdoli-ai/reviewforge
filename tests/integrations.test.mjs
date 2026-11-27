@@ -16,19 +16,25 @@ function signedEvent(event,secret='whsec_integrations'){
   return {raw,signature:`t=${time},v1=${hash}`};
 }
 test('Signed Stripe events activate and cancel entitlements; duplicate deliveries ignored',async()=>{
-  const dir=mkdtempSync(join(tmpdir(),'reviewforge-billing-')),before=config.stripe.webhookSecret;
+  const dir=mkdtempSync(join(tmpdir(),'reviewforge-billing-'));
+  const before=[config.stripe.webhookSecret,config.stripe.pricePro];
+  let db;
   try{
-    const db=openDatabase(join(dir,'test.sqlite'));
+    db=openDatabase(join(dir,'test.sqlite'));
     db.prepare('INSERT INTO users(id,login,name) VALUES (123,?,?)').run('customer','Customer');
-    config.stripe.webhookSecret='whsec_integrations';
+    config.stripe.webhookSecret='whsec_integrations';config.stripe.pricePro='price_pro_test';
     const event=(id,type,status)=>({id,type,data:{object:{id:'sub_abc',customer:'cus_abc',status,metadata:{reviewforge_user_id:'123'}}}});
     const a=signedEvent(event('evt_new','customer.subscription.created','active'));
-    assert.equal(await processStripeEvent(db,a.raw,a.signature), 'customer.subscription.created');
+    const subscription={id:'sub_abc',customer:'cus_abc',created:100,status:'active',metadata:{reviewforge_user_id:'123'},items:{data:[{price:{id:'price_pro_test'}}],has_more:false}};
+    const options={retrieveSubscription:async()=>subscription,
+      listSubscriptions:async()=>({object:'list',data:[subscription],has_more:false})};
+    assert.equal(await processStripeEvent(db,a.raw,a.signature,options), 'customer.subscription.created');
     assert.equal(await activePlan(db,123),'pro');
-    assert.equal(await processStripeEvent(db,a.raw,a.signature),'duplicate');
+    assert.equal(await processStripeEvent(db,a.raw,a.signature,options),'duplicate');
     const b=signedEvent(event('evt_del','customer.subscription.deleted','canceled'));
-    await processStripeEvent(db,b.raw,b.signature);assert.equal(await activePlan(db,123),'free');db.close();
-  }finally{config.stripe.webhookSecret=before;rmSync(dir,{recursive:true,force:true});}
+    subscription.status='canceled';
+    await processStripeEvent(db,b.raw,b.signature,options);assert.equal(await activePlan(db,123),'free');
+  }finally{[config.stripe.webhookSecret,config.stripe.pricePro]=before;db?.close();rmSync(dir,{recursive:true,force:true});}
 });
 test('GitHub App JWT signs with generated RSA private key',()=>{
   const {privateKey,publicKey}=generateKeyPairSync('rsa',{modulusLength:2048});
@@ -51,7 +57,7 @@ test('OpenAI structured result is validated before findings are accepted',async(
       called=true;assert.match(url,/\/responses$/);
       const body=JSON.parse(request.body);
       assert.equal(body.store,false);assert.equal(body.text.format.type,'json_schema');
-      return {ok:true,json:async()=>({output:[{content:[{type:'output_text',text:JSON.stringify({summary:'One concrete issue',findings:[
+      return {ok:true,json:async()=>({status:'completed',output:[{content:[{type:'output_text',text:JSON.stringify({summary:'One concrete issue',findings:[
         {path:'lib/auth.ts',line:2,severity:'high',category:'security',title:'Secret in log',body:'Credentials may be logged if this executes.',confidence:.91},
         {path:'lib/auth.ts',line:99,severity:'critical',category:'security',title:'Fake finding',body:'Should not survive grounding.',confidence:.99}
       ]})}]}]})};

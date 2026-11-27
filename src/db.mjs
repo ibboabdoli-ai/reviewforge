@@ -2,8 +2,34 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomToken, sha256 } from './security.mjs';
+import {activeClaim} from './claim-fence.mjs';
+const subscriptionQueues=new Map();
+
+function migrateReviewIdentity(db){
+  const schema=db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='reviews'").get()?.sql;
+  if(!/UNIQUE\s*\(\s*repository_id\s*,\s*pr_number\s*,\s*head_sha\s*\)/i.test(schema||''))return;
+  const next=schema.replace(/^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`]?reviews["`]?/i,'CREATE TABLE reviews_next')
+    .replace(/UNIQUE\s*\(\s*repository_id\s*,\s*pr_number\s*,\s*head_sha\s*\)/i,
+      'UNIQUE(installation_id,repository_id,pr_number,head_sha)');
+  if(next===schema || !next.startsWith('CREATE TABLE reviews_next'))throw new Error('Cannot migrate review identity constraint');
+  db.exec('PRAGMA foreign_keys=OFF');
+  let started=false;
+  try{
+    db.exec('BEGIN IMMEDIATE');started=true;
+    db.exec(next);
+    db.exec('INSERT INTO reviews_next SELECT * FROM reviews');
+    db.exec('DROP TABLE reviews');
+    db.exec('ALTER TABLE reviews_next RENAME TO reviews');
+    db.exec('CREATE INDEX idx_reviews_installation ON reviews(installation_id,created_at DESC)');
+    db.exec('COMMIT');started=false;
+  }catch(error){if(started)db.exec('ROLLBACK');throw error;}
+  finally{db.exec('PRAGMA foreign_keys=ON');}
+  if(db.prepare('PRAGMA foreign_key_check').all().length)throw new Error('Review identity migration broke foreign keys');
+}
 
 export function openDatabase(file) {
+  if(file===':memory:' || /^file::memory:/i.test(file))
+    throw new Error('ReviewForge requires a file-backed SQLite database for transactional helpers');
   mkdirSync(dirname(file),{recursive:true});
   const db=new DatabaseSync(file);
   db.exec('PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;');
@@ -55,7 +81,7 @@ export function openDatabase(file) {
       error TEXT,
       created_at TEXT DEFAULT CURRENT_TIMESTAMP,
       finished_at TEXT,
-      UNIQUE(repository_id,pr_number,head_sha)
+      UNIQUE(installation_id,repository_id,pr_number,head_sha)
     );
     CREATE TABLE IF NOT EXISTS deliveries (
       id TEXT PRIMARY KEY,
@@ -93,16 +119,164 @@ export function openDatabase(file) {
       next_attempt_at INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS stripe_events (id TEXT PRIMARY KEY,received_at TEXT DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS stripe_checkout_proofs (
+      stripe_subscription_id TEXT PRIMARY KEY,
+      stripe_customer_id TEXT NOT NULL,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      session_id TEXT NOT NULL UNIQUE
+    );
     CREATE TABLE IF NOT EXISTS subscriptions (
       user_id INTEGER PRIMARY KEY REFERENCES users(id),
       stripe_customer_id TEXT UNIQUE,
       stripe_subscription_id TEXT UNIQUE,
       status TEXT NOT NULL DEFAULT 'free',
+      checkout_session_id TEXT,
+      checkout_previous_status TEXT,
       updated_at TEXT DEFAULT CURRENT_TIMESTAMP
     );
     CREATE INDEX IF NOT EXISTS idx_reviews_installation ON reviews(installation_id,created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_jobs_ready ON jobs(status,next_attempt_at);
   `);
+  const subscriptionColumns=new Set(db.prepare('PRAGMA table_info(subscriptions)').all().map(row=>row.name));
+  if(!subscriptionColumns.has('checkout_session_id'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_session_id TEXT');
+  if(!subscriptionColumns.has('checkout_previous_status'))db.exec('ALTER TABLE subscriptions ADD COLUMN checkout_previous_status TEXT');
+  migrateReviewIdentity(db);
+  // Serialize additive SQLite schema migration across local worker processes.
+  db.exec('BEGIN IMMEDIATE');
+  try{
+    const jobColumns=new Set(db.prepare('PRAGMA table_info(jobs)').all().map(row=>row.name));
+    if(!jobColumns.has('claim_token'))db.exec('ALTER TABLE jobs ADD COLUMN claim_token TEXT');
+    if(!jobColumns.has('claim_phase'))db.exec('ALTER TABLE jobs ADD COLUMN claim_phase TEXT');
+    db.exec('COMMIT');
+  }catch(error){db.exec('ROLLBACK');throw error;}
+  db.withClaim=async(job,work)=>{
+    const locked=new DatabaseSync(file);
+    let started=false;
+    try{
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+      locked.exec('BEGIN IMMEDIATE');started=true;
+      const row=locked.prepare(`SELECT j.claim_token,j.claim_phase,j.next_attempt_at,
+        j.status AS job_status,r.status AS review_status FROM jobs j
+        JOIN reviews r ON r.id=j.review_id WHERE j.id=? AND j.review_id=?`).get(job.job_id,job.id);
+      if(!activeClaim(row,job)){locked.exec('ROLLBACK');started=false;return null;}
+      const value=await work(locked,row.claim_phase);
+      locked.exec('COMMIT');started=false;return {value};
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked.close();}
+  };
+  db.reconcileExpiredJobs=()=>{
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      // Legacy running rows without a claim token remain quarantined.
+      const expired=db.prepare("UPDATE jobs SET status='failed',claim_token=NULL WHERE status='running' AND claim_token IS NOT NULL AND next_attempt_at<=? RETURNING review_id").all(Date.now());
+      for(const row of expired){
+        const marked=db.prepare("UPDATE reviews SET status='failed',finished_at=CURRENT_TIMESTAMP,summary='Review worker exceeded its execution lease. No clean review verdict was produced.',error='Worker timed out; automatic paid replay is prohibited.' WHERE id=? AND status='running'").run(row.review_id);
+        if(marked.changes!==1)throw new Error('Expired worker review status mismatch');
+      }
+      db.exec('COMMIT');return expired.length;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
+  db.withSubscriptionLock=async(userId,work)=>{
+    const previous=subscriptionQueues.get(file)||Promise.resolve();
+    let release;
+    const current=new Promise(resolve=>{release=resolve;});
+    subscriptionQueues.set(file,current);
+    await previous;
+    // A separate connection keeps unrelated queries off this transaction.
+    let locked;
+    let started=false;
+    try{
+      locked=new DatabaseSync(file);
+      locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+      // A read snapshot allows unrelated writes during Stripe retrieval.
+      // If it becomes stale, SQLite refuses the later write and Stripe retries.
+      locked.exec('BEGIN');started=true;
+      if(!locked.prepare('SELECT id FROM users WHERE id=?').get(userId))
+        throw new Error('Stripe billing owner does not exist');
+      const result=await work(locked);
+      locked.exec('COMMIT');
+      started=false;
+      return result;
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked?.close();release();if(subscriptionQueues.get(file)===current)subscriptionQueues.delete(file);}
+  };
+  // Claim a SQLite job atomically before returning it to an async worker.
+  // A separate SELECT and unconditional UPDATE let two workers claim one job.
+  db.claimJob=(reviewId=null)=>{
+    if(reviewId!==null && (!Number.isSafeInteger(Number(reviewId))||Number(reviewId)<=0))
+      throw new Error('Invalid review ID');
+    db.reconcileExpiredJobs();
+    db.exec('BEGIN IMMEDIATE');
+    try{
+      const now=Date.now();
+      const winner=db.prepare(`UPDATE jobs SET status='running', attempts=attempts+1, next_attempt_at=?, claim_token=?, claim_phase='ready'
+        WHERE id=(SELECT j.id FROM jobs j JOIN reviews r ON r.id=j.review_id
+          JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id
+          JOIN installations i ON i.id=r.installation_id
+          WHERE j.status='queued' AND r.status='queued' AND j.next_attempt_at<=? AND (? IS NULL OR j.review_id=?)
+            AND i.status='active' AND p.enabled=1 ORDER BY j.id LIMIT 1)
+        AND status='queued' RETURNING id AS job_id,review_id,attempts,claim_token`).get(now+5*60*1000,randomToken(),now,reviewId,reviewId);
+      if(winner){
+        const marked=db.prepare("UPDATE reviews SET status='running' WHERE id=? AND status='queued'").run(winner.review_id);
+        if(marked.changes!==1)throw new Error('Claimed review is not queued');
+      }
+      const review=winner?db.prepare(`SELECT r.*,p.full_name FROM reviews r
+        JOIN repositories p ON p.id=r.repository_id AND p.installation_id=r.installation_id WHERE r.id=?`).get(winner.review_id):null;
+      if(winner&&!review)throw new Error('Claimed review is not accessible');
+      db.exec('COMMIT');
+      return winner?{...review,job_id:winner.job_id,attempts:winner.attempts,claim_token:winner.claim_token}:null;
+    }catch(error){db.exec('ROLLBACK');throw error;}
+  };
+  // BEGIN IMMEDIATE serializes the count and inserts across SQLite connections.
+  // Retry without blocking the event loop while another writer holds the lock.
+  db.reserveReview=async({installationId,repositoryId,prNumber,title,author,headSha,manual=false,unlimited=false})=>{
+    const locked=new DatabaseSync(file);
+    locked.exec('PRAGMA foreign_keys=ON; PRAGMA busy_timeout=0;');
+    let started=false;
+    try{
+      const deadline=Date.now()+25000;
+      for(;;){
+        try{locked.exec('BEGIN IMMEDIATE');started=true;break;}
+        catch(error){
+          if(!/database (?:table )?is locked/i.test(error.message) || Date.now()>=deadline)
+            throw error;
+          await new Promise(resolve=>setTimeout(resolve,25));
+        }
+      }
+      const repo=locked.prepare("SELECT i.owner_user_id FROM repositories p JOIN installations i ON i.id=p.installation_id WHERE p.id=? AND p.installation_id=? AND p.enabled=1 AND i.status='active'").get(repositoryId,installationId);
+      if(!repo)throw Object.assign(new Error('Repository is not accessible.'),{status:403});
+      const existing=locked.prepare('SELECT r.id,m.review_id AS manual_id FROM reviews r LEFT JOIN manual_review_requests m ON m.review_id=r.id WHERE r.installation_id=? AND r.repository_id=? AND r.pr_number=? AND r.head_sha=?').get(installationId,repositoryId,prNumber,headSha);
+      let result;
+      if(existing){
+        let isManual=!!existing.manual_id;
+        // An auto-shadow opt-in may arrive after a regular review was queued
+        // for this exact SHA. Upgrade only a still-queued job atomically; a
+        // running/completed job cannot safely be relabeled retroactively.
+        if(manual && !isManual){
+          const pending=locked.prepare("SELECT id FROM jobs WHERE review_id=? AND status='queued'").get(existing.id);
+          if(pending){
+            locked.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(existing.id);
+            isManual=true;
+          }
+        }
+        result={id:existing.id,created:false,manual:isManual};
+      }
+      else{
+        const status=locked.prepare('SELECT status FROM subscriptions WHERE user_id=?').get(repo.owner_user_id)?.status;
+        const limit=status==='active'||status==='trialing'?500:10;
+        const used=locked.prepare("SELECT COUNT(*) AS total FROM reviews r JOIN installations i ON i.id=r.installation_id WHERE i.owner_user_id=? AND r.created_at>=datetime('now','start of month')").get(repo.owner_user_id).total;
+        if(!unlimited && Number(used)>=limit)throw Object.assign(new Error('Monthly review limit reached.'),{status:429});
+        const inserted=locked.prepare("INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status,summary) VALUES(?,?,?,?,?,?,'queued',?) RETURNING id")
+          .get(installationId,repositoryId,prNumber,title,author,headSha,manual?'Manual shadow review requested; no GitHub posting.':'');
+        if(manual)locked.prepare('INSERT INTO manual_review_requests(review_id) VALUES(?)').run(inserted.id);
+        locked.prepare('INSERT INTO jobs(review_id) VALUES(?)').run(inserted.id);
+        result={id:inserted.id,created:true,manual};
+      }
+      locked.exec('COMMIT');started=false;
+      return result;
+    }catch(error){if(started)locked.exec('ROLLBACK');throw error;}
+    finally{locked.close();}
+  };
   return db;
 }
 export async function createSession(db,userId) {

@@ -63,13 +63,35 @@ test('unknown or unavailable patches are disclosed, not silently skipped',async(
  const r=await analyzePullRequest({...target,postMode:'dry-run'},m.dependencies);
  assert.equal(r.status,'partial');assert.equal(r.coverage.missingPatch,1);
  assert.equal(r.coverage.reviewed,1);
- assert.deepEqual(m.calls(),{posts:0,models:1});
+ assert.deepEqual(m.calls(),{posts:0,models:0});
 });
 test('security sensitive files prioritized over components in bounded review',()=>{
  const selection=selectFilesForReview(makeFiles(50));
  assert.equal(selection.files[0].filename,'src/api/checkout.ts');
  assert.equal(selection.coverage.limited,15);
  assert.equal(selection.coverage.complete,false);
+});
+
+test('image assets missing textual patches are excluded without hiding missing source patches',()=>{
+ const images=Array.from({length:24},(_,i)=>({
+   filename:'public/demo/assets/photo-'+i+(i<22?'.jpg':'.png'),status:'added'
+ }));
+ const source={filename:'src/lib/verify.ts',status:'modified',
+   patch:'@@ -0,0 +1,1 @@\n+export const verified=true;'};
+ const input=[...images,source];
+ for(const select of [selectFilesForReview,planReviewBatches]){
+   const {coverage}=select(input);
+   assert.equal(coverage.excluded,24);
+   assert.equal(coverage.reviewable,1);
+   assert.equal(coverage.reviewed,1);
+   assert.equal(coverage.missingPatch,0);
+   assert.equal(coverage.complete,true);
+ }
+ const missingSource=planReviewBatches([...input,{
+   filename:'src/api/auth.ts',status:'modified'
+ }]).coverage;
+ assert.equal(missingSource.missingPatch,1);
+ assert.equal(missingSource.complete,false);
 });
 
 test('large unified hunk is split with correct GitHub new-line anchors',()=>{
@@ -83,6 +105,48 @@ test('large unified hunk is split with correct GitHub new-line anchors',()=>{
  assert.equal(covered.size,800);
  assert.ok(covered.has(1));assert.ok(covered.has(800));
 });
+test('capacity omissions count distinct files rather than split patch segments',()=>{
+  // One changed file is split into several segments; only the first fits.
+  // Previous count incorrectly reported multiple omitted files for one file.
+  const patch='@@ -0,0 +1,1200 @@\n'+Array.from({length:1200},(_,i)=>'+const item'+i+" = 'long-value';").join('\n');
+  const {coverage}=planReviewBatches([{filename:'src/api/receipts.ts',status:'modified',patch}],{
+    maxBatches:1,maxBatchCharacters:6500
+  });
+  assert.equal(coverage.reviewable,1);
+  assert.equal(coverage.reviewed,0);
+  assert.equal(coverage.limited,1);
+  assert.ok(coverage.limitedSegments>1);
+  assert.equal(coverage.reviewedSegments+coverage.limitedSegments,coverage.segments);
+  assert.equal(coverage.complete,false);
+});
+
+test('partial patch coverage never reserves paid attempts or calls the model',async()=>{
+ const m=mock(makeFiles(180));
+ let reservations=0;
+ const result=await analyzePullRequest({...target,postMode:'live'},{
+  ...m.dependencies,
+  reserveModelCalls:async()=>{reservations++;return {allowed:true};}
+ });
+ assert.equal(result.status,'partial');
+ assert.equal(result.posted,0);
+ assert.equal(result.coverage.complete,false);
+ assert.equal(reservations,0);
+ assert.deepEqual(m.calls(),{posts:0,models:0});
+ assert.match(result.summary,/INCOMPLETE REVIEW/);
+ assert.match(result.summary,/No AI calls made/);
+});
+test('incomplete review never misreports preflight-selected files as AI-analyzed',async()=>{
+ const m=mock(makeFiles(180));
+ const r=await analyzePullRequest({...target,postMode:'dry-run'},m.dependencies);
+ assert.equal(r.status,'partial');
+ assert.ok(r.coverage.reviewed>0,'preflight selects candidates even though review is blocked');
+ assert.equal(r.coverage.complete,false);
+ assert.match(r.summary,/eligible files fit the preflight selection \(not AI-reviewed\)/);
+ assert.doesNotMatch(r.summary,/eligible files analyzed/);
+ assert.match(r.summary,/No AI calls made/);
+ assert.deepEqual(m.calls(),{posts:0,models:0});
+});
+
 test('too many reviewable files disclose incomplete coverage without posting',async()=>{
  const m=mock(makeFiles(180));
  const r=await analyzePullRequest({...target,postMode:'live'},m.dependencies);
@@ -169,4 +233,61 @@ test('a failed batch never publishes a partial or clean review',async()=>{
   error=>error?.nonRetryable===true && /no complete review verdict/.test(error.message)
  );
  assert.equal(m.calls().posts,0);
+});
+
+// A removed workflow still changes merge/review governance even if a changed
+// test file has a valid patch. Do not silently mark it fully AI-reviewed.
+test('deleted workflow security gate must not get a clean review',async()=>{
+  const input=[
+    {filename:'.github/workflows/proffera-final-gate-wakeup.yml',status:'removed',
+      patch:'@@ -1,2 +0,0 @@\n-if: authorization\n-run: verify'},
+    {filename:'tests/receipt-gate.test.ts',status:'modified',
+      patch:'@@ -1 +1 @@\n-old check\n+new check'}
+  ];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const {coverage}=planner(input);
+    assert.equal(coverage.removedWorkflows,1,'deleted workflow must be accounted for');
+    assert.equal(coverage.reviewable,2);
+    assert.equal(coverage.complete,false,'coverage must not be clean after a workflow removal');
+  }
+  const m=mock(input);
+  const result=await analyzePullRequest({...target,postMode:'live'},m.dependencies);
+  assert.equal(result.status,'partial');
+  assert.match(result.summary,/removed workflow/i);
+  assert.deepEqual(m.calls(),{posts:0,models:0});
+});
+
+test('ordinary deleted documentation stays excluded without blocking full review',()=>{
+  const files=[{filename:'docs/obsolete.md',status:'removed',patch:'@@ -1 +0,0 @@\n-old'},
+    {filename:'src/main.ts',status:'modified',patch:'@@ -1 +1 @@\n-old\n+new'}];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const {coverage}=planner(files);
+    assert.equal(coverage.removedWorkflows,0);
+    assert.equal(coverage.complete,true);
+    assert.equal(coverage.excluded,1);
+  }
+});
+
+// A deleted executable gate is not a benign removed document. The planner
+// cannot assign a clean verdict after discarding its entire removal patch.
+test('deleted executable review gate source must not get a clean verdict',async()=>{
+  const files=[
+    {filename:'src/auth/verify-session.ts',status:'removed',
+      patch:'@@ -1 +0,0 @@\n-export function verifySession() { return false; }'},
+    {filename:'scripts/verify-receipt.sh',status:'removed',
+      patch:'@@ -1 +0,0 @@\n-exit 1'},
+    {filename:'src/api/health.ts',status:'modified',
+      patch:'@@ -1 +1 @@\n-old\n+new'}
+  ];
+  for(const planner of [selectFilesForReview,planReviewBatches]){
+    const {coverage}=planner(files);
+    assert.equal(coverage.removedCode,2,'both removed executable gates must be tracked');
+    assert.equal(coverage.reviewable,3);
+    assert.equal(coverage.complete,false,'deleted executable source cannot be approved as clean');
+  }
+  const m=mock(files);
+  const result=await analyzePullRequest({...target,postMode:'live'},m.dependencies);
+  assert.equal(result.status,'partial');
+  assert.match(result.summary,/removed source\/config file/i);
+  assert.deepEqual(m.calls(),{posts:0,models:0});
 });

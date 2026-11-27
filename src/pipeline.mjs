@@ -1,6 +1,6 @@
 import { config } from './config.mjs';
 import { githubApi, installationToken, changedFiles, postReview } from './github.mjs';
-import { planReviewBatches, coverageSummary, validateFindings, reviewWithAI } from './reviewer.mjs';
+import { planReviewBatches, coverageSummary, validateFindings, unverifiedModelSuggestions, reviewWithAI } from './reviewer.mjs';
 import { repositoryAllowed } from './review-policy.mjs';
 import { selectReviewModel } from './model-router.mjs';
 
@@ -31,6 +31,28 @@ export async function analyzePullRequest({ repository, number, headSha, installa
     return {status:'skipped',summary:'Pull request is draft or no longer open.',findings:[],posted:0};
   }
   const {batches,coverage}=planReviewBatches(await filesFor({repoFullName:repository,prNumber:number,token}));
+  // A known incomplete diff cannot produce a trustworthy, postable verdict.
+  // Fail closed before reserving or spending any paid AI calls. Recheck the
+  // exact HEAD so a concurrent PR update cannot be labeled as reviewed.
+  if (!coverage.complete) {
+    const latest=await api(pullPath,token);
+    if (latest.head?.sha!==headSha || (latest.draft && !allowDraft) || latest.state!=='open') {
+      return {status:'superseded',summary:'PR changed during analysis; no comments posted.',findings:[],posted:0};
+    }
+    return {status:'partial',
+      summary:(postMode==='dry-run'?'[Preview only] ':'')+coverageSummary(coverage)
+        +' No AI calls made because coverage is incomplete.',
+      findings:[],posted:0,coverage};
+  }
+  // A PR may advance while GitHub is returning the changed-file list.
+  // Recheck the exact HEAD/state before reserving daily quota or any model call,
+  // rather than discovering an already-stale review only after paid work.
+  const beforePaid=await api(pullPath,token);
+  if(beforePaid.head?.sha!==headSha || beforePaid.state!=='open' ||
+     (beforePaid.draft && !allowDraft)) return {
+    status:'superseded',summary:'PR changed before paid review; no AI calls made.',
+    findings:[],posted:0,coverage
+  };
   // Reserve all model attempts BEFORE the first model call. An insufficient
   // global daily cap must not result in a half-reviewed PR or overspend.
   if(batches.length && deps.reserveModelCalls){
@@ -43,6 +65,14 @@ export async function analyzePullRequest({ repository, number, headSha, installa
           : 'AI daily request allowance exhausted; review deferred until next UTC day. No model calls made.'};
     }
   }
+  // Daily quota reservation is awaited storage I/O; a PR may move while
+  // reserving. Reconfirm exact HEAD before dispatching any paid model batches.
+  const afterReservation=await api(pullPath,token);
+  if(afterReservation.head?.sha!==headSha || afterReservation.state!=='open' ||
+     (afterReservation.draft && !allowDraft)) return {
+    status:'superseded',summary:'PR changed during quota reservation; no model calls made.',
+    findings:[],posted:0,coverage
+  };
   // A Vercel invocation has a 120-second budget. Up to four independent model
   // batches must not each consume their 85-second deadline sequentially.
   // allSettled waits for every already-started call before failing closed.
@@ -51,9 +81,11 @@ export async function analyzePullRequest({ repository, number, headSha, installa
     const choice=autoModel?selectReviewModel(part,{fastModel:config.openai.modelFast,deepModel:config.openai.modelDeep}):null;
     const response=await ai(part,{batchIndex:index+1,totalBatches:batches.length,
       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})});
+    const accepted=validateFindings(response.findings,part);
     return {
       summary:'Batch '+(index+1)+'/'+batches.length+(choice?' ['+choice.model+']':'')+': '+String(response.summary||'').slice(0,350),
-      findings:validateFindings(response.findings,part)
+      findings:accepted,
+      unverifiedSuggestions:unverifiedModelSuggestions(response,accepted)
     };
   }));
   if(batchResults.some(result=>result.status!=='fulfilled')){
@@ -61,6 +93,7 @@ export async function analyzePullRequest({ repository, number, headSha, installa
     failure.nonRetryable=true;
     throw failure;
   }
+  const unverifiedSuggestions=batchResults.some(result=>result.value.unverifiedSuggestions);
   const summaries=batchResults.map(result=>result.value.summary);
   const rawFindings=batchResults.flatMap(result=>result.value.findings);
   const severityRank={critical:0,high:1,medium:2,low:3};
@@ -72,6 +105,13 @@ export async function analyzePullRequest({ repository, number, headSha, installa
   if (latest.head?.sha!==headSha || (latest.draft && !allowDraft) || latest.state!=='open') {
     return {status:'superseded',summary:'PR changed during analysis; no comments posted.',findings:[],posted:0};
   }
+  // Publish substantiated findings even when other suggestions were filtered.
+  // Only a potentially false clean verdict must be blocked from approval.
+  if(unverifiedSuggestions && findings.length===0)return {
+    status:'partial',posted:0,findings:review.findings,coverage,
+    summary:(postMode==='dry-run'?'[Preview only] ':'')+summary+
+      ' Some AI suggestions failed evidence validation; manual inspection required. No GitHub review or fallback approval posted.'
+  };
   if (!coverage.complete || !batches.length) {
     // Never label a partial scan 'clean' or publish an incomplete review.
     return {status:'partial',summary:(postMode==='dry-run'?'[Preview only] ':'')+summary,findings:review.findings,posted:0,coverage};
