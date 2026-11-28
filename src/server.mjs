@@ -14,7 +14,7 @@ import { analyzePullRequestStep } from './incremental-review.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, reserveProfferaPilotCalls, isProffera, pullRequestAllowedPastFallbackGate, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, reserveProfferaPilotCalls, isProffera, pilotBypassesFallbackGate, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 
 assertConfig();
@@ -82,8 +82,8 @@ async function webhookGithub(req,res){
   const payload=JSON.parse(raw),event=req.headers['x-github-event'];
   let queued=false;
   if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)
-     && pullRequestAllowedPastFallbackGate(payload.repository?.full_name,
-       config.aiFallbackOnlyRepositories,config.aiProfferaPilotEnabled)) {
+     && (!repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories) ||
+       pilotBypassesFallbackGate(payload.repository?.full_name,config.aiProfferaPilotEnabled))) {
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
     const pilotRepo=isProffera(repo.full_name);

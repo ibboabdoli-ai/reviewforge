@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { isProffera,pilotCallLimit,PROFFERA_PILOT_KEY,reserveProfferaPilotCalls,effectiveReviewPostMode,pullRequestAllowedPastFallbackGate } from '../src/review-policy.mjs';
+import { isProffera,pilotCallLimit,PROFFERA_PILOT_KEY,reserveProfferaPilotCalls,effectiveReviewPostMode,pilotBypassesFallbackGate } from '../src/review-policy.mjs';
 
 function memoryDb(){
   const sql=new DatabaseSync(':memory:');
@@ -25,10 +25,9 @@ test('Proffera pilot cannot publish even when fallback approval is configured',(
 });
 
 test('an enabled Proffera pilot can receive Draft events through fallback-only gate',()=>{
-  const fallbackOnly=['ibboabdoli-ai/proffera','example/other'];
-  assert.equal(pullRequestAllowedPastFallbackGate('ibboabdoli-ai/Proffera',fallbackOnly,true),true);
-  assert.equal(pullRequestAllowedPastFallbackGate('ibboabdoli-ai/Proffera',fallbackOnly,false),false);
-  assert.equal(pullRequestAllowedPastFallbackGate('example/other',fallbackOnly,true),false);
+  assert.equal(pilotBypassesFallbackGate('ibboabdoli-ai/Proffera',true),true);
+  assert.equal(pilotBypassesFallbackGate('ibboabdoli-ai/Proffera',false),false);
+  assert.equal(pilotBypassesFallbackGate('example/other',true),false);
 });
 
 test('one-time pilot counter persists across days and blocks the eleventh batch',async()=>{

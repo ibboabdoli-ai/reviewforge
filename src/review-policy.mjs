@@ -46,9 +46,8 @@ export function pilotCallLimit(raw='0') {
 export function isProffera(repository) {
   return typeof repository==='string' && repository.toLowerCase()==='ibboabdoli-ai/proffera';
 }
-export function pullRequestAllowedPastFallbackGate(repository,fallbackOnly,pilotEnabled){
-  return !repositoryAllowed(repository,fallbackOnly) ||
-    (isProffera(repository)&&pilotEnabled===true);
+export function pilotBypassesFallbackGate(repository,pilotEnabled){
+  return isProffera(repository)&&pilotEnabled===true;
 }
 export async function reserveProfferaPilotCalls(db,dailyLimit,pilotLimit,at=Date.now(),count=1){
   if(!Number.isSafeInteger(pilotLimit)||pilotLimit<1||pilotLimit>10||
