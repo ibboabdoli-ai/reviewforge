@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { config } from './config.mjs';
 import { githubApi, installationToken, changedFiles, postReview } from './github.mjs';
 import { planReviewBatches, coverageSummary, validateFindings, reviewWithAI } from './reviewer.mjs';
-import { repositoryAllowed } from './review-policy.mjs';
+import { repositoryAllowed, isProffera } from './review-policy.mjs';
 import { selectReviewModel } from './model-router.mjs';
 import { collectReviewContext } from './review-context.mjs';
 
@@ -66,7 +66,10 @@ export async function analyzePullRequestStep({
 
   const planHash=createHash('sha256').update(JSON.stringify({
     headSha,postMode,allowDraft,batches,coverage,reviewContext,
-    modelPolicy:{
+     pilotPolicy:isProffera(repository)?{
+       enabled:config.aiProfferaPilotEnabled,limit:config.aiPilotMaxModelCalls
+     }:null,
+     modelPolicy:{
       auto:repositoryAllowed(repository,config.aiAutoModelRepositories),
       defaultModel:config.openai.model,
       fastModel:config.openai.modelFast,
@@ -94,9 +97,12 @@ export async function analyzePullRequestStep({
     if(deps.reserveModelCalls){
       const reservation=await deps.reserveModelCalls(batches.length);
       if(reservation!==true && reservation?.allowed!==true){
-        const insufficient=reservation?.reason==='requires-higher-cap';
-        return {status:insufficient?'partial':'deferred',posted:0,findings:[],coverage,
-          summary:insufficient
+         const insufficient=reservation?.reason==='requires-higher-cap';
+         const pilotStopped=reservation?.reason==='pilot-exhausted';
+         return {status:insufficient||pilotStopped?'partial':'deferred',posted:0,findings:[],coverage,
+           summary:pilotStopped
+             ?'Proffera pilot disabled or exhausted; no model calls made. Review incomplete.'
+             :insufficient
             ? 'The review needs '+batches.length+' model batches, exceeding the daily quota; no calls made.'
             : 'AI daily allowance exhausted; no calls made. Review deferred until the next UTC day.'};
       }
@@ -111,11 +117,17 @@ export async function analyzePullRequestStep({
   }
 
   if(next<batches.length){
+    // A saved reservation cannot bypass an emergency kill switch.
+    if(isProffera(repository) && (!config.aiProfferaPilotEnabled||config.aiPilotMaxModelCalls===0)) return {
+      status:'partial',posted:0,findings:[],coverage,
+      summary:'Proffera pilot disabled; no further model calls made. Review incomplete.'
+    };
     const batch=batches[next];
     const choice=modelChoice;
     const options={batchIndex:next+1,totalBatches:batches.length,
       ...(reviewContext?{reviewContext}:{}) ,
-      ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{})};
+       ...(choice?{model:choice.model,reasoningEffort:choice.effort,modelTier:choice.tier}:{}),
+       ...(isProffera(repository)?{profferaPilot:true}:{})};
     deps.onModelStart?.();
     let response;
     try{response=await (deps.reviewWithAI || reviewWithAI)(batch,options);}
