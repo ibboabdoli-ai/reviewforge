@@ -13,7 +13,8 @@ export function repositoryAllowed(name,allowlist) {
 }
 /** Force approved shadow repositories into a no-post review mode,
  * even if an operator changes the global posting setting. */
-export function effectiveReviewPostMode(repository,globalMode,shadowRepositories,{fallbackOnly=[],approval=[],allowed=[]}={}){
+export function effectiveReviewPostMode(repository,globalMode,shadowRepositories,{fallbackOnly=[],approval=[],allowed=[],forceDryRun=false}={}){
+  if(forceDryRun)return 'dry-run';
   // All four explicit allowlists must agree before this exception is allowed.
   // Quota evidence is checked BEFORE the job is enqueued.
   if(repositoryAllowed(repository,shadowRepositories)){
@@ -35,6 +36,34 @@ export function dailyRequestLimit(raw='1') {
   const limit=Number(raw);
   // Reject malformed, negative or excessive limits instead of falling back.
   return Number.isSafeInteger(limit) && limit>=0 && limit<=10 ? limit : 0;
+}
+// One persistent key across deployments: ten reserved model batches in total.
+export const PROFFERA_PILOT_KEY='pilot-proffera-20261127';
+export function pilotCallLimit(raw='0') {
+  const n=Number(raw);
+  return Number.isSafeInteger(n) && n>=0 && n<=10 ? n : 0;
+}
+export function isProffera(repository) {
+  return typeof repository==='string' && repository.toLowerCase()==='ibboabdoli-ai/proffera';
+}
+export function pilotBypassesFallbackGate(repository,pilotEnabled){
+  return isProffera(repository)&&pilotEnabled===true;
+}
+export async function reserveProfferaPilotCalls(db,dailyLimit,pilotLimit,at=Date.now(),count=1){
+  if(!Number.isSafeInteger(pilotLimit)||pilotLimit<1||pilotLimit>10||
+     !Number.isSafeInteger(count)||count<1||count>pilotLimit)
+    return {allowed:false,reason:'pilot-exhausted'};
+  if(!Number.isSafeInteger(dailyLimit)||dailyLimit<1||count>dailyLimit)
+    return {allowed:false,reason:'requires-higher-cap'};
+  // Reserve the lifetime cap first. A later daily-limit rejection can consume
+  // a pilot slot without a paid call; it can never overspend the pilot budget.
+  const row=await db.prepare(`INSERT INTO ai_daily_limits(day,used) VALUES(?,?)
+    ON CONFLICT(day) DO UPDATE SET used=ai_daily_limits.used+?
+    WHERE ai_daily_limits.used+? <= ? RETURNING used`)
+    .get(PROFFERA_PILOT_KEY,count,count,count,pilotLimit);
+  if(!row)return {allowed:false,reason:'pilot-exhausted'};
+  const daily=await reserveDailyReview(db,dailyLimit,at,count);
+  return daily?{allowed:true}:{allowed:false,reason:'daily-used'};
 }
 export async function reserveDailyReview(db,limit,at=Date.now(),count=1){
   if(!Number.isSafeInteger(limit)||limit<=0||

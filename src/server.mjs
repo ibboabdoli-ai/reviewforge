@@ -14,7 +14,7 @@ import { analyzePullRequestStep } from './incremental-review.mjs';
 import { checkout,portal,processStripeEvent } from './stripe.mjs';
 import * as ui from './ui.mjs';
 import { createLimiter } from './rate-limit.mjs';
-import { repositoryAllowed, reserveDailyReview, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
+import { repositoryAllowed, reserveDailyReview, reserveProfferaPilotCalls, isProffera, pilotBypassesFallbackGate, nextUtcDay, effectiveReviewPostMode, isUnlimitedShadowRepository } from './review-policy.mjs';
 import { retryState } from './queue-policy.mjs';
 
 assertConfig();
@@ -82,11 +82,16 @@ async function webhookGithub(req,res){
   const payload=JSON.parse(raw),event=req.headers['x-github-event'];
   let queued=false;
   if(event==='pull_request'&&['opened','synchronize','reopened','ready_for_review'].includes(payload.action)
-     && !repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories)) {
+     && (!repositoryAllowed(payload.repository?.full_name,config.aiFallbackOnlyRepositories) ||
+       pilotBypassesFallbackGate(payload.repository?.full_name,config.aiProfferaPilotEnabled))) {
     const pr=payload.pull_request,repo=payload.repository,inst=payload.installation;
     if(!pr||!repo||!inst){send(res,400,'Incomplete pull request event','text/plain');return;}
+    const pilotRepo=isProffera(repo.full_name);
     const installed=await db.prepare("SELECT * FROM installations WHERE id=? AND status='active'").get(inst.id);
-    if(installed && !pr.draft && integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories)){
+    if(installed && (!pilotRepo||config.aiProfferaPilotEnabled) &&
+       (!pr.draft||(pilotRepo&&config.aiProfferaPilotEnabled)) &&
+       integrations().ai && repositoryAllowed(repo.full_name,config.aiAllowedRepositories) &&
+       (!pilotRepo||repositoryAllowed(repo.full_name,config.aiShadowRepositories))){
       // Repository metadata is signed by GitHub. The installation is already bound to a legitimate user.
       await db.prepare(`INSERT INTO repositories(id,installation_id,name,full_name,html_url,private) VALUES(?,?,?,?,?,?)
         ON CONFLICT(id) DO NOTHING`).run(repo.id,inst.id,repo.name,repo.full_name,repo.html_url,repo.private?1:0);
@@ -99,10 +104,15 @@ async function webhookGithub(req,res){
       if(rr&&(allowance.used<allowance.limit||shadowUnlimited)){
         const row=await db.prepare(`INSERT INTO reviews(installation_id,repository_id,pr_number,pr_title,author,head_sha,status)
           VALUES(?,?,?,?,?,?,'queued') ON CONFLICT(repository_id,pr_number,head_sha) DO NOTHING`).run(inst.id,repo.id,pr.number,pr.title?.slice(0,250)||'',pr.user?.login||'',pr.head?.sha||'');
-        if(row.changes){
-          queued=true;
-          const r=await db.prepare('SELECT id FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,pr.number,pr.head.sha);
+        if(row.changes||pilotRepo){
+          const r=await db.prepare('SELECT id,status FROM reviews WHERE repository_id=? AND pr_number=? AND head_sha=?').get(repo.id,pr.number,pr.head.sha);
+          if(r?.status==='queued'){
+          // Record no-post before creating a runnable job. The worker also
+          // forces Proffera to dry-run even if deployment settings change.
+          if(pilotRepo)await db.prepare('INSERT OR IGNORE INTO manual_review_requests(review_id) VALUES(?)').run(r.id);
           await db.prepare('INSERT OR IGNORE INTO jobs(review_id) VALUES(?)').run(r.id);
+          queued=true;
+          }
         }
       }
     }
@@ -218,18 +228,20 @@ export async function processQueue(reviewId=null){
       unlimited:config.aiUnlimitedRepositories
     });
     const manual=await db.prepare('SELECT review_id FROM manual_review_requests WHERE review_id=?').get(job.id);
+    const pilotRepo=isProffera(job.full_name);
     // Durable no-post marker wins over any future global or fallback approval setting.
     const result=await analyzePullRequestStep({
       reviewId:Number(job.id),repository:job.full_name,
       number:job.pr_number,
       headSha:job.head_sha,
       installationId:job.installation_id,
-      postMode:manual?'dry-run':effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
+       postMode:manual?'dry-run':effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
+         forceDryRun:pilotRepo,
         fallbackOnly:config.aiFallbackOnlyRepositories,
         approval:config.aiFallbackApprovalRepositories,
         allowed:config.aiAllowedRepositories
       }),
-      allowDraft:!!manual
+       allowDraft:!!manual||pilotRepo
     },{
       loadProgress:async id=>db.prepare('SELECT * FROM review_progress WHERE review_id=?').get(id),
       initProgress:async({reviewId,planHash,totalBatches})=>{
@@ -244,6 +256,13 @@ export async function processQueue(reviewId=null){
       },
       onModelStart:()=>{modelCallsMayHaveStarted=true;},
       reserveModelCalls:async count=>{
+         if(pilotRepo){
+           const reserved=config.aiProfferaPilotEnabled
+             ?await reserveProfferaPilotCalls(db,config.aiDailyRequestLimit,config.aiPilotMaxModelCalls,Date.now(),count)
+             :{allowed:false,reason:'pilot-exhausted'};
+           if(reserved.allowed)modelCallsMayHaveStarted=true;
+           return reserved;
+         }
         // Explicitly approved shadow repositories bypass only daily attempts.
         // Each PR remains deduplicated by SHA and limited to four batches.
         if(shadowUnlimited){modelCallsMayHaveStarted=true;return {allowed:true};}
