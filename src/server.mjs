@@ -234,7 +234,8 @@ export async function processQueue(reviewId=null){
       number:job.pr_number,
       headSha:job.head_sha,
       installationId:job.installation_id,
-       postMode:manual||pilotRepo?'dry-run':effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
+       postMode:manual?'dry-run':effectiveReviewPostMode(job.full_name,config.reviewPostMode,config.aiShadowRepositories,{
+         forceDryRun:pilotRepo,
         fallbackOnly:config.aiFallbackOnlyRepositories,
         approval:config.aiFallbackApprovalRepositories,
         allowed:config.aiAllowedRepositories

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { isProffera,pilotCallLimit,PROFFERA_PILOT_KEY,reserveProfferaPilotCalls } from '../src/review-policy.mjs';
+import { isProffera,pilotCallLimit,PROFFERA_PILOT_KEY,reserveProfferaPilotCalls,effectiveReviewPostMode } from '../src/review-policy.mjs';
 
 function memoryDb(){
   const sql=new DatabaseSync(':memory:');
@@ -15,6 +15,13 @@ test('pilot is exact-repository and defaults closed',()=>{
   assert.equal(pilotCallLimit(''),0);
   assert.equal(pilotCallLimit('11'),0);
   assert.equal(pilotCallLimit('10'),10);
+});
+
+test('Proffera pilot cannot publish even when fallback approval is configured',()=>{
+  const repository='ibboabdoli-ai/Proffera',list=[repository.toLowerCase()];
+  assert.equal(effectiveReviewPostMode(repository,'live',list,{
+    fallbackOnly:list,approval:list,allowed:list,forceDryRun:true
+  }),'dry-run');
 });
 
 test('one-time pilot counter persists across days and blocks the eleventh batch',async()=>{

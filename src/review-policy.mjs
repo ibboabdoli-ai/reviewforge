@@ -13,7 +13,8 @@ export function repositoryAllowed(name,allowlist) {
 }
 /** Force approved shadow repositories into a no-post review mode,
  * even if an operator changes the global posting setting. */
-export function effectiveReviewPostMode(repository,globalMode,shadowRepositories,{fallbackOnly=[],approval=[],allowed=[]}={}){
+export function effectiveReviewPostMode(repository,globalMode,shadowRepositories,{fallbackOnly=[],approval=[],allowed=[],forceDryRun=false}={}){
+  if(forceDryRun)return 'dry-run';
   // All four explicit allowlists must agree before this exception is allowed.
   // Quota evidence is checked BEFORE the job is enqueued.
   if(repositoryAllowed(repository,shadowRepositories)){
