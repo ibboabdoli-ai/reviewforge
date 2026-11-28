@@ -46,10 +46,16 @@ export function pilotCallLimit(raw='0') {
 export function isProffera(repository) {
   return typeof repository==='string' && repository.toLowerCase()==='ibboabdoli-ai/proffera';
 }
+export function pullRequestAllowedPastFallbackGate(repository,fallbackOnly,pilotEnabled){
+  return !repositoryAllowed(repository,fallbackOnly) ||
+    (isProffera(repository)&&pilotEnabled===true);
+}
 export async function reserveProfferaPilotCalls(db,dailyLimit,pilotLimit,at=Date.now(),count=1){
   if(!Number.isSafeInteger(pilotLimit)||pilotLimit<1||pilotLimit>10||
      !Number.isSafeInteger(count)||count<1||count>pilotLimit)
     return {allowed:false,reason:'pilot-exhausted'};
+  if(!Number.isSafeInteger(dailyLimit)||dailyLimit<1||count>dailyLimit)
+    return {allowed:false,reason:'requires-higher-cap'};
   // Reserve the lifetime cap first. A later daily-limit rejection can consume
   // a pilot slot without a paid call; it can never overspend the pilot budget.
   const row=await db.prepare(`INSERT INTO ai_daily_limits(day,used) VALUES(?,?)
